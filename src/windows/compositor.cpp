@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <stdexcept>
 
 namespace asc::win {
 namespace {
@@ -51,7 +52,10 @@ ComPtr<ID3DBlob> compile(const char* entry, const char* target) {
 }
 
 Compositor::Compositor(D3DDevice& d3d, const Size output_size, const std::uint32_t placeholder_color)
-    : d3d_(d3d), output_size_(output_size), placeholder_color_(placeholder_color | 0xff000000u) { create_resources(); }
+    : d3d_(d3d), output_size_(output_size), placeholder_color_(placeholder_color | 0xff000000u) {
+    if (output_size_.width == 0 || output_size_.height == 0) throw std::invalid_argument("compositor output size must be non-zero");
+    create_resources();
+}
 
 void Compositor::create_resources() {
     const auto vs = compile("vertexMain", "vs_5_0");
@@ -94,29 +98,37 @@ std::pair<std::array<float, 4>, std::array<float, 4>> Compositor::transform(cons
     return {rect, uv};
 }
 
-Compositor::SourceView Compositor::sampled(const VideoFrame& frame) {
-    SourceView result;
-    if (!frame.valid()) result.texture = placeholder_;
-    else result.texture = frame.texture;
-    if (FAILED(d3d_.device()->CreateShaderResourceView(result.texture.Get(), nullptr, &result.view))) {
-        D3D11_TEXTURE2D_DESC desc{};
-        result.texture->GetDesc(&desc);
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE; desc.MiscFlags = 0; desc.Usage = D3D11_USAGE_DEFAULT; desc.CPUAccessFlags = 0;
-        ComPtr<ID3D11Texture2D> copy;
-        check_hresult(d3d_.device()->CreateTexture2D(&desc, nullptr, &copy), "Create sampleable frame copy");
-        d3d_.context()->CopyResource(copy.Get(), result.texture.Get());
-        result.texture = copy;
-        check_hresult(d3d_.device()->CreateShaderResourceView(result.texture.Get(), nullptr, &result.view), "Create frame shader view");
+Compositor::SourceView Compositor::sampled(const VideoFrame& frame, const std::size_t cache_index) {
+    auto& cached = source_cache_[cache_index];
+    ComPtr<ID3D11Texture2D> source = frame.valid() ? frame.texture : placeholder_;
+    if (cached.source.Get() == source.Get() && cached.sampled.view) {
+        if (cached.copied) d3d_.context()->CopyResource(cached.sampled.texture.Get(), source.Get());
+        return cached.sampled;
     }
-    return result;
+    cached = {};
+    cached.source = source;
+    cached.sampled.texture = source;
+    if (FAILED(d3d_.device()->CreateShaderResourceView(source.Get(), nullptr, &cached.sampled.view))) {
+        D3D11_TEXTURE2D_DESC desc{};
+        source->GetDesc(&desc);
+        if (desc.ArraySize != 1 || desc.MipLevels != 1 || desc.SampleDesc.Count != 1)
+            throw std::runtime_error("compositor source is not a supported 2D texture");
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE; desc.MiscFlags = 0; desc.Usage = D3D11_USAGE_DEFAULT; desc.CPUAccessFlags = 0;
+        cached.sampled.texture.Reset();
+        check_hresult(d3d_.device()->CreateTexture2D(&desc, nullptr, &cached.sampled.texture), "Create sampleable frame copy");
+        d3d_.context()->CopyResource(cached.sampled.texture.Get(), source.Get());
+        check_hresult(d3d_.device()->CreateShaderResourceView(cached.sampled.texture.Get(), nullptr, &cached.sampled.view), "Create frame shader view");
+        cached.copied = true;
+    }
+    return cached.sampled;
 }
 
 VideoFrame Compositor::compose(const VideoFrame& camera, const VideoFrame& screen, const VideoFrame& previous_screen,
                                const double screen_switch_mix, const double screen_mix,
                                const ScalingMode camera_scaling, const ScalingMode screen_scaling, const std::int64_t timestamp_100ns) {
-    const auto camera_view = sampled(camera);
-    const auto previous_screen_view = sampled(previous_screen.valid() ? previous_screen : screen);
-    const auto screen_view = sampled(screen);
+    const auto camera_view = sampled(camera, 0);
+    const auto previous_screen_view = sampled(previous_screen.valid() ? previous_screen : screen, 1);
+    const auto screen_view = sampled(screen, 2);
     const auto [camera_rect, camera_uv] = transform(camera.valid() ? camera.size : output_size_, output_size_, camera_scaling);
     const auto [previous_screen_rect, previous_screen_uv] = transform(previous_screen.valid() ? previous_screen.size :
                                                                       screen.valid() ? screen.size : output_size_, output_size_, screen_scaling);
@@ -152,7 +164,15 @@ VideoFrame Compositor::compose(const VideoFrame& camera, const VideoFrame& scree
     return {output_, output_size_, DXGI_FORMAT_B8G8R8A8_UNORM, std::chrono::steady_clock::now(), timestamp_100ns};
 }
 
-void Compositor::reset() { vertex_shader_.Reset(); pixel_shader_.Reset(); sampler_.Reset(); constants_.Reset(); output_.Reset(); output_view_.Reset(); placeholder_.Reset(); create_resources(); }
-void Compositor::reconfigure(const Size output_size) { output_size_ = output_size; reset(); }
+void Compositor::reset() {
+    source_cache_ = {};
+    vertex_shader_.Reset(); pixel_shader_.Reset(); sampler_.Reset(); constants_.Reset(); output_.Reset(); output_view_.Reset(); placeholder_.Reset();
+    create_resources();
+}
+void Compositor::reconfigure(const Size output_size) {
+    if (output_size.width == 0 || output_size.height == 0) throw std::invalid_argument("compositor output size must be non-zero");
+    output_size_ = output_size;
+    reset();
+}
 
 } // namespace asc::win

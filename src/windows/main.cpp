@@ -13,7 +13,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         media_foundation_started = true;
         int argument_count = 0;
         auto arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
-        if (argument_count > 1 && std::wstring_view(arguments[1]) == L"--remove-virtual-camera") {
+        if (!arguments) asc::win::check_hresult(HRESULT_FROM_WIN32(GetLastError()), "Parse command line");
+        if (argument_count < 1 || argument_count > 2 ||
+            (argument_count == 2 && std::wstring_view(arguments[1]) != L"--remove-virtual-camera")) {
+            LocalFree(arguments);
+            throw std::invalid_argument("unsupported command-line arguments");
+        }
+        if (argument_count == 2) {
             asc::win::VirtualCamera::remove_registration();
             LocalFree(arguments);
             MFShutdown();

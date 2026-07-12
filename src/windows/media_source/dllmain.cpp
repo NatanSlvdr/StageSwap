@@ -26,9 +26,11 @@ public:
 
 HRESULT register_server(const bool install) {
     wchar_t module_path[MAX_PATH]{};
-    if (!GetModuleFileNameW(module_handle, module_path, ARRAYSIZE(module_path))) return HRESULT_FROM_WIN32(GetLastError());
+    const DWORD module_length = GetModuleFileNameW(module_handle, module_path, ARRAYSIZE(module_path));
+    if (module_length == 0) return HRESULT_FROM_WIN32(GetLastError());
+    if (module_length >= ARRAYSIZE(module_path)) return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
     wchar_t clsid[64]{};
-    StringFromGUID2(CLSID_AutomaticScreenCameraSource, clsid, ARRAYSIZE(clsid));
+    if (StringFromGUID2(CLSID_AutomaticScreenCameraSource, clsid, ARRAYSIZE(clsid)) == 0) return E_UNEXPECTED;
     const std::wstring key_path = std::wstring(L"Software\\Classes\\CLSID\\") + clsid;
     if (!install) {
         const auto status = RegDeleteTreeW(HKEY_LOCAL_MACHINE, key_path.c_str());
@@ -37,19 +39,32 @@ HRESULT register_server(const bool install) {
     HKEY class_key = nullptr;
     auto status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, key_path.c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &class_key, nullptr);
     if (status != ERROR_SUCCESS) return HRESULT_FROM_WIN32(status);
+    const auto registration_failed = [&](const LSTATUS error, HKEY server_key = nullptr) {
+        if (server_key) RegCloseKey(server_key);
+        RegCloseKey(class_key);
+        RegDeleteTreeW(HKEY_LOCAL_MACHINE, key_path.c_str());
+        return HRESULT_FROM_WIN32(error);
+    };
     const wchar_t friendly[] = L"Automatic Screen Camera Media Source";
-    RegSetValueExW(class_key, nullptr, 0, REG_SZ, reinterpret_cast<const BYTE*>(friendly), sizeof(friendly));
+    status = RegSetValueExW(class_key, nullptr, 0, REG_SZ, reinterpret_cast<const BYTE*>(friendly), sizeof(friendly));
+    if (status != ERROR_SUCCESS) return registration_failed(status);
     HKEY server_key = nullptr;
     status = RegCreateKeyExW(class_key, L"InprocServer32", 0, nullptr, 0, KEY_WRITE, nullptr, &server_key, nullptr);
-    if (status == ERROR_SUCCESS) {
-        RegSetValueExW(server_key, nullptr, 0, REG_SZ, reinterpret_cast<const BYTE*>(module_path),
-                       static_cast<DWORD>((wcslen(module_path) + 1) * sizeof(wchar_t)));
-        const wchar_t threading[] = L"Both";
-        RegSetValueExW(server_key, L"ThreadingModel", 0, REG_SZ, reinterpret_cast<const BYTE*>(threading), sizeof(threading));
-        RegCloseKey(server_key);
+    if (status != ERROR_SUCCESS) return registration_failed(status);
+    status = RegSetValueExW(server_key, nullptr, 0, REG_SZ, reinterpret_cast<const BYTE*>(module_path),
+                            static_cast<DWORD>((module_length + 1) * sizeof(wchar_t)));
+    if (status != ERROR_SUCCESS) return registration_failed(status, server_key);
+    const wchar_t threading[] = L"Both";
+    status = RegSetValueExW(server_key, L"ThreadingModel", 0, REG_SZ, reinterpret_cast<const BYTE*>(threading), sizeof(threading));
+    if (status != ERROR_SUCCESS) return registration_failed(status, server_key);
+    status = RegCloseKey(server_key);
+    if (status != ERROR_SUCCESS) return registration_failed(status);
+    status = RegCloseKey(class_key);
+    if (status != ERROR_SUCCESS) {
+        RegDeleteTreeW(HKEY_LOCAL_MACHINE, key_path.c_str());
+        return HRESULT_FROM_WIN32(status);
     }
-    RegCloseKey(class_key);
-    return HRESULT_FROM_WIN32(status);
+    return S_OK;
 }
 }
 

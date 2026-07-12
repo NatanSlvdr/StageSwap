@@ -217,5 +217,6 @@ void AppController::set_tracked_monitor(MonitorIdentity monitor) {
 }
 
 AppStatus AppController::status() const { std::scoped_lock lock(mutex_); return status_; }
+AppConfig AppController::config() const { std::scoped_lock lock(mutex_); return config_; }
 
 } // namespace asc

@@ -3,6 +3,7 @@
 #include "common.hpp"
 #include <mfidl.h>
 #include <wrl/implements.h>
+#include <mutex>
 
 namespace asc::win::source {
 
@@ -45,9 +46,10 @@ public:
     STDMETHODIMP CopyAllItems(IMFAttributes* destination) override;
 
 private:
+    std::mutex mutex_;
+    HRESULT initialization_result_{E_UNEXPECTED};
     ComPtr<IMFAttributes> attributes_;
     ComPtr<IMFMediaSource> active_source_;
 };
 
 } // namespace asc::win::source
-

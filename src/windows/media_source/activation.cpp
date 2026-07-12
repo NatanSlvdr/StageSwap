@@ -2,26 +2,42 @@
 #include "media_source.hpp"
 
 #include <mfapi.h>
+#include <new>
 
 namespace asc::win::source {
 
-Activation::Activation() { MFCreateAttributes(&attributes_, 4); }
+Activation::Activation() { initialization_result_ = MFCreateAttributes(&attributes_, 4); }
 
 HRESULT Activation::ActivateObject(const REFIID riid, void** object) {
     if (!object) return E_POINTER;
     *object = nullptr;
+    std::scoped_lock lock(mutex_);
+    if (FAILED(initialization_result_)) return initialization_result_;
+    if (active_source_) return active_source_->QueryInterface(riid, object);
     auto source = Microsoft::WRL::Make<MediaSource>();
     if (!source) return E_OUTOFMEMORY;
-    auto result = source->initialize(attributes_.Get());
+    HRESULT result = S_OK;
+    try { result = source->initialize(attributes_.Get()); }
+    catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+    catch (...) { return E_UNEXPECTED; }
     if (FAILED(result)) return result;
     result = source.As(&active_source_);
     if (FAILED(result)) return result;
     return active_source_->QueryInterface(riid, object);
 }
-HRESULT Activation::ShutdownObject() { if (active_source_) active_source_->Shutdown(); return S_OK; }
-HRESULT Activation::DetachObject() { if (active_source_) active_source_->Shutdown(); active_source_.Reset(); return S_OK; }
+HRESULT Activation::ShutdownObject() {
+    std::scoped_lock lock(mutex_);
+    const auto result = active_source_ ? active_source_->Shutdown() : S_OK;
+    active_source_.Reset();
+    return result;
+}
+HRESULT Activation::DetachObject() {
+    std::scoped_lock lock(mutex_);
+    active_source_.Reset();
+    return S_OK;
+}
 
-#define ASC_ATTR_DELEGATE(method, signature, args) HRESULT Activation::method signature { return attributes_->method args; }
+#define ASC_ATTR_DELEGATE(method, signature, args) HRESULT Activation::method signature { return attributes_ ? attributes_->method args : initialization_result_; }
 ASC_ATTR_DELEGATE(GetItem, (REFGUID k, PROPVARIANT* v), (k, v))
 ASC_ATTR_DELEGATE(GetItemType, (REFGUID k, MF_ATTRIBUTE_TYPE* v), (k, v))
 ASC_ATTR_DELEGATE(CompareItem, (REFGUID k, REFPROPVARIANT v, BOOL* r), (k, v, r))

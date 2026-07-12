@@ -7,9 +7,15 @@
 #include <string>
 #include <cstdint>
 #include <atomic>
+#include <memory>
 #include <mutex>
 
 namespace asc::win {
+
+struct VirtualCameraCallbackState {
+    std::atomic<bool> running{false};
+    std::atomic<std::uint64_t> generation{0};
+};
 
 class VirtualCamera {
 public:
@@ -19,7 +25,7 @@ public:
     void stop() noexcept;
     void restart();
     static void remove_registration();
-    [[nodiscard]] bool running() const noexcept { return running_.load(); }
+    [[nodiscard]] bool running() const noexcept { return callback_state_->running.load(); }
     [[nodiscard]] const std::wstring& symbolic_link() const noexcept { return symbolic_link_; }
 
 private:
@@ -30,8 +36,7 @@ private:
     std::wstring symbolic_link_;
     std::wstring pipe_name_;
     std::uint32_t placeholder_color_{0xff171719u};
-    std::atomic<bool> running_{false};
-    std::atomic<std::uint64_t> event_generation_{0};
+    std::shared_ptr<VirtualCameraCallbackState> callback_state_{std::make_shared<VirtualCameraCallbackState>()};
     std::mutex mutex_;
 };
 

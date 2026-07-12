@@ -37,8 +37,19 @@ This matrix tracks the original specification against authoritative evidence in 
 | Windows login, sleep/unlock/display recovery | startup registry and Win32 lifecycle handlers | Implemented; lifecycle test pending |
 | Windows 11 virtual camera visible to Teams/Zoom/Discord/WebRTC | `MFCreateVirtualCamera`, COM media source, RGB32/NV12 1080p/720p | Unproven until Windows consumer matrix passes |
 | Long-run resource stability | bounded newest-frame storage, reusable textures/buffers, rotating logs | Design evidence only; 24-hour test pending |
+| Reproducible Windows build | `CMakePresets.json`; Visual Studio 2022 x64 and Windows SDK 10.0.22621.0 presets; static MSVC runtime | Debug/Release hosted runs pending |
+| Warning-clean and sanitizer CI | `ASC_WARNINGS_AS_ERRORS`, `ASC_ENABLE_SANITIZERS`, `.github/workflows/windows.yml` | Configured; hosted evidence pending |
+| Release packaging and integrity | `scripts/package.ps1`; EXE, DLL, PDBs, installer scripts, JUnit results, metadata, and SHA-256 manifests | Configured; package install cycle pending |
+| Release qualification | `docs/RELEASE_GATES.md`; hosted and persistent interactive Windows/Zoom gates | Not satisfied until all recorded gates pass |
+| Webcam fallback and reconnect safety | `video_format.hpp`, `VideoInput` ranked native formats, MF conversion, callback proxy/drain, preserved symbolic link | Portable ranking passes; UVC unplug/replug pending |
+| Serialized capture lifecycle | `App::lifecycle_mutex_`, `compositor_mutex_`; `ScreenCapture` callback generation/drain | Implemented; concurrent Windows fault injection pending |
+| Frame Server media-source compliance | synchronized `MediaSource`/`MediaStream`; validated `SetD3DManager`; 2D RGB32/NV12 buffers; QPC pacing | Implemented; Zoom/open-close/cadence gates pending |
+| IPC and frame-path performance | triple-buffered GPU readback, cached scale maps/SRVs, same-size copies, preallocated vectors | Implemented; VM CPU/resource gates pending |
+| Independent release probes | `asc_test_screen_fixture`, `asc_mf_output_probe`, environment collector and gate evaluator | Built separately from production; interactive execution pending |
+| RGB/NV12 conversion safety | shared `pixel_conversion.hpp` production helper; exact-color, padded-stride, truncation, and no-write-on-error tests | Portable ASan/UBSan tests pass; Windows 2D-buffer path pending |
+| IPC packet validation | shared `shared_frame_validation.hpp`; overflow/size/stride/invalidation tests | Portable ASan/UBSan tests pass; named-pipe fault injection pending |
+| State/configuration concurrency | `AppController` synchronized snapshot API and four-thread mutation/snapshot stress test | Portable ASan/UBSan/TSan tests pass |
 
 ## Current completion gate
 
-The portable control plane and persistence tests pass locally. Completion still requires a Windows 11 SDK build followed by the physical acceptance procedure in `docs/ACCEPTANCE_TESTS.md`, including consumer compatibility and the 24-hour stability run.
-
+The portable control plane and persistence tests pass locally. The build, CI, packaging, and verification-tool infrastructure is present, but completion still requires clean hosted Windows evidence and the persistent interactive procedure in `docs/RELEASE_GATES.md`. No 95% reliability claim is justified until the Windows/Zoom gates, including two consecutive 24-hour soaks, pass for the recorded release environment.

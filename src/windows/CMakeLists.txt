@@ -20,7 +20,9 @@ target_compile_definitions(AutomaticScreenCamera PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
     WINVER=0x0A00 _WIN32_WINNT=0x0A00
 )
-target_compile_options(AutomaticScreenCamera PRIVATE /W4 /permissive- /EHsc /await:strict)
+asc_enable_project_warnings(AutomaticScreenCamera)
+target_compile_options(AutomaticScreenCamera PRIVATE /await:strict $<$<CONFIG:Release>:/Zi>)
+target_link_options(AutomaticScreenCamera PRIVATE $<$<CONFIG:Release>:/DEBUG:FULL>)
 target_link_libraries(AutomaticScreenCamera PRIVATE
     asc_core
     d3d11 dxgi d3dcompiler

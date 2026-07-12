@@ -4,6 +4,8 @@
 #include "video_frame.hpp"
 #include "asc/core/image.hpp"
 
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <winrt/Windows.Graphics.Capture.h>
@@ -24,8 +26,13 @@ public:
 
 private:
     void on_frame(winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& sender,
-                  winrt::Windows::Foundation::IInspectable const&);
+                  winrt::Windows::Foundation::IInspectable const&, std::uint64_t generation);
     D3DDevice& d3d_;
+    std::atomic<bool> running_{false};
+    std::atomic<std::uint64_t> generation_{0};
+    // Closing a frame pool prevents new callbacks; this gate drains one that
+    // already started before capture/D3D resources are released.
+    std::mutex callback_mutex_;
     mutable std::mutex mutex_;
     VideoFrame latest_;
     ComPtr<ID3D11Texture2D> capture_texture_;

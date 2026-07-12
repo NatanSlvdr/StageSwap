@@ -1,6 +1,6 @@
 # Windows acceptance tests
 
-Run these on Windows 11 build 22000 or later with camera privacy access enabled. Install the Release build using an elevated PowerShell session, then launch the app normally as the target user.
+Run these on the exact Windows 11 x64, Zoom, webcam, driver, SDK, and artifact versions named in the release report, with camera privacy access enabled. Build 22000 is the API minimum, not the breadth of the reliability claim. Install the Release build using an elevated PowerShell session, then launch the app normally as the target user.
 
 ## Functional switching
 
@@ -40,4 +40,3 @@ Run these on Windows 11 build 22000 or later with camera privacy access enabled.
 - Loss confirmation: three checks; restore confirmation: five checks.
 - Fade: 500 ms default, approximately 15 frames at 30 fps.
 - End-to-end reference loss to completed switch: normally under 1.5 seconds.
-

@@ -1,0 +1,116 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-x64-base",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "toolset": "host=x64",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_VERSION": "10.0.22621.0",
+        "ASC_BUILD_TESTS": "ON",
+        "ASC_BUILD_WINDOWS_APP": "ON",
+        "ASC_BUILD_WINDOWS_TEST_TOOLS": "ON",
+        "ASC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "windows-x64-debug",
+      "displayName": "Windows x64 Debug (VS 2022, SDK 22621)",
+      "inherits": "windows-x64-base",
+      "binaryDir": "${sourceDir}/out/build/windows-x64-debug"
+    },
+    {
+      "name": "windows-x64-release",
+      "displayName": "Windows x64 Release (VS 2022, SDK 22621)",
+      "inherits": "windows-x64-base",
+      "binaryDir": "${sourceDir}/out/build/windows-x64-release"
+    },
+    {
+      "name": "portable-asan",
+      "displayName": "Portable core tests with ASan/UBSan",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/portable-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ASC_BUILD_TESTS": "ON",
+        "ASC_BUILD_WINDOWS_APP": "OFF",
+        "ASC_BUILD_WINDOWS_TEST_TOOLS": "OFF",
+        "ASC_WARNINGS_AS_ERRORS": "ON",
+        "ASC_ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "portable-tsan",
+      "displayName": "Portable core concurrency tests with TSan",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/portable-tsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ASC_BUILD_TESTS": "ON",
+        "ASC_BUILD_WINDOWS_APP": "OFF",
+        "ASC_BUILD_WINDOWS_TEST_TOOLS": "OFF",
+        "ASC_WARNINGS_AS_ERRORS": "ON",
+        "ASC_ENABLE_THREAD_SANITIZER": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-x64-debug",
+      "configurePreset": "windows-x64-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-x64-release",
+      "configurePreset": "windows-x64-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "portable-asan",
+      "configurePreset": "portable-asan"
+    },
+    {
+      "name": "portable-tsan",
+      "configurePreset": "portable-tsan"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-x64-debug",
+      "configurePreset": "windows-x64-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-x64-release",
+      "configurePreset": "windows-x64-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "portable-asan",
+      "configurePreset": "portable-asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "portable-tsan",
+      "configurePreset": "portable-tsan",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

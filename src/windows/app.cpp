@@ -173,7 +173,11 @@ void App::stop_automation() {
     log_.write(LogLevel::info, "detector", "DETECTION_STOPPED", "Automatic detection stopped");
 }
 
-void App::set_mode(const OutputMode mode) { controller_->set_mode(mode, Clock::now()); save_config(); }
+void App::set_mode(const OutputMode mode) {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+    controller_->set_mode(mode, Clock::now());
+    save_config();
+}
 
 void App::compositor_loop(const std::stop_token stop) {
     const auto frame_period = std::chrono::nanoseconds{1'000'000'000 / std::max(1u, config_.output_fps)};
@@ -206,10 +210,14 @@ void App::compositor_loop(const std::stop_token stop) {
             const auto now = Clock::now();
             if (camera.valid() && now - camera.received_at > 1s) camera = {};
             if (!using_safe_screen && screen.valid() && now - screen.received_at > 1s) screen = {};
-            const auto frame = compositor_.compose(camera, screen, previous_screen, screen_switch_mix, state.transition.screen_mix,
-                                                   config_.camera_scaling, config_.screen_scaling, timestamp);
-            { std::scoped_lock lock(component_mutex_); final_output_frame_ = frame; }
-            publisher_.publish(frame);
+            VideoFrame frame;
+            {
+                std::scoped_lock compositor_lock(compositor_mutex_);
+                frame = compositor_.compose(camera, screen, previous_screen, screen_switch_mix, state.transition.screen_mix,
+                                            config_.camera_scaling, config_.screen_scaling, timestamp);
+                { std::scoped_lock lock(component_mutex_); final_output_frame_ = frame; }
+                publisher_.publish(frame);
+            }
             ++frames_published_;
             timestamp += 10'000'000 / std::max(1u, config_.output_fps);
         } catch (const std::exception& e) { report_error("compositor", "COMPOSITOR_FRAME_FAILED", e); }
@@ -277,23 +285,30 @@ void App::recovery_loop(const std::stop_token stop) {
         try {
             const auto removed = d3d_.device()->GetDeviceRemovedReason();
             if (FAILED(removed)) {
+                std::scoped_lock lifecycle_lock(lifecycle_mutex_);
                 ++recovery_attempts_;
                 publisher_.invalidate();
                 log_.write(LogLevel::warning, "recovery", "GRAPHICS_DEVICE_LOST", "Graphics device was reset; rebuilding video components",
                            std::string("{\"hresult\":") + std::to_string(removed) + "}");
-                std::scoped_lock lock(component_mutex_);
-                screen_capture_.stop(); video_input_.stop();
-                previous_screen_frame_ = {}; safe_screen_frame_ = {}; final_output_frame_ = {};
-                d3d_.reset_after_device_loss(); compositor_.reset(); publisher_.reset_device();
+                {
+                    // Keep compositor output, publisher readbacks, and component
+                    // textures on the same D3D generation during the reset.
+                    std::scoped_lock compositor_lock(compositor_mutex_);
+                    std::scoped_lock lock(component_mutex_);
+                    screen_capture_.stop(); video_input_.stop();
+                    previous_screen_frame_ = {}; safe_screen_frame_ = {}; final_output_frame_ = {};
+                    d3d_.reset_after_device_loss(); compositor_.reset(); publisher_.reset_device();
+                }
                 bool video_recovered = false;
                 if (!config_.selected_video_device_id.empty()) {
-                    video_input_.start(config_.selected_video_device_id, config_.preferred_input_size, config_.preferred_input_fps);
+                    { std::scoped_lock lock(component_mutex_);
+                      video_input_.start(config_.selected_video_device_id, config_.preferred_input_size, config_.preferred_input_fps); }
                     video_recovered = wait_for_valid_frame([this] { return video_input_.latest_frame(); });
                 }
                 const auto monitors = enumerate_monitors();
                 bool screen_recovered = false;
                 if (const auto selected = resolve_tracked_monitor(monitors)) {
-                    screen_capture_.start(selected->handle, config_.cursor_visible);
+                    { std::scoped_lock lock(component_mutex_); screen_capture_.start(selected->handle, config_.cursor_visible); }
                     screen_recovered = wait_for_valid_frame([this] { return screen_capture_.latest_frame(); });
                 }
                 controller_->set_component_state(Source::camera, config_.selected_video_device_id.empty() ? DeviceState::unavailable :
@@ -328,6 +343,7 @@ void App::recovery_loop(const std::stop_token stop) {
 }
 
 void App::full_monitor_scan() {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     ++full_scans_;
     log_.write(LogLevel::info, "monitors", "FULL_SCAN_STARTED", "Full display scan started");
     const auto monitors = enumerate_monitors();
@@ -390,6 +406,7 @@ void App::set_current_screen_reference() {
         for (int i = 0; i < 30 && !stop.stop_requested(); ++i) std::this_thread::sleep_for(100ms);
         if (stop.stop_requested()) return;
         try {
+            std::scoped_lock lifecycle_lock(lifecycle_mutex_);
             const auto monitors = enumerate_monitors();
             const auto selected = resolve_tracked_monitor(monitors);
             if (!selected) throw std::runtime_error("no monitor is available for the reference capture");
@@ -420,6 +437,7 @@ void App::set_reference_monitor(const MonitorIdentity& monitor) {
 }
 
 void App::select_tracked_monitor(const MonitorIdentity& monitor) {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     const auto available = enumerate_monitors();
     const auto found = std::find_if(available.begin(), available.end(), [&](const auto& value) { return same_monitor(value.identity, monitor); });
     if (found == available.end()) throw std::runtime_error("selected monitor is no longer connected");
@@ -435,6 +453,7 @@ void App::select_tracked_monitor(const MonitorIdentity& monitor) {
 }
 
 void App::import_reference(const std::filesystem::path& source) {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     try {
         const auto thumbnail = reference_store_.import_image(source, config_store_.reference_path());
         { std::scoped_lock reference_lock(reference_mutex_); reference_thumbnail_ = thumbnail; save_reference_thumbnail(reference_thumbnail_); }
@@ -445,30 +464,46 @@ void App::import_reference(const std::filesystem::path& source) {
 
 void App::request_rescan() { rescan_requested_ = true; }
 void App::restart_video_input() {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     ++recovery_attempts_;
     log_.write(LogLevel::info, "recovery", "VIDEO_INPUT_RECOVERY_STARTED", "Restarting selected video input");
-    try { std::scoped_lock lock(component_mutex_); video_input_.restart();
+    if (config_.selected_video_device_id.empty()) {
+        { std::scoped_lock lock(component_mutex_); video_input_.stop(); }
+        controller_->set_component_state(Source::camera, DeviceState::unavailable, Clock::now());
+        log_.write(LogLevel::info, "recovery", "VIDEO_INPUT_UNAVAILABLE", "No video input is selected");
+        return;
+    }
+    try { { std::scoped_lock lock(component_mutex_); video_input_.restart(); }
           if (!wait_for_valid_frame([this] { return video_input_.latest_frame(); })) throw std::runtime_error("video input did not produce a valid frame");
           controller_->set_component_state(Source::camera, DeviceState::ready, Clock::now());
           log_.write(LogLevel::info, "recovery", "VIDEO_INPUT_RECOVERED", "Video input restarted"); }
     catch (const std::exception& e) { controller_->set_component_state(Source::camera, DeviceState::failed, Clock::now()); report_error("recovery", "VIDEO_INPUT_RECOVERY_FAILED", e); }
 }
 void App::restart_screen_capture() {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     ++recovery_attempts_;
     log_.write(LogLevel::info, "recovery", "SCREEN_CAPTURE_RECOVERY_STARTED", "Restarting tracked screen capture");
     try { const auto monitors = enumerate_monitors(); const auto selected = resolve_tracked_monitor(monitors); if (!selected) throw std::runtime_error("no monitor available");
-          std::scoped_lock lock(component_mutex_); screen_capture_.start(selected->handle, config_.cursor_visible);
+          { std::scoped_lock lock(component_mutex_); screen_capture_.start(selected->handle, config_.cursor_visible); }
           if (!wait_for_valid_frame([this] { return screen_capture_.latest_frame(); })) throw std::runtime_error("screen capture did not produce a valid frame");
           controller_->set_component_state(Source::screen, DeviceState::ready, Clock::now()); log_.write(LogLevel::info, "recovery", "SCREEN_CAPTURE_RECOVERED", "Screen capture restarted"); }
     catch (const std::exception& e) { controller_->set_component_state(Source::screen, DeviceState::failed, Clock::now()); report_error("recovery", "SCREEN_CAPTURE_RECOVERY_FAILED", e); }
 }
 void App::restart_virtual_camera() {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     ++recovery_attempts_;
     log_.write(LogLevel::info, "recovery", "VIRTUAL_CAMERA_RECOVERY_STARTED", "Restarting virtual camera");
     try { virtual_camera_.restart(); controller_->set_virtual_camera_state(DeviceState::ready); log_.write(LogLevel::info, "recovery", "VIRTUAL_CAMERA_RECOVERED", "Virtual camera restarted"); }
     catch (const std::exception& e) { controller_->set_virtual_camera_state(DeviceState::failed); report_error("recovery", "VIRTUAL_CAMERA_RECOVERY_FAILED", e); }
 }
-void App::restart_all() { restart_video_input(); restart_screen_capture(); compositor_.reset(); restart_virtual_camera(); request_rescan(); }
+void App::restart_all() {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+    restart_video_input();
+    restart_screen_capture();
+    { std::scoped_lock compositor_lock(compositor_mutex_); compositor_.reset(); }
+    restart_virtual_camera();
+    request_rescan();
+}
 void App::export_logs(const std::filesystem::path& destination) const { log_.export_to(destination); }
 void App::clear_logs() { log_.clear(); log_.write(LogLevel::info, "logging", "LOGS_CLEARED", "Diagnostic logs cleared by user"); }
 std::optional<PreviewImage> App::preview(const PreviewKind kind, const Size target) {
@@ -522,10 +557,12 @@ void App::reset_diagnostic_counters() {
 void App::log_system_event(std::string code, std::string message) { log_.write(LogLevel::info, "lifecycle", std::move(code), std::move(message)); }
 
 std::vector<VideoDevice> App::video_devices() const {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     try { return enumerate_video_devices(); }
     catch (...) { return {}; }
 }
 std::vector<MonitorDevice> App::monitors() const {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     try { return enumerate_monitors(); }
     catch (...) { return {}; }
 }
@@ -533,10 +570,11 @@ std::vector<MonitorDevice> App::monitors() const {
 void App::apply_settings(AppConfig updated) {
     const bool was_running = automation_running_;
     const auto prior_mode = controller_->status().mode;
-    const auto old = config_;
     if (was_running) stop_automation();
     if (recovery_thread_.joinable()) { recovery_thread_.request_stop(); recovery_thread_.join(); }
     if (compositor_thread_.joinable()) { compositor_thread_.request_stop(); compositor_thread_.join(); }
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+    const auto old = config_;
     updated.output_mode = prior_mode;
     updated.monitor_tracker.match_threshold = updated.detector.threshold;
     config_ = std::move(updated);
@@ -548,8 +586,13 @@ void App::apply_settings(AppConfig updated) {
         try { select_tracked_monitor(*config_.last_tracked_monitor); }
         catch (const std::exception& e) { report_error("screen_capture", "TRACKED_MONITOR_RECONFIGURE_FAILED", e); }
     }
-    if (old.output_size != config_.output_size) compositor_.reconfigure(config_.output_size);
-    else if (old.placeholder_color_bgra != config_.placeholder_color_bgra) compositor_.set_placeholder_color(config_.placeholder_color_bgra);
+    if (old.output_size != config_.output_size) {
+        std::scoped_lock compositor_lock(compositor_mutex_);
+        compositor_.reconfigure(config_.output_size);
+    } else if (old.placeholder_color_bgra != config_.placeholder_color_bgra) {
+        std::scoped_lock compositor_lock(compositor_mutex_);
+        compositor_.set_placeholder_color(config_.placeholder_color_bgra);
+    }
     if (old.placeholder_color_bgra != config_.placeholder_color_bgra) {
         try { virtual_camera_.start(publisher_.pipe_name(), config_.placeholder_color_bgra); controller_->set_virtual_camera_state(DeviceState::ready); }
         catch (const std::exception& e) { controller_->set_virtual_camera_state(DeviceState::failed); report_error("virtual_camera", "VIRTUAL_CAMERA_RECONFIGURE_FAILED", e); }
@@ -557,10 +600,15 @@ void App::apply_settings(AppConfig updated) {
     if (old.selected_video_device_id != config_.selected_video_device_id || old.preferred_input_size != config_.preferred_input_size ||
         old.preferred_input_fps != config_.preferred_input_fps) {
         try {
-            std::scoped_lock lock(component_mutex_);
-            video_input_.start(config_.selected_video_device_id, config_.preferred_input_size, config_.preferred_input_fps);
-            if (!wait_for_valid_frame([this] { return video_input_.latest_frame(); })) throw std::runtime_error("configured video input did not produce a valid frame");
-            controller_->set_component_state(Source::camera, DeviceState::ready, Clock::now());
+            if (config_.selected_video_device_id.empty()) {
+                { std::scoped_lock lock(component_mutex_); video_input_.stop(); }
+                controller_->set_component_state(Source::camera, DeviceState::unavailable, Clock::now());
+            } else {
+                { std::scoped_lock lock(component_mutex_);
+                  video_input_.start(config_.selected_video_device_id, config_.preferred_input_size, config_.preferred_input_fps); }
+                if (!wait_for_valid_frame([this] { return video_input_.latest_frame(); })) throw std::runtime_error("configured video input did not produce a valid frame");
+                controller_->set_component_state(Source::camera, DeviceState::ready, Clock::now());
+            }
         } catch (const std::exception& e) { controller_->set_component_state(Source::camera, DeviceState::failed, Clock::now()); report_error("video_input", "VIDEO_INPUT_RECONFIGURE_FAILED", e); }
     }
     if (old.cursor_visible != config_.cursor_visible) restart_screen_capture();
@@ -580,6 +628,7 @@ void App::apply_settings(AppConfig updated) {
 }
 
 void App::save_config() {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     try { if (controller_) config_.output_mode = controller_->status().mode; config_store_.save(config_); }
     catch (const std::exception& e) { report_error("configuration", "CONFIGURATION_SAVE_FAILED", e); }
 }
@@ -605,7 +654,8 @@ void App::report_error(std::string component, std::string code, const std::excep
     ++failures_;
     log_.write(LogLevel::error, std::move(component), std::move(code), error.what());
 }
-AppStatus App::status() const { auto result = controller_->status(); if (result.warning.empty() && !configuration_warning_.empty()) result.warning = configuration_warning_; return result; }
+AppConfig App::config() const { std::scoped_lock lifecycle_lock(lifecycle_mutex_); return config_; }
+AppStatus App::status() const { std::scoped_lock lifecycle_lock(lifecycle_mutex_); auto result = controller_->status(); if (result.warning.empty() && !configuration_warning_.empty()) result.warning = configuration_warning_; return result; }
 std::vector<LogEvent> App::recent_events() const { return log_.recent(); }
 void App::exit() { exiting_ = true; if (window_) window_->close(); }
 

@@ -5,6 +5,7 @@
 
 #include <mfidl.h>
 #include <wrl/implements.h>
+#include <condition_variable>
 #include <mutex>
 #include <vector>
 
@@ -30,10 +31,12 @@ public:
     STDMETHODIMP GetStreamState(MF_STREAM_STATE* state) override;
 
 private:
+    struct AxisSample { std::uint32_t first; std::uint32_t second; std::uint32_t weight; };
     [[nodiscard]] HRESULT make_sample(IUnknown* token, IMFSample** sample);
+    void prepare_scaling_map(Size input_size, Size output_size);
     void scale_bgra(const CpuSharedFrame& input, std::uint8_t* output, Size output_size, std::uint32_t output_stride);
-    static void bgra_to_nv12(const std::uint8_t* bgra, Size size, std::uint8_t* nv12);
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
+    std::condition_variable state_changed_;
     ComPtr<IMFMediaSource> parent_;
     ComPtr<IMFMediaEventQueue> events_;
     ComPtr<IMFStreamDescriptor> descriptor_;
@@ -42,11 +45,20 @@ private:
     SharedFrameReader reader_;
     CpuSharedFrame shared_frame_cache_;
     std::vector<std::uint8_t> scaled_bgra_;
+    std::vector<AxisSample> x_samples_;
+    std::vector<AxisSample> y_samples_;
+    Size scaling_input_size_{};
+    Size scaling_output_size_{};
     DWORD id_{0};
     MF_STREAM_STATE state_{MF_STREAM_STATE_STOPPED};
     bool shutdown_{false};
     LONGLONG next_time_{0};
     LONGLONG frame_duration_{333333};
+    LARGE_INTEGER qpc_frequency_{};
+    LARGE_INTEGER next_qpc_{};
+    LONGLONG qpc_step_{0};
+    LONGLONG qpc_remainder_step_{0};
+    LONGLONG qpc_remainder_{0};
     std::uint32_t placeholder_color_{0xff171719u};
 };
 

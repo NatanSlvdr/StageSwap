@@ -6,6 +6,7 @@
 
 #include <d3d11.h>
 #include <array>
+#include <cstddef>
 #include <utility>
 
 namespace asc::win {
@@ -22,6 +23,11 @@ public:
 
 private:
     struct SourceView { ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> view; };
+    struct CachedSourceView {
+        ComPtr<ID3D11Texture2D> source;
+        SourceView sampled;
+        bool copied{false};
+    };
     struct alignas(16) ShaderConstants {
         float camera_rect[4];
         float camera_uv[4];
@@ -34,7 +40,7 @@ private:
         float padding[2];
     };
     void create_resources();
-    [[nodiscard]] SourceView sampled(const VideoFrame& frame);
+    [[nodiscard]] SourceView sampled(const VideoFrame& frame, std::size_t cache_index);
     [[nodiscard]] static std::pair<std::array<float, 4>, std::array<float, 4>> transform(Size source, Size output, ScalingMode mode);
     D3DDevice& d3d_;
     Size output_size_;
@@ -46,6 +52,7 @@ private:
     ComPtr<ID3D11Texture2D> output_;
     ComPtr<ID3D11RenderTargetView> output_view_;
     ComPtr<ID3D11Texture2D> placeholder_;
+    std::array<CachedSourceView, 3> source_cache_;
 };
 
 } // namespace asc::win

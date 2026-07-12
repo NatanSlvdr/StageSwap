@@ -62,7 +62,8 @@ public:
     [[nodiscard]] AppStatus status() const;
     [[nodiscard]] std::vector<LogEvent> recent_events() const;
     [[nodiscard]] std::filesystem::path data_directory() const { return data_directory_; }
-    [[nodiscard]] const AppConfig& config() const { return config_; }
+    // Return a snapshot: settings may be replaced while windows are rendering.
+    [[nodiscard]] AppConfig config() const;
     [[nodiscard]] bool automation_running() const noexcept { return automation_running_; }
     [[nodiscard]] std::vector<VideoDevice> video_devices() const;
     [[nodiscard]] std::vector<MonitorDevice> monitors() const;
@@ -98,7 +99,12 @@ private:
     SharedFramePublisher publisher_;
     VirtualCamera virtual_camera_;
     std::unique_ptr<TrayWindow> window_;
+    // All start/stop/reconfigure/device-loss operations pass through this gate.
+    // Recursive acquisition is intentional for composite operations such as
+    // restart_all() and settings application.
+    mutable std::recursive_mutex lifecycle_mutex_;
     mutable std::mutex component_mutex_;
+    mutable std::mutex compositor_mutex_;
     GrayImage reference_thumbnail_;
     mutable std::mutex reference_mutex_;
     std::atomic<bool> has_reference_{false};

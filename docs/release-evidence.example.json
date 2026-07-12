@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "environment_report": "release-environment.json",
+  "hosted_clean_builds": 0,
+  "install_cycles": 0,
+  "application_cycles": 0,
+  "virtual_camera_cycles": 0,
+  "automatic_switches": 0,
+  "webcam_reconnect_cycles": 0,
+  "lifecycle_recovery_cycles": 0,
+  "zoom_cold_launches": 0,
+  "unresolved_product_failures": [],
+  "soaks": [
+    {
+      "run_id": "soak-1",
+      "started_at_utc": "",
+      "completed_at_utc": "",
+      "artifact_sha256": "",
+      "probe_json": "soak-1-mf-probe.json",
+      "zoom_expected_frames_verified": false,
+      "no_product_failure": false,
+      "privacy_review_passed": false
+    },
+    {
+      "run_id": "soak-2",
+      "started_at_utc": "",
+      "completed_at_utc": "",
+      "artifact_sha256": "",
+      "probe_json": "soak-2-mf-probe.json",
+      "zoom_expected_frames_verified": false,
+      "no_product_failure": false,
+      "privacy_review_passed": false
+    }
+  ]
+}

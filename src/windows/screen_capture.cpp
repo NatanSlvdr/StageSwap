@@ -31,34 +31,50 @@ void ScreenCapture::start(const HMONITOR monitor, const bool include_cursor) {
     stop();
     if (!winrt::Windows::Graphics::Capture::GraphicsCaptureSession::IsSupported())
         throw std::runtime_error("Windows Graphics Capture is not supported on this system");
-    item_ = item_for_monitor(monitor);
-    const auto size = item_.Size();
-    pool_ = winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool::CreateFreeThreaded(
-        make_winrt_device(d3d_.device()), winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized, 3, size);
-    session_ = pool_.CreateCaptureSession(item_);
-    session_.IsCursorCaptureEnabled(include_cursor);
-    session_.IsBorderRequired(false);
-    frame_token_ = pool_.FrameArrived({this, &ScreenCapture::on_frame});
-    session_.StartCapture();
+    try {
+        item_ = item_for_monitor(monitor);
+        const auto size = item_.Size();
+        if (size.Width <= 0 || size.Height <= 0) throw std::runtime_error("capture monitor has invalid dimensions");
+        pool_ = winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool::CreateFreeThreaded(
+            make_winrt_device(d3d_.device()), winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized, 3, size);
+        session_ = pool_.CreateCaptureSession(item_);
+        session_.IsCursorCaptureEnabled(include_cursor);
+        session_.IsBorderRequired(false);
+        const auto generation = ++generation_;
+        running_.store(true, std::memory_order_release);
+        frame_token_ = pool_.FrameArrived([this, generation](const auto& sender, const auto& args) {
+            on_frame(sender, args, generation);
+        });
+        session_.StartCapture();
+    } catch (...) {
+        stop();
+        throw;
+    }
 }
 
 void ScreenCapture::stop() noexcept {
-    try {
-        if (pool_) pool_.FrameArrived(frame_token_);
-        if (session_) session_.Close();
-        if (pool_) pool_.Close();
+    running_.store(false, std::memory_order_release);
+    ++generation_;
+    try { if (pool_) pool_.FrameArrived(frame_token_); } catch (...) {}
+    try { if (session_) session_.Close(); } catch (...) {}
+    try { if (pool_) pool_.Close(); } catch (...) {}
+    {
+        std::scoped_lock callback_lock(callback_mutex_);
         session_ = nullptr;
         pool_ = nullptr;
         item_ = nullptr;
+        frame_token_ = {};
         { std::scoped_lock lock(mutex_); latest_ = {}; capture_texture_.Reset(); }
         { std::scoped_lock comparison_lock(comparison_mutex_);
           comparison_enumerator_.Reset(); comparison_processor_.Reset(); comparison_output_.Reset();
           comparison_output_view_.Reset(); comparison_staging_.Reset(); comparison_source_size_ = {}; comparison_target_size_ = {}; }
-    } catch (...) {}
+    }
 }
 
 void ScreenCapture::on_frame(const winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& sender,
-                             const winrt::Windows::Foundation::IInspectable const&) {
+                             const winrt::Windows::Foundation::IInspectable const&, const std::uint64_t generation) {
+    std::scoped_lock callback_lock(callback_mutex_);
+    if (!running_.load(std::memory_order_acquire) || generation != generation_.load(std::memory_order_acquire)) return;
     try {
         const auto frame = sender.TryGetNextFrame();
         if (!frame) return;

@@ -48,7 +48,7 @@ public:
     void reconfigure(const AppConfig& config, TimePoint now);
     void set_tracked_monitor(MonitorIdentity monitor);
     [[nodiscard]] AppStatus status() const;
-    [[nodiscard]] const AppConfig& config() const noexcept { return config_; }
+    [[nodiscard]] AppConfig config() const;
 
 private:
     void evaluate(TimePoint now);

@@ -36,10 +36,12 @@ private:
     enum class State { stopped, started, shutdown };
     std::mutex mutex_;
     State state_{State::stopped};
+    bool stream_announced_{false};
     ComPtr<IMFMediaEventQueue> events_;
     ComPtr<IMFAttributes> attributes_;
     ComPtr<IMFPresentationDescriptor> descriptor_;
     ComPtr<MediaStream> stream_;
+    ComPtr<IUnknown> d3d_manager_;
 };
 
 } // namespace asc::win::source
