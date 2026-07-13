@@ -35,6 +35,15 @@ std::tm local_time(const std::time_t value) {
 }
 }
 
+std::string format_event_summary(const LogEvent& event) {
+    const auto time = std::chrono::system_clock::to_time_t(event.timestamp);
+    const auto tm = local_time(time);
+    std::ostringstream line;
+    line << std::put_time(&tm, "%H:%M:%S") << "  [" << event.code << "] " << event.component << " — " << event.message;
+    if (!event.details_json.empty() && event.details_json != "{}") line << " | " << event.details_json;
+    return line.str();
+}
+
 EventLog::EventLog(std::filesystem::path directory, const std::uint32_t retention_days, const std::size_t recent_limit)
     : directory_(std::move(directory)), retention_days_(retention_days), recent_limit_(recent_limit) {
     std::filesystem::create_directories(directory_);

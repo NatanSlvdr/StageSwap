@@ -286,8 +286,12 @@ void event_log_test() {
     asc::EventLog log(directory, 14, 2);
     log.write(asc::LogLevel::info, "test", "ONE", "first");
     log.write(asc::LogLevel::warning, "test", "TWO", "second");
-    log.write(asc::LogLevel::error, "test", "THREE", "third");
+    log.write(asc::LogLevel::error, "test", "THREE", "third", R"({"source":"camera","outcome":"failed"})");
     check(log.recent().size() == 2, "recent event list is bounded");
+    const auto summary = asc::format_event_summary(log.recent().front());
+    check(summary.find("[THREE] test") != std::string::npos && summary.find("third") != std::string::npos &&
+              summary.find(R"({"source":"camera","outcome":"failed"})") != std::string::npos,
+          "recent event summary includes event type, component, message, and structured context");
     const auto exported = directory / "export.txt";
     log.export_to(exported);
     {

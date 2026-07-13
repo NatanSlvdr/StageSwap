@@ -43,11 +43,7 @@ const wchar_t* device_name(const DeviceState state) {
     return L"Unknown";
 }
 std::wstring event_line(const LogEvent& event) {
-    const auto time = std::chrono::system_clock::to_time_t(event.timestamp);
-    std::tm tm{}; localtime_s(&tm, &time);
-    std::wostringstream line;
-    line << std::put_time(&tm, L"%H:%M:%S") << L"  " << wide(event.message);
-    return line.str();
+    return wide(format_event_summary(event));
 }
 }
 
@@ -133,7 +129,7 @@ void TrayWindow::create_controls() {
     CreateWindowExW(0, L"BUTTON", L"Force webcam/video", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 170, 420, 180, 26, window_, control_id(force_camera), instance_, nullptr);
     CreateWindowExW(0, L"BUTTON", L"Force screen", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 360, 420, 150, 26, window_, control_id(force_screen), instance_, nullptr);
     label(L"Recent activity", 20, 458, 180, 22);
-    recent_list_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
+    recent_list_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | LBS_NOINTEGRALHEIGHT,
                                    20, 484, 589, 82, window_, nullptr, instance_, nullptr);
     WTSRegisterSessionNotification(window_, NOTIFY_FOR_THIS_SESSION);
     refresh();

@@ -22,6 +22,10 @@ struct LogEvent {
     std::string details_json{"{}"};
 };
 
+// Produces the complete, single-line representation used by the recent-event
+// UI and clipboard export. Persistent logs remain JSON Lines.
+[[nodiscard]] std::string format_event_summary(const LogEvent& event);
+
 class EventLog {
 public:
     EventLog(std::filesystem::path directory, std::uint32_t retention_days = 14, std::size_t recent_limit = 20);
