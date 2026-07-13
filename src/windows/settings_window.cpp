@@ -187,7 +187,7 @@ void SettingsWindow::update_device_details() {
                 for (std::size_t i = 0; i < std::min(device->formats.size(), displayed_format_limit); ++i) {
                     const auto& format = device->formats[i];
                     if (i != 0) details << L"; ";
-                    details << format.size.width << L'×' << format.size.height << L" @ ";
+                    details << format.size.width << L'\u00d7' << format.size.height << L" @ ";
                     if (format.denominator != 0) {
                         const double fps = static_cast<double>(format.numerator) / static_cast<double>(format.denominator);
                         details << std::fixed << std::setprecision(fps == static_cast<std::uint32_t>(fps) ? 0 : 2) << fps;
