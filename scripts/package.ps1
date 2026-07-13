@@ -74,7 +74,11 @@ $hashLines = Get-ChildItem -LiteralPath $resolvedPackageDirectory -File -Recurse
         "$hash *$relativePath"
     }
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
-[IO.File]::WriteAllLines((Join-Path $resolvedPackageDirectory 'SHA256SUMS.txt'), $hashLines, $utf8NoBom)
+[IO.File]::WriteAllText(
+    (Join-Path $resolvedPackageDirectory 'SHA256SUMS.txt'),
+    (($hashLines -join "`n") + "`n"),
+    $utf8NoBom
+)
 
 Compress-Archive -LiteralPath $packageDirectory -DestinationPath $archive -CompressionLevel Optimal
 $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
