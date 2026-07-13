@@ -8,7 +8,7 @@ namespace asc::win::source {
 
 Activation::Activation() { initialization_result_ = MFCreateAttributes(&attributes_, 4); }
 
-HRESULT Activation::ActivateObject(const REFIID riid, void** object) {
+HRESULT Activation::ActivateObject(REFIID riid, void** object) {
     if (!object) return E_POINTER;
     *object = nullptr;
     std::scoped_lock lock(mutex_);

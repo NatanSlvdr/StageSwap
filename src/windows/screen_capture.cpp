@@ -71,8 +71,8 @@ void ScreenCapture::stop() noexcept {
     }
 }
 
-void ScreenCapture::on_frame(const winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& sender,
-                             const winrt::Windows::Foundation::IInspectable const&, const std::uint64_t generation) {
+void ScreenCapture::on_frame(winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool sender,
+                             winrt::Windows::Foundation::IInspectable, const std::uint64_t generation) {
     std::scoped_lock callback_lock(callback_mutex_);
     if (!running_.load(std::memory_order_acquire) || generation != generation_.load(std::memory_order_acquire)) return;
     try {

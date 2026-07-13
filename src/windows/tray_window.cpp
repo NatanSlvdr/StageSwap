@@ -18,6 +18,7 @@ namespace asc::win {
 namespace {
 constexpr UINT tray_message = WM_APP + 1;
 constexpr UINT timer_id = 1;
+HMENU control_id(const UINT id) noexcept { return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)); }
 enum Command : UINT {
     open = 100, start, stop, automatic, force_camera, force_screen, set_reference, import_reference,
     rescan, restart_video, restart_capture, restart_camera, restart_all, startup, show_previews, open_log, export_log, copy_recent, clear_log, settings, exit_app,
@@ -120,17 +121,17 @@ void TrayWindow::create_controls() {
     };
     label(L"Automatic Screen Camera", 18, 14, 420, 28, SS_LEFT);
     override_banner_ = label(L"MANUAL OVERRIDE ACTIVE — Automatic source switching is disabled.", 18, 48, 590, 26, SS_CENTER);
-    CreateWindowExW(0, L"BUTTON", L"Return to Automatic", WS_CHILD | WS_VISIBLE, 440, 76, 168, 28, window_, reinterpret_cast<HMENU>(return_automatic), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Return to Automatic", WS_CHILD | WS_VISIBLE, 440, 76, 168, 28, window_, control_id(return_automatic), instance_, nullptr);
     status_text_ = label(L"Starting…", 20, 112, 590, 230, SS_LEFT);
-    start_stop_button_ = CreateWindowExW(0, L"BUTTON", L"Start", WS_CHILD | WS_VISIBLE, 20, 348, 90, 32, window_, reinterpret_cast<HMENU>(start), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Set current screen as reference", WS_CHILD | WS_VISIBLE, 118, 348, 245, 32, window_, reinterpret_cast<HMENU>(set_reference), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Rescan", WS_CHILD | WS_VISIBLE, 371, 348, 90, 32, window_, reinterpret_cast<HMENU>(rescan), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Previews", WS_CHILD | WS_VISIBLE, 469, 348, 72, 32, window_, reinterpret_cast<HMENU>(show_previews), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Settings", WS_CHILD | WS_VISIBLE, 547, 348, 62, 32, window_, reinterpret_cast<HMENU>(settings), instance_, nullptr);
+    start_stop_button_ = CreateWindowExW(0, L"BUTTON", L"Start", WS_CHILD | WS_VISIBLE, 20, 348, 90, 32, window_, control_id(start), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Set current screen as reference", WS_CHILD | WS_VISIBLE, 118, 348, 245, 32, window_, control_id(set_reference), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Rescan", WS_CHILD | WS_VISIBLE, 371, 348, 90, 32, window_, control_id(rescan), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Previews", WS_CHILD | WS_VISIBLE, 469, 348, 72, 32, window_, control_id(show_previews), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Settings", WS_CHILD | WS_VISIBLE, 547, 348, 62, 32, window_, control_id(settings), instance_, nullptr);
     label(L"Output mode", 20, 394, 120, 22);
-    CreateWindowExW(0, L"BUTTON", L"Automatic", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 20, 420, 140, 26, window_, reinterpret_cast<HMENU>(automatic), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Force webcam/video", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 170, 420, 180, 26, window_, reinterpret_cast<HMENU>(force_camera), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Force screen", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 360, 420, 150, 26, window_, reinterpret_cast<HMENU>(force_screen), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Automatic", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 20, 420, 140, 26, window_, control_id(automatic), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Force webcam/video", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 170, 420, 180, 26, window_, control_id(force_camera), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Force screen", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 360, 420, 150, 26, window_, control_id(force_screen), instance_, nullptr);
     label(L"Recent activity", 20, 458, 180, 22);
     recent_list_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
                                    20, 484, 589, 82, window_, nullptr, instance_, nullptr);

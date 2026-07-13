@@ -22,7 +22,7 @@ public:
         owner_ = nullptr;
     }
 
-    STDMETHODIMP QueryInterface(const REFIID riid, void** object) override {
+    STDMETHODIMP QueryInterface(REFIID riid, void** object) override {
         if (!object) return E_POINTER;
         if (riid == IID_IUnknown || riid == __uuidof(IMFSourceReaderCallback)) {
             *object = static_cast<IMFSourceReaderCallback*>(this);
@@ -62,6 +62,8 @@ VideoInput::VideoInput(D3DDevice& d3d) : d3d_(d3d) {}
 VideoInput::~VideoInput() { stop(); }
 
 namespace {
+
+constexpr DWORD first_video_stream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
 
 std::uint32_t subtype_rank(const GUID& subtype) noexcept {
     if (subtype == MFVideoFormat_NV12) return 0;
@@ -127,7 +129,7 @@ void VideoInput::start(const std::string& symbolic_link, const Size preferred_si
     std::vector<CaptureFormatCandidate> native_formats;
     for (DWORD native_index = 0;; ++native_index) {
         ComPtr<IMFMediaType> native_type;
-        const auto result = reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, native_index, &native_type);
+        const auto result = reader->GetNativeMediaType(first_video_stream, native_index, &native_type);
         if (result == MF_E_NO_MORE_TYPES) break;
         if (FAILED(result)) {
             last_error_ = result;
@@ -151,7 +153,7 @@ void VideoInput::start(const std::string& symbolic_link, const Size preferred_si
     for (const auto& candidate : ranked) {
         for (const auto& converted_subtype : std::array{MFVideoFormat_ARGB32, MFVideoFormat_RGB32}) {
             const auto output_type = converted_type(candidate, converted_subtype);
-            negotiation_result = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, output_type.Get());
+            negotiation_result = reader->SetCurrentMediaType(first_video_stream, nullptr, output_type.Get());
             if (SUCCEEDED(negotiation_result)) break;
         }
         if (SUCCEEDED(negotiation_result)) break;
@@ -188,7 +190,7 @@ void VideoInput::stop() noexcept {
             std::scoped_lock flush_lock(flush_mutex_);
             flush_completed_ = false;
         }
-        if (SUCCEEDED(reader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM))) {
+        if (SUCCEEDED(reader->Flush(first_video_stream))) {
             std::unique_lock flush_lock(flush_mutex_);
             flush_condition_.wait_for(flush_lock, std::chrono::seconds{2}, [this] { return flush_completed_; });
         }
@@ -224,7 +226,7 @@ void VideoInput::request_next() {
     ComPtr<IMFSourceReader> reader;
     { std::scoped_lock lock(mutex_); reader = reader_; }
     if (running_ && reader) {
-        const auto result = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, nullptr, nullptr, nullptr);
+        const auto result = reader->ReadSample(first_video_stream, 0, nullptr, nullptr, nullptr, nullptr);
         if (FAILED(result)) last_error_ = result;
     }
 }
@@ -232,7 +234,7 @@ void VideoInput::request_next() {
 void VideoInput::refresh_output_format(IMFSourceReader* const reader) noexcept {
     if (!reader) return;
     ComPtr<IMFMediaType> type;
-    if (FAILED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &type))) return;
+    if (FAILED(reader->GetCurrentMediaType(first_video_stream, &type))) return;
     UINT32 width = 0, height = 0;
     if (SUCCEEDED(MFGetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, &width, &height)) && width != 0 && height != 0)
         active_size_ = {width, height};
@@ -350,7 +352,7 @@ HRESULT VideoInput::OnEvent(DWORD, IMFMediaEvent* event) {
     }
     return S_OK;
 }
-HRESULT VideoInput::QueryInterface(const REFIID riid, void** object) {
+HRESULT VideoInput::QueryInterface(REFIID riid, void** object) {
     if (!object) return E_POINTER;
     if (riid == IID_IUnknown || riid == __uuidof(IMFSourceReaderCallback)) {
         *object = static_cast<IMFSourceReaderCallback*>(this); AddRef(); return S_OK;

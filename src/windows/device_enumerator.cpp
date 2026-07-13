@@ -10,6 +10,8 @@
 
 namespace asc::win {
 namespace {
+constexpr DWORD first_video_stream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+
 std::string guid_text(const GUID& guid) {
     wchar_t text[64]{};
     StringFromGUID2(guid, text, ARRAYSIZE(text));
@@ -98,7 +100,7 @@ std::vector<VideoDevice> enumerate_video_devices() {
             if (SUCCEEDED(MFCreateSourceReaderFromMediaSource(source.Get(), nullptr, &reader))) {
                 for (DWORD type_index = 0;; ++type_index) {
                     ComPtr<IMFMediaType> type;
-                    const auto type_result = reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, type_index, &type);
+                    const auto type_result = reader->GetNativeMediaType(first_video_stream, type_index, &type);
                     if (type_result == MF_E_NO_MORE_TYPES) break;
                     if (FAILED(type_result)) break;
                     UINT32 width = 0, height = 0, numerator = 0, denominator = 1;

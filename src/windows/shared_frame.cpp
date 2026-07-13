@@ -190,7 +190,7 @@ void SharedFramePublisher::server_loop(const std::stop_token stop) {
         pixels.reserve(slot_capacity_);
         while (!stop.stop_requested()) {
             const ScopedHandle pipe(CreateNamedPipeW(
-                pipe_name_.c_str(), PIPE_ACCESS_OUT,
+                pipe_name_.c_str(), PIPE_ACCESS_OUTBOUND,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1, static_cast<DWORD>(slot_capacity_ + sizeof(SharedFramePacket)), 64 * 1024, 0, &security));
             if (pipe.get() == INVALID_HANDLE_VALUE) break;

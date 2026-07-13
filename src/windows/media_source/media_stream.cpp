@@ -10,6 +10,7 @@
 #include <new>
 #include <vector>
 #include <utility>
+#include <ks.h>
 #include <ksmedia.h>
 
 namespace asc::win::source {

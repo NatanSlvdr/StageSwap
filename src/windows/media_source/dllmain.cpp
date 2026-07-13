@@ -73,13 +73,13 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     return TRUE;
 }
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void** object) {
+HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void** object) {
     if (clsid != CLSID_AutomaticScreenCameraSource) return CLASS_E_CLASSNOTAVAILABLE;
     auto factory = Microsoft::WRL::Make<ClassFactory>();
     return factory ? factory->QueryInterface(riid, object) : E_OUTOFMEMORY;
 }
-extern "C" __declspec(dllexport) HRESULT WINAPI DllCanUnloadNow() {
+HRESULT WINAPI DllCanUnloadNow() {
     return Microsoft::WRL::Module<Microsoft::WRL::InProc>::GetModule().GetObjectCount() == 0 ? S_OK : S_FALSE;
 }
-extern "C" __declspec(dllexport) HRESULT WINAPI DllRegisterServer() { return register_server(true); }
-extern "C" __declspec(dllexport) HRESULT WINAPI DllUnregisterServer() { return register_server(false); }
+extern "C" HRESULT WINAPI DllRegisterServer() { return register_server(true); }
+extern "C" HRESULT WINAPI DllUnregisterServer() { return register_server(false); }

@@ -3,8 +3,9 @@
 #include "common.hpp"
 #include "media_stream.hpp"
 
-#include <mfidl.h>
 #include <ks.h>
+#include <ksproxy.h>
+#include <mfidl.h>
 #include <wrl/implements.h>
 #include <mutex>
 

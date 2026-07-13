@@ -2,6 +2,7 @@
 #include "app.hpp"
 
 #include <commctrl.h>
+#include <commdlg.h>
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
@@ -19,6 +20,7 @@ enum Id : UINT {
 };
 void combo_add(const HWND combo, const wchar_t* text) { SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text)); }
 int combo_selection(const HWND window, const UINT id) { return static_cast<int>(SendDlgItemMessageW(window, id, CB_GETCURSEL, 0, 0)); }
+HMENU control_id(const UINT id) noexcept { return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)); }
 }
 
 void SettingsWindow::show(const HWND owner, const HINSTANCE instance, App& app) {
@@ -132,16 +134,16 @@ HWND SettingsWindow::add_label(const wchar_t* value, const int x, const int y, c
 }
 HWND SettingsWindow::add_edit(const UINT id, const std::wstring& value, const int x, const int y, const int width) {
     return CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", value.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                           x, y, width, 25, window_, reinterpret_cast<HMENU>(id), instance_, nullptr);
+                           x, y, width, 25, window_, control_id(id), instance_, nullptr);
 }
 HWND SettingsWindow::add_checkbox(const UINT id, const wchar_t* value, const bool is_checked, const int x, const int y, const int width) {
     const auto control = CreateWindowExW(0, L"BUTTON", value, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                         x, y, width, 24, window_, reinterpret_cast<HMENU>(id), instance_, nullptr);
+                                         x, y, width, 24, window_, control_id(id), instance_, nullptr);
     SendMessageW(control, BM_SETCHECK, is_checked ? BST_CHECKED : BST_UNCHECKED, 0); return control;
 }
 HWND SettingsWindow::add_combo(const UINT id, const int x, const int y, const int width) {
     return CreateWindowExW(0, WC_COMBOBOXW, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
-                           x, y, width, 160, window_, reinterpret_cast<HMENU>(id), instance_, nullptr);
+                           x, y, width, 160, window_, control_id(id), instance_, nullptr);
 }
 
 void SettingsWindow::create_controls() {
@@ -164,13 +166,13 @@ void SettingsWindow::create_controls() {
     add_label(L"Preferred input", 20, 82); const auto in_size = add_combo(input_size, 195, 78, 160); combo_add(in_size, L"1920 × 1080"); combo_add(in_size, L"1280 × 720");
     SendMessageW(in_size, CB_SETCURSEL, working_.preferred_input_size.width == 1280 ? 1 : 0, 0);
     add_label(L"Frame rate", 380, 82, 100); const auto in_fps = add_combo(input_fps, 500, 78, 100); combo_add(in_fps, L"30 fps"); SendMessageW(in_fps, CB_SETCURSEL, 0, 0);
-    CreateWindowExW(0, L"BUTTON", L"Restart input", WS_CHILD | WS_VISIBLE, 605, 78, 80, 26, window_, reinterpret_cast<HMENU>(restart_input_button), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Restart input", WS_CHILD | WS_VISIBLE, 605, 78, 80, 26, window_, control_id(restart_input_button), instance_, nullptr);
     add_checkbox(auto_reconnect, L"Reconnect automatically", working_.video_auto_reconnect, 20, 108, 220);
     add_label(L"Retry interval (s)", 380, 108, 150); add_edit(reconnect_interval, std::to_wstring(working_.video_reconnect_interval.count()), 575, 104, 110);
 
     add_label(L"SCREEN CAPTURE", 20, 142, 300);
     add_checkbox(cursor, L"Include mouse cursor", working_.cursor_visible, 20, 170);
-    CreateWindowExW(0, L"BUTTON", L"Restart capture", WS_CHILD | WS_VISIBLE, 555, 166, 130, 28, window_, reinterpret_cast<HMENU>(restart_capture_button), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Restart capture", WS_CHILD | WS_VISIBLE, 555, 166, 130, 28, window_, control_id(restart_capture_button), instance_, nullptr);
     add_label(L"Preferred tracked display", 20, 204); const auto monitor_combo = add_combo(tracked_monitor, 240, 200, 445);
     combo_add(monitor_combo, L"Keep automatic/reference-based selection");
     int monitor_selected = 0;
@@ -185,8 +187,8 @@ void SettingsWindow::create_controls() {
     SendMessageW(monitor_combo, CB_SETCURSEL, monitor_selected, 0);
 
     add_label(L"REFERENCE DETECTION", 20, 240, 300);
-    CreateWindowExW(0, L"BUTTON", L"Set current screen", WS_CHILD | WS_VISIBLE, 370, 234, 145, 27, window_, reinterpret_cast<HMENU>(set_reference_settings), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Import image…", WS_CHILD | WS_VISIBLE, 525, 234, 160, 27, window_, reinterpret_cast<HMENU>(import_reference_settings), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Set current screen", WS_CHILD | WS_VISIBLE, 370, 234, 145, 27, window_, control_id(set_reference_settings), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Import image…", WS_CHILD | WS_VISIBLE, 525, 234, 160, 27, window_, control_id(import_reference_settings), instance_, nullptr);
     add_label(L"Similarity threshold (%)", 20, 272); add_edit(threshold, std::to_wstring(working_.detector.threshold * 100.0), 240, 268);
     add_label(L"Detection interval (ms)", 380, 272, 180); add_edit(detection_interval, std::to_wstring(working_.detection_interval.count()), 575, 268, 110);
     add_label(L"Matching confirmations", 20, 306); add_edit(matches, std::to_wstring(working_.detector.matches_required), 240, 302);
@@ -201,7 +203,7 @@ void SettingsWindow::create_controls() {
     add_label(L"Resolution", 20, 446); const auto out_size = add_combo(output_size, 195, 442, 160); combo_add(out_size, L"1920 × 1080"); combo_add(out_size, L"1280 × 720");
     SendMessageW(out_size, CB_SETCURSEL, working_.output_size.width == 1280 ? 1 : 0, 0);
     add_label(L"Frame rate", 380, 446, 100); const auto out_fps = add_combo(output_fps, 500, 442, 90); combo_add(out_fps, L"30 fps"); SendMessageW(out_fps, CB_SETCURSEL, 0, 0);
-    CreateWindowExW(0, L"BUTTON", L"Restart virtual camera", WS_CHILD | WS_VISIBLE, 596, 442, 90, 27, window_, reinterpret_cast<HMENU>(restart_vcam_button), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Restart virtual camera", WS_CHILD | WS_VISIBLE, 596, 442, 90, 27, window_, control_id(restart_vcam_button), instance_, nullptr);
     add_label(L"Fade duration (0–2000 ms)", 20, 480); add_edit(fade, std::to_wstring(working_.fade_duration.count()), 240, 476);
     add_label(L"Webcam scaling", 380, 480, 130); const auto camera = add_combo(camera_scale, 515, 476, 170);
     combo_add(camera, L"Fit with letterboxing"); combo_add(camera, L"Fill and crop"); combo_add(camera, L"Stretch"); SendMessageW(camera, CB_SETCURSEL, static_cast<int>(working_.camera_scaling), 0);
@@ -225,9 +227,9 @@ void SettingsWindow::create_controls() {
     combo_add(levels, L"Trace"); combo_add(levels, L"Debug"); combo_add(levels, L"Info"); combo_add(levels, L"Warning"); combo_add(levels, L"Error");
     SendMessageW(levels, CB_SETCURSEL, static_cast<int>(working_.log_level), 0);
 
-    CreateWindowExW(0, L"BUTTON", L"Reset diagnostic counters", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 20, 705, 210, 30, window_, reinterpret_cast<HMENU>(reset_counters_button), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 505, 705, 85, 30, window_, reinterpret_cast<HMENU>(save_button), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 600, 705, 85, 30, window_, reinterpret_cast<HMENU>(cancel_button), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Reset diagnostic counters", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 20, 705, 210, 30, window_, control_id(reset_counters_button), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 505, 705, 85, 30, window_, control_id(save_button), instance_, nullptr);
+    CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 600, 705, 85, 30, window_, control_id(cancel_button), instance_, nullptr);
     SendMessageW(window_, WM_SETFONT, reinterpret_cast<WPARAM>(title_font), TRUE);
 }
 

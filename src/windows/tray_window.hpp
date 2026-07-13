@@ -2,6 +2,7 @@
 
 #include "common.hpp"
 
+#include <shellapi.h>
 #include <memory>
 
 namespace asc::win {

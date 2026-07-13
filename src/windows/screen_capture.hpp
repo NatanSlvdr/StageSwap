@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 
@@ -25,8 +26,8 @@ public:
     [[nodiscard]] std::optional<GrayImage> comparison_frame(Size target = {160, 90});
 
 private:
-    void on_frame(winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& sender,
-                  winrt::Windows::Foundation::IInspectable const&, std::uint64_t generation);
+    void on_frame(winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool sender,
+                  winrt::Windows::Foundation::IInspectable, std::uint64_t generation);
     D3DDevice& d3d_;
     std::atomic<bool> running_{false};
     std::atomic<std::uint64_t> generation_{0};

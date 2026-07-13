@@ -1,4 +1,5 @@
 add_library(AutomaticScreenCameraSource SHARED
+    AutomaticScreenCameraSource.def
     dllmain.cpp
     activation.cpp
     media_source.cpp

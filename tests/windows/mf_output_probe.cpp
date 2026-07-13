@@ -34,6 +34,8 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
+constexpr DWORD first_video_stream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+
 struct Options {
     std::wstring camera_name{L"Automatic Screen Camera"};
     std::filesystem::path output{L"mf-probe-results.json"};
@@ -351,7 +353,7 @@ int wmain(const int argc, wchar_t** argv) {
             ComPtr<IMFMediaType> media_type;
             GUID subtype{};
             UINT32 width{}, height{}, numerator{}, denominator{};
-            if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &media_type))) {
+            if (SUCCEEDED(reader->GetCurrentMediaType(first_video_stream, &media_type))) {
                 media_type->GetGUID(MF_MT_SUBTYPE, &subtype);
                 MFGetAttributeSize(media_type.Get(), MF_MT_FRAME_SIZE, &width, &height);
                 MFGetAttributeRatio(media_type.Get(), MF_MT_FRAME_RATE, &numerator, &denominator);
@@ -388,7 +390,7 @@ int wmain(const int argc, wchar_t** argv) {
             std::vector<HashSample> hash_samples;
 
             while (std::chrono::steady_clock::now() < deadline) {
-                const HRESULT request_result = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr,
+                const HRESULT request_result = reader->ReadSample(first_video_stream, 0, nullptr,
                                                                   nullptr, nullptr, nullptr);
                 if (FAILED(request_result)) {
                     ++read_failures;
@@ -397,7 +399,7 @@ int wmain(const int argc, wchar_t** argv) {
                 AsyncReadResult read;
                 const auto read_deadline = std::min(deadline, std::chrono::steady_clock::now() + std::chrono::seconds{2});
                 if (!reader_callback->wait_until(read_deadline, read)) {
-                    reader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+                    reader->Flush(first_video_stream);
                     if (std::chrono::steady_clock::now() < deadline) ++read_failures;
                     break;
                 }
