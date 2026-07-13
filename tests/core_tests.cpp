@@ -183,7 +183,7 @@ void monitor_test() {
     const std::vector<asc::MonitorScore> scores{{a, 0.12, true}, {b, 0.993, true}};
     const auto first_scan_at = asc::Clock::now();
     const auto first = tracker.apply_scan(scores, first_scan_at);
-    check(!first.changed, "first monitor scan does not reassign");
+    check(!first.changed && first.confirmation_pending, "first monitor scan does not reassign and requests confirmation");
     check(first.observations.size() == 2, "full scan retains one observation per connected monitor");
     const auto observed_a = std::find_if(first.observations.begin(), first.observations.end(), [](const asc::MonitorObservation& observation) {
         return observation.identity.hardware_id == "A";
@@ -212,13 +212,31 @@ void monitor_test() {
     const auto missing = tracker.apply_scan({{b, 0.5, true}, {c, 0.4, true}}, first_scan_at + std::chrono::seconds{4});
     check(missing.scan_state == asc::DetectionState::reference_missing && missing.tracked->hardware_id == "B", "missing reference retains monitor");
 
-    asc::MonitorTracker stronger({.match_threshold = 0.98, .reassignment_margin = 0.01, .confirmations_required = 3});
-    stronger.restore_preferred(a);
-    const std::vector<asc::MonitorScore> stronger_scores{{a, 0.981, true}, {b, 0.999, true}};
-    [[maybe_unused]] const auto stronger_first = stronger.apply_scan(stronger_scores, first_scan_at);
-    [[maybe_unused]] const auto stronger_second = stronger.apply_scan(stronger_scores, first_scan_at + std::chrono::seconds{1});
-    check(stronger.apply_scan(stronger_scores, first_scan_at + std::chrono::seconds{2}).changed && stronger.tracked()->hardware_id == "B",
-          "clearly stronger match can replace a weak-but-valid current monitor");
+    asc::MonitorTracker stronger_duplicate({.match_threshold = 0.98, .reassignment_margin = 0.01, .confirmations_required = 3});
+    stronger_duplicate.restore_preferred(a);
+    const std::vector<asc::MonitorScore> stronger_duplicate_scores{{a, 0.981, true}, {b, 0.999, true}};
+    for (int scan = 0; scan < 5; ++scan) {
+        const auto result = stronger_duplicate.apply_scan(
+            stronger_duplicate_scores, first_scan_at + std::chrono::seconds{scan});
+        check(!result.changed && result.tracked && result.tracked->hardware_id == "A" &&
+                  result.scan_state == asc::DetectionState::ambiguous,
+              "higher-scoring duplicate cannot displace a valid tracked monitor");
+    }
+
+    asc::MonitorTracker disconnected_duplicate({.match_threshold = 0.98, .reassignment_margin = 0.01, .confirmations_required = 3});
+    disconnected_duplicate.restore_preferred(a);
+    const std::vector<asc::MonitorScore> disconnected_duplicate_scores{{b, 0.999, true}, {c, 0.981, true}};
+    const auto disconnected_first = disconnected_duplicate.apply_scan(disconnected_duplicate_scores, first_scan_at);
+    check(!disconnected_first.changed && disconnected_first.confirmation_pending &&
+              disconnected_first.scan_state == asc::DetectionState::ambiguous,
+          "separated above-threshold matches are reported as duplicates while requesting confirmation");
+    [[maybe_unused]] const auto disconnected_second = disconnected_duplicate.apply_scan(
+        disconnected_duplicate_scores, first_scan_at + std::chrono::seconds{1});
+    const auto disconnected_third = disconnected_duplicate.apply_scan(
+        disconnected_duplicate_scores, first_scan_at + std::chrono::seconds{2});
+    check(disconnected_third.changed && disconnected_third.tracked && disconnected_third.tracked->hardware_id == "B" &&
+              disconnected_third.scan_state == asc::DetectionState::ambiguous,
+          "a clearly preferred duplicate requires confirmation when the prior monitor no longer matches");
 
     asc::MonitorTracker malformed({.match_threshold = 0.98, .reassignment_margin = 0.01, .confirmations_required = 1});
     const auto valid_at = first_scan_at + std::chrono::seconds{5};

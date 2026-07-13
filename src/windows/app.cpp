@@ -393,7 +393,7 @@ void App::full_monitor_scan() {
         scores.push_back(std::move(score));
     }
     const auto result = controller_->on_monitor_scan(scores, Clock::now());
-    if (result.message == "candidate monitor awaiting confirmation") rescan_requested_ = true;
+    if (result.confirmation_pending) rescan_requested_ = true;
     if (result.changed && result.tracked) {
         const auto found = std::find_if(monitors.begin(), monitors.end(), [&](const auto& monitor) { return same_monitor(monitor.identity, *result.tracked); });
         if (found != monitors.end()) {

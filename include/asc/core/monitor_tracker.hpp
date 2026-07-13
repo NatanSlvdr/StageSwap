@@ -22,6 +22,7 @@ struct MonitorTrackingResult {
     DetectionState scan_state{DetectionState::reference_missing};
     double best_similarity{0.0};
     bool changed{false};
+    bool confirmation_pending{false};
     std::string message;
 };
 

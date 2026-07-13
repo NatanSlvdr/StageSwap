@@ -155,7 +155,8 @@ MonitorTrackingResult AppController::on_monitor_scan(const std::vector<MonitorSc
     if (result.changed) {
         log_.write(LogLevel::info, "monitors", "TRACKED_MONITOR_CHANGED", result.message,
                    std::string("{\"similarity\":") + std::to_string(result.best_similarity) + "}");
-    } else if (result.scan_state == DetectionState::ambiguous) {
+    }
+    if (result.scan_state == DetectionState::ambiguous) {
         status_.warning = result.message;
         log_.write(LogLevel::warning, "monitors", "DUPLICATE_REFERENCE", result.message);
     } else if (result.scan_state == DetectionState::reference_missing) {

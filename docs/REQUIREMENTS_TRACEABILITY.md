@@ -18,7 +18,7 @@ This matrix tracks the original specification against authoritative evidence in 
 | Periodic and event-driven all-monitor rediscovery | `rescan_loop`, display/session/power handlers | Implemented; display-event tests pending |
 | Stable monitor identity, observation history and renumbering resistance | DisplayConfig device path/adapter/EDID metadata; `MonitorTracker` retains bounded per-display similarity, scan/reference timestamps, capture validity, and prior-tracked state; a missing persisted monitor cannot fall back to an arbitrary display | Portable identity/observation/history tests pass; hardware identity test pending |
 | Three-scan reassignment, margin and ambiguity handling | `MonitorTracker` | Portable tests pass |
-| Missing-reference and duplicate-reference policies | `DecisionEngine`, `scan_safety_state_`, Settings behavior selector | Portable tests pass |
+| Missing-reference and duplicate-reference policies | `DecisionEngine`, `scan_safety_state_`, Settings behavior selector; any above-threshold match on the current physical monitor is retained even when a duplicate scores higher | Portable policy and anti-oscillation tests pass |
 | Webcam/screen crossfade and mid-fade reversal | `TransitionController`, GPU compositor | Portable timing/reversal tests pass; visual test pending |
 | Screen-to-screen reassignment fade | prior-screen texture and `screen_switch_mix` | Implemented; visual test pending |
 | Reference is detection-only during automatic restoration | last-known-nonmatching safe screen texture and reassignment hold | Implemented; visual test pending |

@@ -124,43 +124,53 @@ MonitorTrackingResult MonitorTracker::apply_scan(const std::vector<MonitorScore>
         return finish();
     }
 
+    // More than one above-threshold score means the reference is duplicated,
+    // even when one score is substantially higher. If the currently tracked
+    // physical monitor still has a valid match, retaining it takes precedence
+    // over score ordering so repeated scans cannot migrate or oscillate.
+    if (tracked_) {
+        const auto current = std::find_if(valid.begin(), valid.end(), [&](const MonitorScore* score) {
+            return same_monitor(score->monitor, *tracked_);
+        });
+        if (current != valid.end()) {
+            const bool duplicate = valid.size() > 1;
+            tracked_ = (*current)->monitor; // Refresh transient geometry and resolution.
+            mark_previously_tracked(*tracked_);
+            pending_key_.clear();
+            pending_confirmations_ = 0;
+            result.tracked = tracked_;
+            result.best_similarity = (*current)->similarity;
+            result.scan_state = duplicate ? DetectionState::ambiguous : DetectionState::matching;
+            result.message = duplicate ? "duplicate reference detected; retained tracked monitor" :
+                                         "reference confirmed on tracked monitor";
+            return finish();
+        }
+    }
+
     std::sort(valid.begin(), valid.end(), [](const MonitorScore* a, const MonitorScore* b) { return a->similarity > b->similarity; });
+    const bool multiple_matches = valid.size() > 1;
     const double highest_score = valid.front()->similarity;
     const auto near_end = std::find_if(valid.begin(), valid.end(), [&](const MonitorScore* score) {
         return highest_score - score->similarity > settings_.reassignment_margin;
     });
     if (tracked_) {
-        const auto current = std::find_if(valid.begin(), near_end, [&](const MonitorScore* score) { return same_monitor(score->monitor, *tracked_); });
-        if (current != near_end) std::iter_swap(valid.begin(), current);
-        else {
-            const auto affinity = std::max_element(valid.begin(), near_end, [this](const MonitorScore* a, const MonitorScore* b) {
-                return identity_affinity(a->monitor) < identity_affinity(b->monitor);
-            });
-            if (affinity != near_end) std::iter_swap(valid.begin(), affinity);
-        }
+        const auto affinity = std::max_element(valid.begin(), near_end, [this](const MonitorScore* a, const MonitorScore* b) {
+            return identity_affinity(a->monitor) < identity_affinity(b->monitor);
+        });
+        if (affinity != near_end) std::iter_swap(valid.begin(), affinity);
     }
     const auto& best = *valid.front();
     result.best_similarity = best.similarity;
 
-    const bool duplicate = std::distance(valid.begin(), near_end) > 1;
-    if (duplicate && (!tracked_ || !same_monitor(best.monitor, *tracked_))) {
+    const bool close_competition = std::distance(valid.begin(), near_end) > 1;
+    if (close_competition) {
         pending_key_.clear();
         pending_confirmations_ = 0;
         result.scan_state = DetectionState::ambiguous;
         result.message = "duplicate reference matches are ambiguous; tracked monitor unchanged";
         return finish();
     }
-    result.scan_state = duplicate ? DetectionState::ambiguous : DetectionState::matching;
-
-    if (tracked_ && same_monitor(best.monitor, *tracked_)) {
-        tracked_ = best.monitor; // Refresh transient geometry and resolution.
-        mark_previously_tracked(*tracked_);
-        pending_key_.clear();
-        pending_confirmations_ = 0;
-        result.tracked = tracked_;
-        result.message = duplicate ? "duplicate reference detected; retained tracked monitor" : "reference confirmed on tracked monitor";
-        return finish();
-    }
+    result.scan_state = multiple_matches ? DetectionState::ambiguous : DetectionState::matching;
 
     double current_score = -1.0;
     if (tracked_) {
@@ -183,7 +193,9 @@ MonitorTrackingResult MonitorTracker::apply_scan(const std::vector<MonitorScore>
         pending_confirmations_ = 1;
     }
     if (pending_confirmations_ < settings_.confirmations_required) {
-        result.message = "candidate monitor awaiting confirmation";
+        result.confirmation_pending = true;
+        result.message = multiple_matches ? "duplicate reference detected; preferred candidate awaiting confirmation" :
+                                            "candidate monitor awaiting confirmation";
         return finish();
     }
 
@@ -191,7 +203,8 @@ MonitorTrackingResult MonitorTracker::apply_scan(const std::vector<MonitorScore>
     mark_previously_tracked(*tracked_);
     result.tracked = tracked_;
     result.changed = true;
-    result.message = "tracked monitor reassigned after repeated valid scans";
+    result.message = multiple_matches ? "tracked monitor reassigned after repeated valid scans; duplicate reference remains" :
+                                        "tracked monitor reassigned after repeated valid scans";
     pending_key_.clear();
     pending_confirmations_ = 0;
     return finish();

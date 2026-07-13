@@ -15,7 +15,7 @@ Run these on the exact Windows 11 x64, Zoom, webcam, driver, SDK, and artifact v
 
 1. Change display ordering and reboot. Verify the reference scan selects the same physical panel without relying on its display number.
 2. Move the reference to another monitor. Verify three rapid confirmation scans occur and tracking changes once, with `TRACKED_MONITOR_CHANGED` logged.
-3. Put the reference on two monitors. Verify the previous tracked panel remains selected and the UI/log reports ambiguity without oscillation.
+3. Put the reference on two monitors, including a visually degraded copy on the tracked panel so the other panel scores higher. Verify the previous tracked panel remains selected and the UI/log reports ambiguity without oscillation.
 4. Disconnect and reconnect the tracked panel. Verify a red/missing state, safe camera output, automatic rescan, and recovery.
 
 ## Modes and privacy
