@@ -27,6 +27,7 @@ struct AppStatus {
     DeviceState screen_capture{DeviceState::unavailable};
     DeviceState virtual_camera{DeviceState::unavailable};
     std::optional<MonitorIdentity> tracked_monitor;
+    std::vector<MonitorObservation> monitor_observations;
     TimePoint last_full_scan{};
     std::string warning;
 };

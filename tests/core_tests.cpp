@@ -10,6 +10,7 @@
 #include "asc/core/transition.hpp"
 #include "asc/core/video_format.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <barrier>
@@ -180,24 +181,65 @@ void monitor_test() {
     const auto b = monitor("B", 1920);
     tracker.restore_preferred(a);
     const std::vector<asc::MonitorScore> scores{{a, 0.12, true}, {b, 0.993, true}};
-    check(!tracker.apply_scan(scores).changed, "first monitor scan does not reassign");
-    check(!tracker.apply_scan(scores).changed, "second monitor scan does not reassign");
-    const auto third = tracker.apply_scan(scores);
+    const auto first_scan_at = asc::Clock::now();
+    const auto first = tracker.apply_scan(scores, first_scan_at);
+    check(!first.changed, "first monitor scan does not reassign");
+    check(first.observations.size() == 2, "full scan retains one observation per connected monitor");
+    const auto observed_a = std::find_if(first.observations.begin(), first.observations.end(), [](const asc::MonitorObservation& observation) {
+        return observation.identity.hardware_id == "A";
+    });
+    const auto observed_b = std::find_if(first.observations.begin(), first.observations.end(), [](const asc::MonitorObservation& observation) {
+        return observation.identity.hardware_id == "B";
+    });
+    check(observed_a != first.observations.end() && observed_a->previously_tracked && observed_a->last_similarity == 0.12 &&
+              observed_a->last_scanned_at == first_scan_at && observed_a->last_reference_detected_at == asc::TimePoint{},
+          "observation retains score, scan time, and restored tracking history");
+    check(observed_b != first.observations.end() && !observed_b->previously_tracked && observed_b->last_similarity == 0.993 &&
+              observed_b->last_reference_detected_at == first_scan_at,
+          "valid reference match records its detection time");
+    check(!tracker.apply_scan(scores, first_scan_at + std::chrono::seconds{1}).changed, "second monitor scan does not reassign");
+    const auto third = tracker.apply_scan(scores, first_scan_at + std::chrono::seconds{2});
     check(third.changed && third.tracked && third.tracked->hardware_id == "B", "third scan reassigns");
+    const auto tracked_observation = std::find_if(third.observations.begin(), third.observations.end(), [](const asc::MonitorObservation& observation) {
+        return observation.identity.hardware_id == "B";
+    });
+    check(tracked_observation != third.observations.end() && tracked_observation->previously_tracked,
+          "successful reassignment marks the new monitor as previously tracked");
 
     const auto c = monitor("C", 3840);
-    const auto duplicate = tracker.apply_scan({{b, 0.991, true}, {c, 0.992, true}});
+    const auto duplicate = tracker.apply_scan({{b, 0.991, true}, {c, 0.992, true}}, first_scan_at + std::chrono::seconds{3});
     check(!duplicate.changed && duplicate.tracked->hardware_id == "B", "duplicate match retains current monitor");
-    const auto missing = tracker.apply_scan({{b, 0.5, true}, {c, 0.4, true}});
+    const auto missing = tracker.apply_scan({{b, 0.5, true}, {c, 0.4, true}}, first_scan_at + std::chrono::seconds{4});
     check(missing.scan_state == asc::DetectionState::reference_missing && missing.tracked->hardware_id == "B", "missing reference retains monitor");
 
     asc::MonitorTracker stronger({.match_threshold = 0.98, .reassignment_margin = 0.01, .confirmations_required = 3});
     stronger.restore_preferred(a);
     const std::vector<asc::MonitorScore> stronger_scores{{a, 0.981, true}, {b, 0.999, true}};
-    [[maybe_unused]] const auto stronger_first = stronger.apply_scan(stronger_scores);
-    [[maybe_unused]] const auto stronger_second = stronger.apply_scan(stronger_scores);
-    check(stronger.apply_scan(stronger_scores).changed && stronger.tracked()->hardware_id == "B",
+    [[maybe_unused]] const auto stronger_first = stronger.apply_scan(stronger_scores, first_scan_at);
+    [[maybe_unused]] const auto stronger_second = stronger.apply_scan(stronger_scores, first_scan_at + std::chrono::seconds{1});
+    check(stronger.apply_scan(stronger_scores, first_scan_at + std::chrono::seconds{2}).changed && stronger.tracked()->hardware_id == "B",
           "clearly stronger match can replace a weak-but-valid current monitor");
+
+    asc::MonitorTracker malformed({.match_threshold = 0.98, .reassignment_margin = 0.01, .confirmations_required = 1});
+    const auto valid_at = first_scan_at + std::chrono::seconds{5};
+    [[maybe_unused]] const auto valid_observation = malformed.apply_scan({{b, 0.99, true}}, valid_at);
+    const auto invalid_at = valid_at + std::chrono::seconds{1};
+    const auto invalid = malformed.apply_scan({{b, std::numeric_limits<double>::quiet_NaN(), true},
+                                                {c, 1.5, true}}, invalid_at);
+    check(invalid.scan_state == asc::DetectionState::reference_missing && invalid.observations.size() == 2,
+          "non-finite and out-of-range scores cannot select a monitor");
+    const auto invalid_b = std::find_if(invalid.observations.begin(), invalid.observations.end(), [](const asc::MonitorObservation& observation) {
+        return observation.identity.hardware_id == "B";
+    });
+    check(invalid_b != invalid.observations.end() && !invalid_b->capture_valid && invalid_b->last_similarity == 0.99 &&
+              invalid_b->last_scanned_at == invalid_at && invalid_b->last_reference_detected_at == valid_at,
+          "invalid capture preserves the last valid similarity and reference timestamp");
+
+    asc::MonitorTracker bounded_history;
+    std::vector<asc::MonitorScore> transient_monitors;
+    for (int i = 0; i < 300; ++i) transient_monitors.push_back({monitor("transient-" + std::to_string(i), i), 0.1, true});
+    [[maybe_unused]] const auto transient_scan = bounded_history.apply_scan(transient_monitors, invalid_at);
+    check(bounded_history.remembered_monitor_count() == 256, "monitor observation history has a fixed upper bound");
 }
 
 void config_test() {
@@ -335,6 +377,9 @@ void controller_test() {
     [[maybe_unused]] const auto found_elsewhere = scan_controller.on_monitor_scan({{monitor("scan-match"), 0.995, true}}, now);
     check(scan_controller.status().automatic_target == asc::Source::camera,
           "full scan match immediately hides a reference found on another monitor");
+    check(scan_controller.status().monitor_observations.size() == 1 &&
+              scan_controller.status().monitor_observations.front().last_similarity == 0.995,
+          "controller status exposes the latest per-monitor observations");
     fs::remove_all(directory);
 }
 
@@ -414,9 +459,13 @@ bool coherent_status_snapshot(const asc::AppStatus& status) {
         status.availability.camera_ready == (status.video_input == asc::DeviceState::ready) &&
         status.availability.screen_ready == (status.screen_capture == asc::DeviceState::ready) &&
         status.availability.placeholder_ready;
+    const bool observations_are_coherent = std::all_of(status.monitor_observations.begin(), status.monitor_observations.end(),
+        [](const asc::MonitorObservation& observation) {
+            return std::isfinite(observation.last_similarity) && observation.last_similarity >= 0.0 && observation.last_similarity <= 1.0;
+        });
     return valid_run_state(status.run_state) && valid_mode(status.mode) &&
            valid_source(status.automatic_target) && valid_source(status.actual_output) &&
-           transition_is_valid && detection_is_valid && components_are_coherent;
+           transition_is_valid && detection_is_valid && components_are_coherent && observations_are_coherent;
 }
 
 bool coherent_config_snapshot(const asc::AppConfig& config) {

@@ -40,6 +40,7 @@ private:
     std::vector<VideoDevice> devices_;
     std::vector<std::string> video_option_ids_;
     std::vector<MonitorDevice> monitors_;
+    std::vector<MonitorObservation> monitor_observations_;
     std::unique_ptr<PreviewWindow> previews_;
     bool finished_{false};
     int scroll_position_{0};

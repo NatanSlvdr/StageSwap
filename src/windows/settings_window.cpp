@@ -40,7 +40,8 @@ void SettingsWindow::show(const HWND owner, const HINSTANCE instance, App& app) 
 }
 
 SettingsWindow::SettingsWindow(const HWND owner, const HINSTANCE instance, App& app)
-    : owner_(owner), instance_(instance), app_(app), working_(app.config()), devices_(app.video_devices()), monitors_(app.monitors()) {
+    : owner_(owner), instance_(instance), app_(app), working_(app.config()), devices_(app.video_devices()), monitors_(app.monitors()),
+      monitor_observations_(app.status().monitor_observations) {
     WNDCLASSEXW wc{sizeof(wc)}; wc.hInstance = instance_; wc.lpfnWndProc = procedure; wc.lpszClassName = L"AutomaticScreenCameraSettings";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW); wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassExW(&wc);
@@ -270,10 +271,25 @@ void SettingsWindow::create_controls() {
     add_label(L"Preferred tracked display", 20, 284); const auto monitor_combo = add_combo(tracked_monitor, 240, 280, 445);
     combo_add(monitor_combo, L"Keep automatic/reference-based selection");
     int monitor_selected = 0;
+    const auto now = Clock::now();
     for (std::size_t i = 0; i < monitors_.size(); ++i) {
         std::wostringstream description; description << wide(monitors_[i].identity.model) << L" — "
             << monitors_[i].identity.resolution.width << L"×" << monitors_[i].identity.resolution.height << L" at ("
             << monitors_[i].identity.desktop_x << L", " << monitors_[i].identity.desktop_y << L")";
+        const auto observation = std::find_if(monitor_observations_.begin(), monitor_observations_.end(), [&](const MonitorObservation& item) {
+            return item.identity.stable_key() == monitors_[i].identity.stable_key();
+        });
+        if (observation != monitor_observations_.end()) {
+            description << L" — last similarity " << std::fixed << std::setprecision(1) << observation->last_similarity * 100.0 << L'%';
+            if (!observation->capture_valid) description << L" (latest scan unavailable)";
+            if (observation->last_reference_detected_at != TimePoint{}) {
+                const auto age = std::max(std::chrono::seconds{0}, std::chrono::duration_cast<std::chrono::seconds>(now - observation->last_reference_detected_at));
+                description << L", reference seen " << age.count() << L" s ago";
+            } else {
+                description << L", reference not yet seen";
+            }
+            if (observation->previously_tracked) description << L", previously tracked";
+        }
         combo_add(monitor_combo, description.str().c_str());
         if (working_.last_tracked_monitor && monitors_[i].identity.stable_key() == working_.last_tracked_monitor->stable_key())
             monitor_selected = static_cast<int>(i + 1);

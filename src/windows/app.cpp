@@ -402,8 +402,12 @@ void App::full_monitor_scan() {
             save_config();
         }
     }
-    log_.write(LogLevel::info, "monitors", "FULL_SCAN_COMPLETED", "Full display scan completed",
-               std::string("{\"display_count\":") + std::to_string(monitors.size()) + "}");
+    std::string scan_message = "Full display scan completed; " + result.message;
+    if (result.tracked && !result.tracked->model.empty()) scan_message += " (" + result.tracked->model + ")";
+    log_.write(LogLevel::info, "monitors", "FULL_SCAN_COMPLETED", std::move(scan_message),
+               std::string("{\"display_count\":") + std::to_string(monitors.size()) +
+                   ",\"observation_count\":" + std::to_string(result.observations.size()) +
+                   ",\"best_similarity\":" + std::to_string(result.best_similarity) + "}");
 }
 
 void App::set_current_screen_reference() {

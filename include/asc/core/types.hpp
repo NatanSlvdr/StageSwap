@@ -50,6 +50,18 @@ struct MonitorScore {
     bool capture_valid{false};
 };
 
+// Runtime rediscovery metadata for a monitor that was present in the latest
+// full scan. Identity stays separate so persisted hardware matching does not
+// depend on transient observations.
+struct MonitorObservation {
+    MonitorIdentity identity;
+    double last_similarity{0.0};
+    bool capture_valid{false};
+    TimePoint last_scanned_at{};
+    TimePoint last_reference_detected_at{};
+    bool previously_tracked{false};
+};
+
 struct DetectionSnapshot {
     DetectionState state{DetectionState::unknown};
     double similarity{0.0};

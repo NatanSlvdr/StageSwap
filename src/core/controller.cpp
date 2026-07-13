@@ -136,8 +136,9 @@ void AppController::on_similarity(const double similarity, const bool capture_va
 MonitorTrackingResult AppController::on_monitor_scan(const std::vector<MonitorScore>& scores, const TimePoint now) {
     std::scoped_lock lock(mutex_);
     const auto previous_detection = status_.detection.state;
-    auto result = monitor_tracker_.apply_scan(scores);
+    auto result = monitor_tracker_.apply_scan(scores, now);
     status_.tracked_monitor = result.tracked;
+    status_.monitor_observations = result.observations;
     status_.last_full_scan = now;
     if (result.scan_state == DetectionState::reference_missing || result.scan_state == DetectionState::ambiguous) {
         scan_safety_state_ = result.scan_state;
@@ -212,6 +213,7 @@ void AppController::reconfigure(const AppConfig& config, const TimePoint now) {
 void AppController::set_tracked_monitor(MonitorIdentity monitor) {
     std::scoped_lock lock(mutex_);
     monitor_tracker_.restore_preferred(monitor);
+    status_.monitor_observations = monitor_tracker_.observations();
     status_.tracked_monitor = std::move(monitor);
     log_.write(LogLevel::info, "monitors", "TRACKED_MONITOR_SELECTED", "Tracked monitor selected by user");
 }

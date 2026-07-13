@@ -16,7 +16,7 @@ This matrix tracks the original specification against authoritative evidence in 
 | Robust low-resolution similarity | `image_similarity`, GPU 160×90 downscale | Portable similarity tests pass; GPU path pending |
 | 250 ms checks, threshold and match/mismatch debounce | `DebouncedDetector`, Settings | Portable tests pass |
 | Periodic and event-driven all-monitor rediscovery | `rescan_loop`, display/session/power handlers | Implemented; display-event tests pending |
-| Stable monitor identity and renumbering resistance | DisplayConfig device path/adapter/EDID manufacturer metadata, `MonitorTracker`; a missing persisted monitor cannot fall back to an arbitrary display | Selection tests and Windows build pass; hardware identity test pending |
+| Stable monitor identity, observation history and renumbering resistance | DisplayConfig device path/adapter/EDID metadata; `MonitorTracker` retains bounded per-display similarity, scan/reference timestamps, capture validity, and prior-tracked state; a missing persisted monitor cannot fall back to an arbitrary display | Portable identity/observation/history tests pass; hardware identity test pending |
 | Three-scan reassignment, margin and ambiguity handling | `MonitorTracker` | Portable tests pass |
 | Missing-reference and duplicate-reference policies | `DecisionEngine`, `scan_safety_state_`, Settings behavior selector | Portable tests pass |
 | Webcam/screen crossfade and mid-fade reversal | `TransitionController`, GPU compositor | Portable timing/reversal tests pass; visual test pending |
