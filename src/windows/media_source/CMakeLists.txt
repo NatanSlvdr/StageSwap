@@ -15,5 +15,5 @@ target_compile_definitions(AutomaticScreenCameraSource PRIVATE UNICODE _UNICODE 
 asc_enable_project_warnings(AutomaticScreenCameraSource)
 target_compile_options(AutomaticScreenCameraSource PRIVATE $<$<CONFIG:Release>:/Zi>)
 target_link_options(AutomaticScreenCameraSource PRIVATE $<$<CONFIG:Release>:/DEBUG:FULL>)
-target_link_libraries(AutomaticScreenCameraSource PRIVATE asc_core d3d11 dxgi mf mfplat mfuuid mfsensorgroup ole32 advapi32)
+target_link_libraries(AutomaticScreenCameraSource PRIVATE asc_core d3d11 dxgi mf mfplat mfuuid mfsensorgroup runtimeobject ole32 advapi32)
 set_target_properties(AutomaticScreenCameraSource PROPERTIES OUTPUT_NAME "AutomaticScreenCameraSource")
