@@ -17,6 +17,11 @@ bool same_monitor(const MonitorIdentity& a, const MonitorIdentity& b) {
     if (!a.hardware_id.empty() && a.hardware_id == b.hardware_id) return a.serial.empty() || b.serial.empty() || a.serial == b.serial;
     return !a.device_path.empty() && a.device_path == b.device_path;
 }
+std::string video_source_description(const std::string& name, const std::string& identifier) {
+    if (identifier.empty()) return "no video input";
+    if (name.empty()) return "unavailable saved source [" + identifier + ']';
+    return name + " [" + identifier + ']';
+}
 template <typename FrameProvider>
 bool wait_for_valid_frame(FrameProvider&& provider, const std::chrono::milliseconds timeout = 1500ms) {
     const auto deadline = Clock::now() + timeout;
@@ -114,13 +119,15 @@ int App::run() {
 }
 
 void App::initialize_components() {
+    refresh_selected_video_device_name();
     controller_->begin_start();
     bool video_ready = false, screen_ready = false, virtual_ready = false;
     try {
         if (!config_.selected_video_device_id.empty()) {
             video_input_.start(config_.selected_video_device_id, config_.preferred_input_size, config_.preferred_input_fps);
             video_ready = wait_for_valid_frame([this] { return video_input_.latest_frame(); });
-            log_.write(LogLevel::info, "video_input", "VIDEO_INPUT_INITIALIZED", "Selected video input initialized");
+            log_.write(LogLevel::info, "video_input", "VIDEO_INPUT_INITIALIZED",
+                       "Selected video input initialized: " + video_source_description(selected_video_device_name_, config_.selected_video_device_id));
         }
     } catch (const std::exception& e) { report_error("video_input", "VIDEO_INPUT_FAILED", e); }
     try {
@@ -306,6 +313,7 @@ void App::recovery_loop(const std::stop_token stop) {
                 }
                 bool video_recovered = false;
                 if (!config_.selected_video_device_id.empty()) {
+                    refresh_selected_video_device_name();
                     { std::scoped_lock lock(component_mutex_);
                       video_input_.start(config_.selected_video_device_id, config_.preferred_input_size, config_.preferred_input_fps); }
                     video_recovered = wait_for_valid_frame([this] { return video_input_.latest_frame(); });
@@ -327,9 +335,13 @@ void App::recovery_loop(const std::stop_token stop) {
                 const auto frame = video_input_.latest_frame();
                 if (!frame.valid() || Clock::now() - frame.received_at > 3s || FAILED(video_input_.last_error())) {
                     if (controller_->status().video_input == DeviceState::ready)
-                        log_.write(LogLevel::warning, "video_input", "VIDEO_INPUT_DISCONNECTED", "Selected video input stopped producing frames");
+                        log_.write(LogLevel::warning, "video_input", "VIDEO_INPUT_DISCONNECTED",
+                                   "Selected video input stopped producing frames: " +
+                                       video_source_description(selected_video_device_name_, config_.selected_video_device_id));
                     controller_->set_component_state(Source::camera, DeviceState::recovering, Clock::now());
-                    log_.write(LogLevel::warning, "recovery", "VIDEO_INPUT_RETRY", "Retrying unavailable video input");
+                    log_.write(LogLevel::warning, "recovery", "VIDEO_INPUT_RETRY",
+                               "Retrying unavailable video input: " +
+                                   video_source_description(selected_video_device_name_, config_.selected_video_device_id));
                     restart_video_input();
                 }
             }
@@ -477,7 +489,9 @@ void App::request_rescan() { rescan_requested_ = true; }
 void App::restart_video_input() {
     std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     ++recovery_attempts_;
-    log_.write(LogLevel::info, "recovery", "VIDEO_INPUT_RECOVERY_STARTED", "Restarting selected video input");
+    refresh_selected_video_device_name();
+    log_.write(LogLevel::info, "recovery", "VIDEO_INPUT_RECOVERY_STARTED",
+               "Restarting selected video input: " + video_source_description(selected_video_device_name_, config_.selected_video_device_id));
     if (config_.selected_video_device_id.empty()) {
         { std::scoped_lock lock(component_mutex_); video_input_.stop(); }
         controller_->set_component_state(Source::camera, DeviceState::unavailable, Clock::now());
@@ -487,7 +501,8 @@ void App::restart_video_input() {
     try { { std::scoped_lock lock(component_mutex_); video_input_.restart(); }
           if (!wait_for_valid_frame([this] { return video_input_.latest_frame(); })) throw std::runtime_error("video input did not produce a valid frame");
           controller_->set_component_state(Source::camera, DeviceState::ready, Clock::now());
-          log_.write(LogLevel::info, "recovery", "VIDEO_INPUT_RECOVERED", "Video input restarted"); }
+          log_.write(LogLevel::info, "recovery", "VIDEO_INPUT_RECOVERED",
+                     "Video input restarted: " + video_source_description(selected_video_device_name_, config_.selected_video_device_id)); }
     catch (const std::exception& e) { controller_->set_component_state(Source::camera, DeviceState::failed, Clock::now()); report_error("recovery", "VIDEO_INPUT_RECOVERY_FAILED", e); }
 }
 void App::restart_screen_capture() {
@@ -572,6 +587,30 @@ std::vector<VideoDevice> App::video_devices() const {
     try { return enumerate_video_devices(); }
     catch (...) { return {}; }
 }
+
+SelectedVideoSourceInfo App::selected_video_source() const {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+    return {config_.selected_video_device_id,
+            selected_video_device_name_for_id_ == config_.selected_video_device_id ? selected_video_device_name_ : std::string{}};
+}
+
+void App::refresh_selected_video_device_name() {
+    if (config_.selected_video_device_id.empty()) {
+        selected_video_device_name_.clear();
+        selected_video_device_name_for_id_.clear();
+        return;
+    }
+    if (selected_video_device_name_for_id_ != config_.selected_video_device_id) {
+        selected_video_device_name_.clear();
+        selected_video_device_name_for_id_ = config_.selected_video_device_id;
+    }
+    try {
+        if (const auto name = find_video_device_name(config_.selected_video_device_id)) selected_video_device_name_ = *name;
+    } catch (...) {
+        // Keep the last known friendly name. Device initialization/recovery
+        // reports the actionable error and retains the stable identifier.
+    }
+}
 std::vector<MonitorDevice> App::monitors() const {
     std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     try { return enumerate_monitors(); }
@@ -589,6 +628,7 @@ void App::apply_settings(AppConfig updated) {
     updated.output_mode = prior_mode;
     updated.monitor_tracker.match_threshold = updated.detector.threshold;
     config_ = std::move(updated);
+    refresh_selected_video_device_name();
     configuration_warning_.clear();
     log_.set_minimum_level(config_.diagnostic_logging ? LogLevel::trace : config_.log_level);
     log_.set_retention_days(config_.log_retention_days);
@@ -619,6 +659,9 @@ void App::apply_settings(AppConfig updated) {
                   video_input_.start(config_.selected_video_device_id, config_.preferred_input_size, config_.preferred_input_fps); }
                 if (!wait_for_valid_frame([this] { return video_input_.latest_frame(); })) throw std::runtime_error("configured video input did not produce a valid frame");
                 controller_->set_component_state(Source::camera, DeviceState::ready, Clock::now());
+                log_.write(LogLevel::info, "video_input", "VIDEO_INPUT_INITIALIZED",
+                           "Configured video input initialized: " +
+                               video_source_description(selected_video_device_name_, config_.selected_video_device_id));
             }
         } catch (const std::exception& e) { controller_->set_component_state(Source::camera, DeviceState::failed, Clock::now()); report_error("video_input", "VIDEO_INPUT_RECONFIGURE_FAILED", e); }
     }

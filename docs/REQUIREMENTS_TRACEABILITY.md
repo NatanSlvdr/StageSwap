@@ -5,7 +5,7 @@ This matrix tracks the original specification against authoritative evidence in 
 | Requirement area | Implementation evidence | Verification status |
 |---|---|---|
 | Standalone local-only architecture | `src/windows/app.cpp`, `shared_frame.cpp`, `media_source/`; no OBS/plugin or network runtime dependency | Implemented; Windows runtime pending |
-| Webcam/video device enumeration, identifiers and native formats | `device_enumerator.cpp`; Settings shows each selected source's connection state, stable identifier, and reported native formats while preserving unavailable saved sources | Implemented; physical devices pending |
+| Webcam/video device enumeration, identifiers and native formats | `device_enumerator.cpp`; Settings shows connection state, stable identifier, and native formats; lightweight lifecycle-only friendly-name lookup avoids activating cameras during status refresh | Implemented; physical devices pending |
 | Saved source, unavailable-source preservation and automatic retry | `AppConfig`, `ConfigStore`, `build_persistent_device_choices`, unavailable Settings entry, `App::recovery_loop` | Portable persistence/unavailable-choice regression and Windows build pass; physical disconnect pending |
 | Manual video-source restart | `App::restart_video_input`, tray and Settings commands | Implemented; device test pending |
 | Full-monitor Windows Graphics Capture, cursor default off | `ScreenCapture`, `AppConfig::cursor_visible` | Implemented; capture test pending |
@@ -25,8 +25,8 @@ This matrix tracks the original specification against authoritative evidence in 
 | Automatic / Force webcam / Force screen | `OutputMode`, controller and UI controls | Portable policy tests pass; runtime test pending |
 | Manual override banner, persistent override and return-to-auto fade | `TrayWindow`, `AppController::set_mode`, configuration | Implemented; UI test pending |
 | Start/Stop with privacy-safe stopped output | controller stopped-state invariant; compositor/virtual camera remain alive | Portable invariant tests pass |
-| Tray startup, status icon/tooltip and required menu actions | `TrayWindow`, installer startup entry | Implemented; shell test pending |
-| Compact status dashboard and recent events | `TrayWindow::refresh`, bounded 20-event list with timestamp, event code/type, component, message, and structured context | Portable event-summary regression passes; Windows UI pending |
+| Tray startup, status icon/tooltip and required menu actions | `TrayWindow`, installer startup entry; compact text tooltip identifies state/mode, reference state, concrete output device, and tracked screen | Implemented; shell test pending |
+| Compact status dashboard and recent events | `TrayWindow::refresh` shows friendly selected-camera and concrete target/output names; bounded 20-event list includes timestamp, event code/type, component, message, and structured context | Portable event-summary regression passes; Windows UI pending |
 | Persistent structured logs, levels, rotation, export/copy/clear | `EventLog`; Settings and tray both expose diagnostic log actions | Portable write/export/clear tests pass |
 | Recovery controls and automatic graphics/device recovery | `restart_*`, `restart_all`, `recovery_loop` | Implemented; fault-injection pending |
 | Atomic configuration, backup and invalid-file preservation | `ConfigStore`; confirmed automatic monitor reassignments are persisted; unavailable saved cameras remain selected in Settings | Portable corruption/recovery and unavailable-device tests pass |

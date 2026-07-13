@@ -25,6 +25,10 @@ class TrayWindow;
 
 enum class PreviewKind { camera, screen, output, reference };
 struct PreviewImage { Size size; std::vector<std::uint8_t> bgra; };
+struct SelectedVideoSourceInfo {
+    std::string identifier;
+    std::string display_name;
+};
 struct DiagnosticCounters {
     std::uint64_t frames_published{0};
     std::uint64_t detection_checks{0};
@@ -65,6 +69,7 @@ public:
     // Return a snapshot: settings may be replaced while windows are rendering.
     [[nodiscard]] AppConfig config() const;
     [[nodiscard]] bool automation_running() const noexcept { return automation_running_; }
+    [[nodiscard]] SelectedVideoSourceInfo selected_video_source() const;
     [[nodiscard]] std::vector<VideoDevice> video_devices() const;
     [[nodiscard]] std::vector<MonitorDevice> monitors() const;
     void apply_settings(AppConfig updated);
@@ -78,6 +83,7 @@ private:
     void rescan_loop(std::stop_token stop);
     void recovery_loop(std::stop_token stop);
     void full_monitor_scan();
+    void refresh_selected_video_device_name();
     [[nodiscard]] std::optional<MonitorDevice> resolve_tracked_monitor(const std::vector<MonitorDevice>& monitors) const;
     void save_config();
     void save_reference_thumbnail(const GrayImage& image) const;
@@ -117,6 +123,8 @@ private:
     std::jthread recovery_thread_;
     std::jthread reference_worker_;
     std::vector<MonitorIdentity> known_monitors_;
+    std::string selected_video_device_name_;
+    std::string selected_video_device_name_for_id_;
     std::string configuration_warning_;
     VideoFrame previous_screen_frame_;
     VideoFrame safe_screen_frame_;

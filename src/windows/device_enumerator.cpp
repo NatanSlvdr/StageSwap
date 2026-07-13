@@ -119,6 +119,32 @@ std::vector<VideoDevice> enumerate_video_devices() {
     return result;
 }
 
+std::optional<std::string> find_video_device_name(const std::string_view identifier) {
+    if (identifier.empty()) return std::nullopt;
+    ComPtr<IMFAttributes> attributes;
+    check_hresult(MFCreateAttributes(&attributes, 1), "MFCreateAttributes");
+    check_hresult(attributes->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID),
+                  "Set capture source type");
+    IMFActivate** raw = nullptr;
+    UINT32 count = 0;
+    check_hresult(MFEnumDeviceSources(attributes.Get(), &raw, &count), "MFEnumDeviceSources");
+    std::optional<std::string> result;
+    for (UINT32 i = 0; i < count; ++i) {
+        ComPtr<IMFActivate> activate;
+        activate.Attach(raw[i]);
+        CoTaskMemString id;
+        UINT32 id_length = 0;
+        activate->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, &id.value, &id_length);
+        if (!id.value || utf8(id.value) != identifier) continue;
+        CoTaskMemString name;
+        UINT32 name_length = 0;
+        activate->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name.value, &name_length);
+        if (name.value) result = utf8(name.value);
+    }
+    CoTaskMemFree(raw);
+    return result;
+}
+
 std::vector<MonitorDevice> enumerate_monitors() {
     std::vector<MonitorDevice> result;
     EnumDisplayMonitors(nullptr, nullptr, monitor_callback, reinterpret_cast<LPARAM>(&result));

@@ -29,9 +29,31 @@ const wchar_t* detection_name(const DetectionState state) {
     case DetectionState::not_matching: return L"Absent"; case DetectionState::reference_missing: return L"Missing"; case DetectionState::ambiguous: return L"Ambiguous"; }
     return L"Unknown";
 }
-const wchar_t* source_name(const Source source) {
-    switch (source) { case Source::camera: return L"Webcam/video"; case Source::screen: return L"Screen capture"; case Source::placeholder: return L"Safe placeholder"; }
+std::wstring selected_video_name(const SelectedVideoSourceInfo& source) {
+    if (source.identifier.empty()) return L"None selected";
+    if (!source.display_name.empty()) return wide(source.display_name);
+    return L"Unavailable saved source";
+}
+std::wstring monitor_name(const std::optional<MonitorIdentity>& monitor) {
+    if (!monitor) return L"Not identified";
+    if (!monitor->model.empty()) return wide(monitor->model);
+    if (!monitor->device_path.empty()) return wide(monitor->device_path);
+    return L"Unidentified display";
+}
+std::wstring output_name(const Source source, const SelectedVideoSourceInfo& video,
+                         const std::optional<MonitorIdentity>& monitor) {
+    switch (source) {
+    case Source::camera: return selected_video_name(video);
+    case Source::screen: return monitor_name(monitor);
+    case Source::placeholder: return L"Safe placeholder";
+    }
     return L"Unknown";
+}
+std::wstring compact_label(std::wstring value, const std::size_t limit = 20) {
+    if (value.size() <= limit) return value;
+    value.resize(limit - 1);
+    value += L'\u2026';
+    return value;
 }
 const wchar_t* mode_name(const OutputMode mode) {
     switch (mode) { case OutputMode::automatic: return L"Automatic"; case OutputMode::force_camera: return L"Force webcam/video"; case OutputMode::force_screen: return L"Force screen capture"; }
@@ -137,6 +159,8 @@ void TrayWindow::create_controls() {
 
 void TrayWindow::refresh() {
     const auto state = app_.status();
+    const auto config = app_.config();
+    const auto selected_video = app_.selected_video_source();
     const bool override = state.mode != OutputMode::automatic;
     ShowWindow(override_banner_, override ? SW_SHOW : SW_HIDE);
     ShowWindow(GetDlgItem(window_, return_automatic), override ? SW_SHOW : SW_HIDE);
@@ -144,13 +168,14 @@ void TrayWindow::refresh() {
     text << L"Status: " << (app_.automation_running() ? L"Running" : L"Stopped") << L"\r\n"
          << L"Mode: " << mode_name(state.mode) << L"\r\n"
          << L"Reference: " << detection_name(state.detection.state) << L"    Similarity: " << std::fixed << std::setprecision(1) << state.detection.similarity * 100.0 << L"%"
-         << L"    Threshold: " << app_.config().detector.threshold * 100.0 << L"%\r\n"
+         << L"    Threshold: " << config.detector.threshold * 100.0 << L"%\r\n"
          << L"Confirmations: " << state.detection.consecutive_matches << L" matching / " << state.detection.consecutive_mismatches << L" mismatching\r\n"
-         << L"Tracked display: " << (state.tracked_monitor ? wide(state.tracked_monitor->model) : L"Not identified");
+         << L"Tracked display: " << monitor_name(state.tracked_monitor);
     if (state.tracked_monitor) text << L" — " << state.tracked_monitor->resolution.width << L"×" << state.tracked_monitor->resolution.height;
     text << L"\r\n"
-         << L"Selected video source: " << (app_.config().selected_video_device_id.empty() ? L"None" : wide(app_.config().selected_video_device_id)) << L"\r\n"
-         << L"Automatic target: " << source_name(state.automatic_target) << L"    Actual output: " << source_name(state.actual_output) << L"\r\n"
+         << L"Selected video source: " << selected_video_name(selected_video) << L"\r\n"
+         << L"Automatic target: " << output_name(state.automatic_target, selected_video, state.tracked_monitor)
+         << L"    Actual output: " << output_name(state.actual_output, selected_video, state.tracked_monitor) << L"\r\n"
          << L"Transition: " << (state.transition.active ? L"In progress" : L"Idle") << L"    " << static_cast<int>(state.transition.screen_mix * 100) << L"% screen    " << state.transition.remaining.count() << L" ms remaining\r\n"
          << L"Video input: " << device_name(state.video_input) << L"    Screen capture: " << device_name(state.screen_capture) << L"    Virtual camera: " << device_name(state.virtual_camera) << L"\r\n";
     const auto now = Clock::now();
@@ -163,7 +188,7 @@ void TrayWindow::refresh() {
     CheckRadioButton(window_, automatic, force_screen, state.mode == OutputMode::automatic ? automatic : state.mode == OutputMode::force_camera ? force_camera : force_screen);
     SendMessageW(recent_list_, LB_RESETCONTENT, 0, 0);
     for (const auto& event : app_.recent_events()) { const auto line = event_line(event); SendMessageW(recent_list_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str())); }
-    if (app_.config().show_notifications && !state.warning.empty() && state.warning != last_notified_warning_) {
+    if (config.show_notifications && !state.warning.empty() && state.warning != last_notified_warning_) {
         last_notified_warning_ = state.warning;
         tray_.uFlags = NIF_INFO;
         wcsncpy_s(tray_.szInfoTitle, L"Automatic Screen Camera warning", _TRUNCATE);
@@ -193,6 +218,7 @@ HICON TrayWindow::make_status_icon(const COLORREF color) const {
 
 void TrayWindow::update_tray_icon() {
     const auto state = app_.status();
+    const auto selected_video = app_.selected_video_source();
     COLORREF color = RGB(128, 128, 128);
     if (state.run_state == RunState::stopped || state.run_state == RunState::stopping) color = RGB(128, 128, 128);
     else if (state.mode != OutputMode::automatic) color = RGB(155, 80, 200);
@@ -202,8 +228,11 @@ void TrayWindow::update_tray_icon() {
     else if (state.actual_output == Source::camera) color = RGB(45, 175, 85);
     if (status_icon_) DestroyIcon(status_icon_);
     status_icon_ = make_status_icon(color); tray_.hIcon = status_icon_;
-    std::wostringstream tip; tip << L"Automatic Screen Camera\nStatus: " << (app_.automation_running() ? L"Running" : L"Stopped")
-                                 << L"\nMode: " << mode_name(state.mode) << L"\nReference: " << detection_name(state.detection.state) << L"\nOutput: " << source_name(state.actual_output);
+    std::wostringstream tip;
+    tip << L"Automatic Screen Camera\n"
+        << (app_.automation_running() ? mode_name(state.mode) : L"Stopped") << L" | " << detection_name(state.detection.state)
+        << L"\nOut: " << compact_label(output_name(state.actual_output, selected_video, state.tracked_monitor))
+        << L"\nScreen: " << compact_label(monitor_name(state.tracked_monitor));
     wcsncpy_s(tray_.szTip, tip.str().c_str(), _TRUNCATE);
     if (tray_.hWnd) Shell_NotifyIconW(NIM_MODIFY, &tray_);
 }
