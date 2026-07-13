@@ -246,9 +246,11 @@ void event_log_test() {
     check(log.recent().size() == 2, "recent event list is bounded");
     const auto exported = directory / "export.txt";
     log.export_to(exported);
-    std::ifstream input(exported);
-    const std::string contents{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-    check(contents.find("\"event_code\":\"THREE\"") != std::string::npos, "structured log exports JSON Lines");
+    {
+        std::ifstream input(exported);
+        const std::string contents{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        check(contents.find("\"event_code\":\"THREE\"") != std::string::npos, "structured log exports JSON Lines");
+    }
     log.clear();
     check(log.recent().empty(), "clearing logs clears recent events");
     std::filesystem::remove_all(directory);
