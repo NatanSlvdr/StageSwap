@@ -401,13 +401,17 @@ void controller_test() {
     check(controller.status().automatic_target == asc::Source::screen, "controller targets screen on loss");
     [[maybe_unused]] const auto missing_scan = controller.on_monitor_scan({}, now);
     check(controller.status().automatic_target == asc::Source::camera, "full-scan missing state applies safe camera behavior");
-    controller.set_mode(asc::OutputMode::force_camera, now);
-    check(controller.status().transition.target == asc::Source::camera, "controller override targets camera");
-    controller.stop();
+    controller.set_mode(asc::OutputMode::force_screen, now);
+    controller.tick(now + std::chrono::milliseconds{500});
+    check(controller.status().actual_output == asc::Source::screen, "forced screen output becomes active before stop");
+    controller.stop(now + std::chrono::milliseconds{500});
     check(controller.status().run_state == asc::RunState::stopped && controller.status().transition.target == asc::Source::camera,
-          "stopping retains safe camera target");
-    controller.set_component_state(asc::Source::screen, asc::DeviceState::recovering, now);
-    controller.set_component_state(asc::Source::screen, asc::DeviceState::ready, now);
+          "stopping active screen output begins the safe camera transition");
+    controller.tick(now + std::chrono::milliseconds{1000});
+    check(controller.status().actual_output == asc::Source::camera && !controller.status().transition.active,
+          "safe stopped output transition completes on camera");
+    controller.set_component_state(asc::Source::screen, asc::DeviceState::recovering, now + std::chrono::milliseconds{1000});
+    controller.set_component_state(asc::Source::screen, asc::DeviceState::ready, now + std::chrono::milliseconds{1000});
     check(controller.status().transition.target == asc::Source::camera, "background recovery cannot expose screen while stopped");
 
     asc::AppController scan_controller(config, log);

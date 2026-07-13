@@ -23,7 +23,7 @@ Run these on the exact Windows 11 x64, Zoom, webcam, driver, SDK, and artifact v
 1. Force webcam/video, remove the reference, and verify output remains camera while Automatic target says Screen capture.
 2. Force screen, restore the reference, and verify output remains screen while Automatic target says Webcam/video.
 3. Return to Automatic and verify a fade to the current automatic target.
-4. Press Stop while screen output is active. Verify the output fades to camera or placeholder and does not retain private screen content.
+4. Press Stop while screen output is active. Verify the output fades to camera or placeholder, the tracked-screen preview becomes unavailable, the Windows Graphics Capture session closes, and background recovery does not reopen it until Start is pressed.
 5. Terminate the tray process while a consumer is open. Verify the camera source changes to its generated placeholder rather than replaying stale frames.
 
 ## Recovery and persistence

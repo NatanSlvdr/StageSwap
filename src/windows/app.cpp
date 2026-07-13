@@ -120,7 +120,10 @@ App::~App() {
 int App::run() {
     window_ = std::make_unique<TrayWindow>(instance_, *this);
     initialize_components();
-    if (!config_.start_automatically) controller_->stop();
+    if (!config_.start_automatically) {
+        controller_->stop();
+        suspend_screen_capture();
+    }
     compositor_thread_ = std::jthread([this](const std::stop_token stop) { compositor_loop(stop); });
     recovery_thread_ = std::jthread([this](const std::stop_token stop) { recovery_loop(stop); });
     if (config_.start_automatically) start_automation();
@@ -176,6 +179,10 @@ std::optional<MonitorDevice> App::resolve_tracked_monitor(const std::vector<Moni
 void App::start_automation() {
     if (automation_running_.exchange(true)) return;
     if (controller_->status().run_state == RunState::stopped) {
+        if (!config_.selected_video_device_id.empty() && controller_->status().video_input != DeviceState::ready)
+            restart_video_input();
+        if (controller_->status().screen_capture != DeviceState::ready) restart_screen_capture();
+        if (controller_->status().virtual_camera != DeviceState::ready) restart_virtual_camera();
         const auto previous = controller_->status();
         controller_->begin_start();
         controller_->finish_start(previous.video_input == DeviceState::ready, previous.screen_capture == DeviceState::ready,
@@ -189,10 +196,32 @@ void App::start_automation() {
 
 void App::stop_automation() {
     if (!automation_running_.exchange(false)) return;
-    controller_->stop();
+    const auto stop_requested_at = Clock::now();
+    controller_->stop(stop_requested_at);
     if (detector_thread_.joinable()) { detector_thread_.request_stop(); detector_thread_.join(); }
     if (rescan_thread_.joinable()) { rescan_thread_.request_stop(); rescan_thread_.join(); }
+    const auto transition_deadline = stop_requested_at + config_.fade_duration + 250ms;
+    while (controller_->status().transition.active && Clock::now() < transition_deadline)
+        std::this_thread::sleep_for(10ms);
+    if (controller_->status().transition.active)
+        log_.write(LogLevel::warning, "lifecycle", "STOP_SAFE_TRANSITION_TIMEOUT",
+                   "Safe stopped output transition timed out; closing screen capture immediately");
+    suspend_screen_capture();
     log_.write(LogLevel::info, "detector", "DETECTION_STOPPED", "Automatic detection stopped");
+}
+
+void App::suspend_screen_capture() {
+    std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+    {
+        std::scoped_lock lock(component_mutex_);
+        screen_capture_.stop();
+        previous_screen_frame_ = {};
+        safe_screen_frame_ = {};
+    }
+    raw_reference_matching_ = false;
+    controller_->set_component_state(Source::screen, DeviceState::unavailable, Clock::now());
+    log_.write(LogLevel::info, "screen_capture", "SCREEN_CAPTURE_SUSPENDED",
+               "Tracked screen capture closed while automation is stopped");
 }
 
 void App::set_mode(const OutputMode mode) {
@@ -328,16 +357,20 @@ void App::recovery_loop(const std::stop_token stop) {
                       video_input_.start(config_.selected_video_device_id, config_.preferred_input_size, config_.preferred_input_fps); }
                     video_recovered = wait_for_valid_frame([this] { return video_input_.latest_frame(); });
                 }
-                const auto monitors = enumerate_monitors();
+                const bool automation_active = automation_running_.load();
                 bool screen_recovered = false;
-                if (const auto selected = resolve_tracked_monitor(monitors)) {
-                    { std::scoped_lock lock(component_mutex_); screen_capture_.start(selected->handle, config_.cursor_visible); }
-                    screen_recovered = wait_for_valid_frame([this] { return screen_capture_.latest_frame(); });
+                if (automation_active) {
+                    const auto monitors = enumerate_monitors();
+                    if (const auto selected = resolve_tracked_monitor(monitors)) {
+                        { std::scoped_lock lock(component_mutex_); screen_capture_.start(selected->handle, config_.cursor_visible); }
+                        screen_recovered = wait_for_valid_frame([this] { return screen_capture_.latest_frame(); });
+                    }
                 }
                 controller_->set_component_state(Source::camera, config_.selected_video_device_id.empty() ? DeviceState::unavailable :
                                                  video_recovered ? DeviceState::ready : DeviceState::recovering, Clock::now());
-                controller_->set_component_state(Source::screen, screen_recovered ? DeviceState::ready : DeviceState::recovering, Clock::now());
-                rescan_requested_ = true;
+                controller_->set_component_state(Source::screen, !automation_active ? DeviceState::unavailable :
+                                                 screen_recovered ? DeviceState::ready : DeviceState::recovering, Clock::now());
+                if (automation_active) rescan_requested_ = true;
                 log_.write(LogLevel::info, "recovery", "GRAPHICS_RECOVERY_SUCCEEDED", "Graphics video components rebuilt");
                 continue;
             }
@@ -355,14 +388,16 @@ void App::recovery_loop(const std::stop_token stop) {
                     restart_video_input();
                 }
             }
-            const auto screen = screen_capture_.latest_frame();
-            if (!screen.valid() || Clock::now() - screen.received_at > 3s) {
-                if (controller_->status().screen_capture == DeviceState::ready)
-                    log_.write(LogLevel::warning, "screen_capture", "SCREEN_CAPTURE_FAILED", "Tracked screen capture stopped producing frames");
-                controller_->set_component_state(Source::screen, DeviceState::recovering, Clock::now());
-                log_.write(LogLevel::warning, "recovery", "SCREEN_CAPTURE_RETRY", "Retrying unavailable screen capture");
-                restart_screen_capture();
-                rescan_requested_ = true;
+            if (automation_running_) {
+                const auto screen = screen_capture_.latest_frame();
+                if (!screen.valid() || Clock::now() - screen.received_at > 3s) {
+                    if (controller_->status().screen_capture == DeviceState::ready)
+                        log_.write(LogLevel::warning, "screen_capture", "SCREEN_CAPTURE_FAILED", "Tracked screen capture stopped producing frames");
+                    controller_->set_component_state(Source::screen, DeviceState::recovering, Clock::now());
+                    log_.write(LogLevel::warning, "recovery", "SCREEN_CAPTURE_RETRY", "Retrying unavailable screen capture");
+                    restart_screen_capture();
+                    rescan_requested_ = true;
+                }
             }
             if (!virtual_camera_.running()) restart_virtual_camera();
         } catch (const std::exception& e) { report_error("recovery", "AUTOMATIC_RECOVERY_FAILED", e); }
@@ -710,6 +745,7 @@ void App::apply_settings(AppConfig updated) {
         } else RegDeleteValueW(run_key, L"AutomaticScreenCamera");
         RegCloseKey(run_key);
     }
+    if (!was_running) suspend_screen_capture();
     save_config();
     compositor_thread_ = std::jthread([this](const std::stop_token stop) { compositor_loop(stop); });
     recovery_thread_ = std::jthread([this](const std::stop_token stop) { recovery_loop(stop); });

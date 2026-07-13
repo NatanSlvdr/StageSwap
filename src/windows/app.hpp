@@ -83,6 +83,7 @@ private:
     void rescan_loop(std::stop_token stop);
     void recovery_loop(std::stop_token stop);
     void full_monitor_scan();
+    void suspend_screen_capture();
     void refresh_selected_video_device_name();
     [[nodiscard]] std::optional<MonitorDevice> resolve_tracked_monitor(const std::vector<MonitorDevice>& monitors) const;
     void save_config();

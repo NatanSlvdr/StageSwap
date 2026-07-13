@@ -52,11 +52,11 @@ void AppController::finish_start(const bool video_ready, const bool screen_ready
     evaluate(Clock::now());
 }
 
-void AppController::stop() {
+void AppController::stop(const TimePoint now) {
     std::scoped_lock lock(mutex_);
     status_.run_state = RunState::stopping;
     status_.transition = transition_.request(
-        status_.availability.camera_ready ? Source::camera : Source::placeholder, Clock::now());
+        status_.availability.camera_ready ? Source::camera : Source::placeholder, now);
     detector_.reset();
     status_.detection = detector_.snapshot();
     status_.run_state = RunState::stopped;

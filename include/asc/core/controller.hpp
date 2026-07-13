@@ -39,7 +39,7 @@ public:
     AppController(AppConfig config, EventLog& log);
     void begin_start();
     void finish_start(bool video_ready, bool screen_ready, bool virtual_camera_ready);
-    void stop();
+    void stop(TimePoint now = Clock::now());
     void set_mode(OutputMode mode, TimePoint now);
     void set_component_state(Source source, DeviceState state, TimePoint now);
     void set_virtual_camera_state(DeviceState state);
