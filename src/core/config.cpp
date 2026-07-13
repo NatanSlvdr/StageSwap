@@ -1,8 +1,11 @@
 #include "asc/core/config.hpp"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
+#include <cmath>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #ifdef _WIN32
@@ -28,15 +31,7 @@ std::string escape_json(const std::string_view input) {
     return output;
 }
 
-std::optional<std::size_t> value_start(const std::string_view json, const std::string_view key) {
-    const std::string token = "\"" + std::string(key) + "\"";
-    const auto key_pos = json.find(token);
-    if (key_pos == std::string_view::npos) return std::nullopt;
-    const auto colon = json.find(':', key_pos + token.size());
-    if (colon == std::string_view::npos) return std::nullopt;
-    const auto start = json.find_first_not_of(" \t\r\n", colon + 1);
-    return start == std::string_view::npos ? std::nullopt : std::optional{start};
-}
+std::optional<std::size_t> value_start(std::string_view json, std::string_view key);
 
 std::optional<std::string> string_value(const std::string_view json, const std::string_view key) {
     const auto start = value_start(json, key);
@@ -86,6 +81,217 @@ std::optional<bool> bool_value(const std::string_view json, const std::string_vi
     if (json.substr(*start, 4) == "true") return true;
     if (json.substr(*start, 5) == "false") return false;
     return std::nullopt;
+}
+
+void skip_json_whitespace(const std::string_view json, std::size_t& position) {
+    while (position < json.size() && (json[position] == ' ' || json[position] == '\t' ||
+                                      json[position] == '\r' || json[position] == '\n')) ++position;
+}
+
+bool consume_json_string(const std::string_view json, std::size_t& position) {
+    if (position >= json.size() || json[position] != '"') return false;
+    ++position;
+    while (position < json.size()) {
+        const auto value = static_cast<unsigned char>(json[position++]);
+        if (value == '"') return true;
+        if (value < 0x20) return false;
+        if (value != '\\') continue;
+        if (position >= json.size()) return false;
+        const char escape = json[position++];
+        if (escape == 'u') {
+            for (int digit = 0; digit < 4; ++digit) {
+                if (position >= json.size()) return false;
+                const char hex = json[position++];
+                if (!((hex >= '0' && hex <= '9') || (hex >= 'a' && hex <= 'f') || (hex >= 'A' && hex <= 'F'))) return false;
+            }
+        } else if (std::string_view{"\"\\/bfnrt"}.find(escape) == std::string_view::npos) return false;
+    }
+    return false;
+}
+
+bool consume_json_number(const std::string_view json, std::size_t& position) {
+    if (position < json.size() && json[position] == '-') ++position;
+    if (position >= json.size()) return false;
+    if (json[position] == '0') ++position;
+    else {
+        if (json[position] < '1' || json[position] > '9') return false;
+        while (position < json.size() && json[position] >= '0' && json[position] <= '9') ++position;
+    }
+    if (position < json.size() && json[position] == '.') {
+        ++position;
+        const auto fraction_start = position;
+        while (position < json.size() && json[position] >= '0' && json[position] <= '9') ++position;
+        if (position == fraction_start) return false;
+    }
+    if (position < json.size() && (json[position] == 'e' || json[position] == 'E')) {
+        ++position;
+        if (position < json.size() && (json[position] == '+' || json[position] == '-')) ++position;
+        const auto exponent_start = position;
+        while (position < json.size() && json[position] >= '0' && json[position] <= '9') ++position;
+        if (position == exponent_start) return false;
+    }
+    return true;
+}
+
+bool consume_json_primitive(const std::string_view json, std::size_t& position) {
+    if (position >= json.size()) return false;
+    if (json[position] == '"') return consume_json_string(json, position);
+    for (const auto literal : {std::string_view{"true"}, std::string_view{"false"}, std::string_view{"null"}}) {
+        if (json.substr(position, literal.size()) == literal) {
+            position += literal.size();
+            return true;
+        }
+    }
+    return consume_json_number(json, position);
+}
+
+bool valid_flat_json_object(const std::string_view json) {
+    std::size_t position = 0;
+    skip_json_whitespace(json, position);
+    if (position >= json.size() || json[position++] != '{') return false;
+    skip_json_whitespace(json, position);
+    if (position < json.size() && json[position] == '}') {
+        ++position;
+        skip_json_whitespace(json, position);
+        return position == json.size();
+    }
+    while (position < json.size()) {
+        if (!consume_json_string(json, position)) return false;
+        skip_json_whitespace(json, position);
+        if (position >= json.size() || json[position++] != ':') return false;
+        skip_json_whitespace(json, position);
+        if (!consume_json_primitive(json, position)) return false;
+        skip_json_whitespace(json, position);
+        if (position >= json.size()) return false;
+        if (json[position] == '}') {
+            ++position;
+            skip_json_whitespace(json, position);
+            return position == json.size();
+        }
+        if (json[position++] != ',') return false;
+        skip_json_whitespace(json, position);
+    }
+    return false;
+}
+
+std::optional<std::size_t> value_start(const std::string_view json, const std::string_view key) {
+    std::size_t position = 0;
+    skip_json_whitespace(json, position);
+    if (position >= json.size() || json[position++] != '{') return std::nullopt;
+    skip_json_whitespace(json, position);
+    while (position < json.size() && json[position] != '}') {
+        if (json[position] != '"') return std::nullopt;
+        const auto key_start = position + 1;
+        if (!consume_json_string(json, position)) return std::nullopt;
+        const auto key_end = position - 1;
+        skip_json_whitespace(json, position);
+        if (position >= json.size() || json[position++] != ':') return std::nullopt;
+        skip_json_whitespace(json, position);
+        const auto candidate_value_start = position;
+        if (json.substr(key_start, key_end - key_start) == key) return candidate_value_start;
+        if (!consume_json_primitive(json, position)) return std::nullopt;
+        skip_json_whitespace(json, position);
+        if (position < json.size() && json[position] == ',') {
+            ++position;
+            skip_json_whitespace(json, position);
+        } else break;
+    }
+    return std::nullopt;
+}
+
+std::size_t field_count(const std::string_view json, const std::string_view key) {
+    std::size_t count = 0;
+    std::size_t position = 0;
+    skip_json_whitespace(json, position);
+    if (position >= json.size() || json[position++] != '{') return 0;
+    skip_json_whitespace(json, position);
+    while (position < json.size() && json[position] != '}') {
+        if (json[position] != '"') return count;
+        const auto key_start = position + 1;
+        if (!consume_json_string(json, position)) return count;
+        const auto key_end = position - 1;
+        if (json.substr(key_start, key_end - key_start) == key) ++count;
+        skip_json_whitespace(json, position);
+        if (position >= json.size() || json[position++] != ':') return count;
+        skip_json_whitespace(json, position);
+        if (!consume_json_primitive(json, position)) return count;
+        skip_json_whitespace(json, position);
+        if (position < json.size() && json[position] == ',') {
+            ++position;
+            skip_json_whitespace(json, position);
+        } else break;
+    }
+    return count;
+}
+
+template <typename T, std::size_t N>
+bool validate_number_fields(const std::string_view json, const std::array<std::string_view, N>& keys,
+                            std::string& error) {
+    for (const auto key : keys) {
+        const auto count = field_count(json, key);
+        if (count > 1) {
+            error = "duplicate configuration field: " + std::string(key);
+            return false;
+        }
+        if (count == 1 && !number_value<T>(json, key)) {
+            error = "invalid numeric configuration field: " + std::string(key);
+            return false;
+        }
+    }
+    return true;
+}
+
+template <std::size_t N>
+bool validate_uint32_fields(const std::string_view json, const std::array<std::string_view, N>& keys,
+                            std::string& error) {
+    for (const auto key : keys) {
+        const auto count = field_count(json, key);
+        if (count > 1) {
+            error = "duplicate configuration field: " + std::string(key);
+            return false;
+        }
+        if (count == 0) continue;
+        const auto value = number_value<std::uint64_t>(json, key);
+        if (!value || *value > std::numeric_limits<std::uint32_t>::max()) {
+            error = "invalid unsigned configuration field: " + std::string(key);
+            return false;
+        }
+    }
+    return true;
+}
+
+template <std::size_t N>
+bool validate_string_fields(const std::string_view json, const std::array<std::string_view, N>& keys,
+                            std::string& error) {
+    for (const auto key : keys) {
+        const auto count = field_count(json, key);
+        if (count > 1) {
+            error = "duplicate configuration field: " + std::string(key);
+            return false;
+        }
+        if (count == 1 && !string_value(json, key)) {
+            error = "invalid string configuration field: " + std::string(key);
+            return false;
+        }
+    }
+    return true;
+}
+
+template <std::size_t N>
+bool validate_bool_fields(const std::string_view json, const std::array<std::string_view, N>& keys,
+                          std::string& error) {
+    for (const auto key : keys) {
+        const auto count = field_count(json, key);
+        if (count > 1) {
+            error = "duplicate configuration field: " + std::string(key);
+            return false;
+        }
+        if (count == 1 && !bool_value(json, key)) {
+            error = "invalid boolean configuration field: " + std::string(key);
+            return false;
+        }
+    }
+    return true;
 }
 
 std::string read_file(const std::filesystem::path& path) {
@@ -181,9 +387,54 @@ std::string ConfigStore::serialize(const AppConfig& c) {
 }
 
 std::optional<AppConfig> ConfigStore::parse(const std::string_view json, std::string& error) {
+    if (!valid_flat_json_object(json)) {
+        error = "configuration is not a valid flat JSON object";
+        return std::nullopt;
+    }
+    if (field_count(json, "schema_version") != 1) {
+        error = "missing or duplicate schema_version";
+        return std::nullopt;
+    }
     AppConfig c;
     const auto schema = number_value<std::uint32_t>(json, "schema_version");
     if (!schema || *schema != 1) { error = "missing or unsupported schema_version"; return std::nullopt; }
+
+    constexpr std::array string_fields{
+        std::string_view{"selected_video_device_id"}, std::string_view{"reference_image_path"},
+        std::string_view{"interface_language"}, std::string_view{"log_level"},
+        std::string_view{"output_mode"}, std::string_view{"missing_reference_behavior"},
+        std::string_view{"camera_scaling"}, std::string_view{"screen_scaling"},
+        std::string_view{"monitor_device_path"}, std::string_view{"monitor_hardware_id"},
+        std::string_view{"monitor_manufacturer"}, std::string_view{"monitor_model"},
+        std::string_view{"monitor_serial"}, std::string_view{"monitor_adapter_id"}};
+    constexpr std::array bool_fields{
+        std::string_view{"cursor_visible"}, std::string_view{"start_with_windows"},
+        std::string_view{"start_minimized"}, std::string_view{"start_automatically"},
+        std::string_view{"close_to_tray"}, std::string_view{"show_notifications"},
+        std::string_view{"confirm_exit"}, std::string_view{"diagnostic_logging"},
+        std::string_view{"video_auto_reconnect"}};
+    constexpr std::array uint32_fields{
+        std::string_view{"preferred_input_width"}, std::string_view{"preferred_input_height"},
+        std::string_view{"preferred_input_fps"}, std::string_view{"matches_required"},
+        std::string_view{"mismatches_required"}, std::string_view{"reassignment_confirmations"},
+        std::string_view{"output_width"}, std::string_view{"output_height"},
+        std::string_view{"output_fps"}, std::string_view{"placeholder_color_bgra"},
+        std::string_view{"log_retention_days"}, std::string_view{"monitor_width"},
+        std::string_view{"monitor_height"}, std::string_view{"monitor_orientation"},
+        std::string_view{"monitor_refresh_millihz"}};
+    constexpr std::array int64_fields{
+        std::string_view{"detection_interval_ms"}, std::string_view{"full_scan_interval_seconds"},
+        std::string_view{"fade_duration_ms"}, std::string_view{"video_reconnect_interval_seconds"}};
+    constexpr std::array int32_fields{std::string_view{"monitor_x"}, std::string_view{"monitor_y"}};
+    constexpr std::array floating_fields{std::string_view{"detection_threshold"}, std::string_view{"reassignment_margin"}};
+    if (!validate_string_fields(json, string_fields, error) ||
+        !validate_bool_fields(json, bool_fields, error) ||
+        !validate_uint32_fields(json, uint32_fields, error) ||
+        !validate_number_fields<long long>(json, int64_fields, error) ||
+        !validate_number_fields<std::int32_t>(json, int32_fields, error) ||
+        !validate_number_fields<double>(json, floating_fields, error)) {
+        return std::nullopt;
+    }
     c.schema_version = *schema;
     if (const auto v = string_value(json, "selected_video_device_id")) c.selected_video_device_id = *v;
     if (const auto v = string_value(json, "reference_image_path")) c.reference_image_path = *v;
@@ -214,36 +465,51 @@ std::optional<AppConfig> ConfigStore::parse(const std::string_view json, std::st
     if (const auto v = string_value(json, "log_level")) {
         if (*v == "trace") c.log_level = LogLevel::trace;
         else if (*v == "debug") c.log_level = LogLevel::debug;
+        else if (*v == "info") c.log_level = LogLevel::info;
         else if (*v == "warning") c.log_level = LogLevel::warning;
         else if (*v == "error") c.log_level = LogLevel::error;
+        else { error = "invalid log_level"; return std::nullopt; }
     }
     if (const auto v = bool_value(json, "video_auto_reconnect")) c.video_auto_reconnect = *v;
     if (const auto v = number_value<long long>(json, "video_reconnect_interval_seconds")) c.video_reconnect_interval = std::chrono::seconds{*v};
     if (const auto v = number_value<std::uint32_t>(json, "log_retention_days")) c.log_retention_days = *v;
     if (const auto v = string_value(json, "output_mode")) {
-        if (*v == "force_camera") c.output_mode = OutputMode::force_camera;
+        if (*v == "automatic") c.output_mode = OutputMode::automatic;
+        else if (*v == "force_camera") c.output_mode = OutputMode::force_camera;
         else if (*v == "force_screen") c.output_mode = OutputMode::force_screen;
+        else { error = "invalid output_mode"; return std::nullopt; }
     }
     if (const auto v = string_value(json, "missing_reference_behavior")) {
-        if (*v == "keep_current") c.missing_behavior = MissingReferenceBehavior::keep_current;
+        if (*v == "use_camera") c.missing_behavior = MissingReferenceBehavior::use_camera;
+        else if (*v == "keep_current") c.missing_behavior = MissingReferenceBehavior::keep_current;
         else if (*v == "use_last_screen") c.missing_behavior = MissingReferenceBehavior::use_last_screen;
         else if (*v == "use_placeholder") c.missing_behavior = MissingReferenceBehavior::use_placeholder;
+        else { error = "invalid missing_reference_behavior"; return std::nullopt; }
     }
-    const auto parse_scaling = [](const std::optional<std::string>& value) {
-        if (value == "fill") return ScalingMode::fill;
-        if (value == "stretch") return ScalingMode::stretch;
-        return ScalingMode::fit;
+    const auto parse_scaling = [&error](const std::optional<std::string>& value, ScalingMode& output) {
+        if (!value || *value == "fit") output = ScalingMode::fit;
+        else if (*value == "fill") output = ScalingMode::fill;
+        else if (*value == "stretch") output = ScalingMode::stretch;
+        else { error = "invalid scaling mode"; return false; }
+        return true;
     };
-    c.camera_scaling = parse_scaling(string_value(json, "camera_scaling"));
-    c.screen_scaling = parse_scaling(string_value(json, "screen_scaling"));
+    if (!parse_scaling(string_value(json, "camera_scaling"), c.camera_scaling) ||
+        !parse_scaling(string_value(json, "screen_scaling"), c.screen_scaling)) return std::nullopt;
     if (const auto v = number_value<std::uint32_t>(json, "placeholder_color_bgra")) c.placeholder_color_bgra = *v | 0xff000000u;
 
+    const bool supported_input_size = (c.preferred_input_size == Size{1920, 1080}) || (c.preferred_input_size == Size{1280, 720});
     const bool supported_output_size = (c.output_size == Size{1920, 1080}) || (c.output_size == Size{1280, 720});
-    if (!supported_output_size || c.output_fps != 30 ||
-        c.detector.threshold < 0.0 || c.detector.threshold > 1.0 || c.detector.matches_required == 0 ||
-        c.detector.mismatches_required == 0 || c.detection_interval < std::chrono::milliseconds{100} ||
+    if (!supported_input_size || c.preferred_input_fps != 30 || !supported_output_size || c.output_fps != 30 ||
+        !std::isfinite(c.detector.threshold) || c.detector.threshold < 0.0 || c.detector.threshold > 1.0 ||
+        c.detector.matches_required == 0 || c.detector.matches_required > 30 ||
+        c.detector.mismatches_required == 0 || c.detector.mismatches_required > 30 ||
+        c.detection_interval < std::chrono::milliseconds{100} ||
         c.detection_interval > std::chrono::milliseconds{1000} || c.fade_duration < std::chrono::milliseconds{0} ||
         c.fade_duration > std::chrono::milliseconds{2000} || c.log_retention_days == 0 || c.log_retention_days > 365 ||
+        c.full_scan_interval < std::chrono::seconds{5} || c.full_scan_interval > std::chrono::seconds{3600} ||
+        !std::isfinite(c.monitor_tracker.reassignment_margin) || c.monitor_tracker.reassignment_margin < 0.0 ||
+        c.monitor_tracker.reassignment_margin > 1.0 || c.monitor_tracker.confirmations_required == 0 ||
+        c.monitor_tracker.confirmations_required > 10 ||
         c.video_reconnect_interval < std::chrono::seconds{1} || c.video_reconnect_interval > std::chrono::seconds{60}) {
         error = "configuration contains out-of-range critical values";
         return std::nullopt;

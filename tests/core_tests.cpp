@@ -202,7 +202,7 @@ void monitor_test() {
 
 void config_test() {
     asc::AppConfig original;
-    original.selected_video_device_id = "camera\\id\"one";
+    original.selected_video_device_id = "camera\\id\"schema_version\"one";
     original.detector.threshold = 0.975;
     original.output_mode = asc::OutputMode::force_camera;
     original.log_level = asc::LogLevel::warning;
@@ -219,13 +219,39 @@ void config_test() {
     check(parsed && parsed->last_tracked_monitor && parsed->last_tracked_monitor->hardware_id == "DISPLAY-A", "monitor identity round trips");
     check(!asc::ConfigStore::parse("{\"schema_version\":1,\"detection_interval_ms\":1}", error), "invalid critical range rejected");
     check(!asc::ConfigStore::parse("{\"schema_version\":1,\"video_reconnect_interval_seconds\":0}", error), "invalid reconnect interval rejected");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1,\"detection_interval_ms\":\"250\"}", error),
+          "malformed critical field is rejected instead of silently defaulted");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1,\"full_scan_interval_seconds\":0}", error),
+          "invalid full-scan interval is rejected before controller construction");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1,\"reassignment_margin\":-0.1}", error),
+          "invalid monitor reassignment margin is rejected");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1,\"reassignment_confirmations\":11}", error),
+          "invalid monitor confirmation count is rejected");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1,\"matches_required\":31}", error),
+          "excessive detector confirmation count is rejected");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1,\"preferred_input_width\":640}", error),
+          "unsupported saved input format is rejected");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1,\"output_mode\":\"corrupted\"}", error),
+          "unknown output mode is rejected instead of silently returning to automatic");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1,\"cursor_visible\":1}", error),
+          "malformed boolean is rejected instead of silently using its default");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1,\"schema_version\":1}", error),
+          "duplicate critical fields are rejected");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1} trailing", error),
+          "trailing configuration data is rejected");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1 \"output_mode\":\"automatic\"}", error),
+          "missing JSON field separator is rejected");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1,\"monitor_x\":2147483648}", error),
+          "out-of-range signed monitor coordinate is rejected");
+    check(!asc::ConfigStore::parse("{\"schema_version\":1,\"preferred_input_width\":4294967296}", error),
+          "out-of-range unsigned configuration value is rejected");
 
     const auto directory = std::filesystem::temp_directory_path() / "asc-config-test";
     std::filesystem::remove_all(directory);
     asc::ConfigStore store(directory);
     store.save(original);
     auto second = original; second.selected_video_device_id = "second-camera"; store.save(second);
-    { std::ofstream corrupt(store.config_path(), std::ios::trunc); corrupt << "not json"; }
+    { std::ofstream corrupt(store.config_path(), std::ios::trunc); corrupt << "{\"schema_version\":1,\"output_mode\":\"corrupted\"}"; }
     const auto recovered = store.load();
     check(recovered.used_backup && recovered.config.selected_video_device_id == original.selected_video_device_id,
           "invalid primary configuration falls back to last valid backup");
