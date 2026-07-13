@@ -22,7 +22,7 @@ target_compile_definitions(AutomaticScreenCamera PRIVATE
 )
 asc_enable_project_warnings(AutomaticScreenCamera)
 target_compile_options(AutomaticScreenCamera PRIVATE /await:strict $<$<CONFIG:Release>:/Zi>)
-target_link_options(AutomaticScreenCamera PRIVATE $<$<CONFIG:Release>:/DEBUG:FULL>)
+target_link_options(AutomaticScreenCamera PRIVATE /MANIFEST:NO $<$<CONFIG:Release>:/DEBUG:FULL>)
 target_link_libraries(AutomaticScreenCamera PRIVATE
     asc_core
     d3d11 dxgi d3dcompiler

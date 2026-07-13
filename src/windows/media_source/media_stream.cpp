@@ -4,6 +4,7 @@
 
 #include <mfapi.h>
 #include <mferror.h>
+#include <propvarutil.h>
 #include <algorithm>
 #include <cstring>
 #include <cstdint>

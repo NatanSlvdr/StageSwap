@@ -26,7 +26,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path out/test-results | Out-Null
-          ctest --preset windows-x64-${{ matrix.configuration }} --output-junit out/test-results/windows-x64-${{ matrix.configuration }}.xml
+          ctest --preset windows-x64-${{ matrix.configuration }} --output-junit "${{ github.workspace }}/out/test-results/windows-x64-${{ matrix.configuration }}.xml"
       - name: Package unsigned release
         if: matrix.configuration == 'release'
         shell: pwsh
@@ -75,7 +75,7 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
           mkdir -p out/test-results
-          ctest --preset portable-asan --output-junit out/test-results/portable-asan.xml
+          ctest --preset portable-asan --output-junit "${{ github.workspace }}/out/test-results/portable-asan.xml"
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -98,7 +98,7 @@ jobs:
           TSAN_OPTIONS: halt_on_error=1
         run: |
           mkdir -p out/test-results
-          ctest --preset portable-tsan --output-junit out/test-results/portable-tsan.xml
+          ctest --preset portable-tsan --output-junit "${{ github.workspace }}/out/test-results/portable-tsan.xml"
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4

@@ -4,6 +4,9 @@
 #include <windows.h>
 #include <mfapi.h>
 #include <wrl/implements.h>
+#ifdef _MSC_VER
+#pragma warning(disable: 4324) // Alignment padding inside the Windows SDK's WRL module singleton.
+#endif
 #include <wrl/module.h>
 #include <string>
 
