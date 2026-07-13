@@ -80,6 +80,7 @@ if(ASC_BUILD_TESTS)
     asc_enable_project_warnings(asc_core_tests)
     asc_enable_sanitizers(asc_core_tests)
     add_test(NAME asc_core_tests COMMAND asc_core_tests)
+    set_tests_properties(asc_core_tests PROPERTIES TIMEOUT 180)
 endif()
 
 if(ASC_BUILD_WINDOWS_APP)

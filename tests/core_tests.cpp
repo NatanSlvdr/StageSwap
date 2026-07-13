@@ -18,6 +18,8 @@
 #include <iostream>
 #include <fstream>
 #include <limits>
+#include <stdexcept>
+#include <string>
 #include <string_view>
 #include <thread>
 
@@ -30,6 +32,21 @@ void check(const bool condition, const std::string_view message) {
         ++failures;
         std::cerr << "FAIL: " << message << '\n';
     }
+}
+
+template <typename Test>
+void run_test(const std::string_view name, Test&& test) {
+    std::cout << "[ RUN      ] " << name << std::endl;
+    try {
+        test();
+    } catch (const std::exception& error) {
+        ++failures;
+        std::cerr << "FAIL: " << name << " threw: " << error.what() << std::endl;
+    } catch (...) {
+        ++failures;
+        std::cerr << "FAIL: " << name << " threw an unknown exception" << std::endl;
+    }
+    std::cout << "[ COMPLETE ] " << name << std::endl;
 }
 
 asc::MonitorIdentity monitor(std::string id, int x = 0) {
@@ -524,18 +541,18 @@ void shared_frame_validation_test() {
 } // namespace
 
 int main() {
-    detector_test();
-    decision_test();
-    transition_test();
-    image_test();
-    pixel_conversion_test();
-    monitor_test();
-    config_test();
-    event_log_test();
-    controller_test();
-    controller_concurrency_test();
-    video_format_test();
-    shared_frame_validation_test();
+    run_test("detector", detector_test);
+    run_test("decision engine", decision_test);
+    run_test("transition", transition_test);
+    run_test("image similarity", image_test);
+    run_test("pixel conversion", pixel_conversion_test);
+    run_test("monitor tracking", monitor_test);
+    run_test("configuration", config_test);
+    run_test("event log", event_log_test);
+    run_test("controller", controller_test);
+    run_test("controller concurrency", controller_concurrency_test);
+    run_test("video format", video_format_test);
+    run_test("shared frame validation", shared_frame_validation_test);
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
         return EXIT_FAILURE;
