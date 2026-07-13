@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.hpp"
+#include "asc/core/deferred_trigger.hpp"
 
 #include <shellapi.h>
 #include <memory>
@@ -27,6 +28,7 @@ private:
     void show_tray_menu(POINT point);
     void dispatch_command(UINT command);
     void update_tray_icon();
+    void schedule_lifecycle_recovery(std::string code, std::string message);
     [[nodiscard]] HICON make_status_icon(COLORREF color) const;
     HINSTANCE instance_;
     App& app_;
@@ -38,6 +40,7 @@ private:
     NOTIFYICONDATAW tray_{};
     HICON status_icon_{nullptr};
     bool exiting_{false};
+    DeferredTrigger lifecycle_recovery_;
     std::string last_notified_warning_;
     std::unique_ptr<PreviewWindow> previews_;
 };

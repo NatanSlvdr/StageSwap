@@ -18,6 +18,7 @@ namespace asc::win {
 namespace {
 constexpr UINT tray_message = WM_APP + 1;
 constexpr UINT timer_id = 1;
+constexpr auto lifecycle_recovery_delay = std::chrono::seconds{2};
 HMENU control_id(const UINT id) noexcept { return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)); }
 enum Command : UINT {
     open = 100, start, stop, automatic, force_camera, force_screen, set_reference, import_reference,
@@ -108,16 +109,29 @@ LRESULT CALLBACK TrayWindow::window_proc(const HWND window, const UINT message, 
 LRESULT TrayWindow::handle_message(const UINT message, const WPARAM wparam, const LPARAM lparam) {
     switch (message) {
     case WM_CREATE: create_controls(); return 0;
-    case WM_TIMER: refresh(); return 0;
+    case WM_TIMER:
+        if (wparam == timer_id && lifecycle_recovery_.consume_if_due(Clock::now())) app_.restart_all();
+        refresh();
+        return 0;
     case WM_COMMAND: dispatch_command(LOWORD(wparam)); return 0;
     case WM_DISPLAYCHANGE: app_.log_system_event("DISPLAY_LAYOUT_CHANGED", "Display layout or resolution changed"); app_.restart_screen_capture(); app_.request_rescan(); return 0;
     case WM_DEVICECHANGE: app_.log_system_event("DISPLAY_DEVICE_CHANGED", "A display or video device changed"); app_.restart_screen_capture(); app_.request_rescan(); return 0;
+    case WM_DPICHANGED: {
+        const auto* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (suggested) SetWindowPos(window_, nullptr, suggested->left, suggested->top,
+                                    suggested->right - suggested->left, suggested->bottom - suggested->top,
+                                    SWP_NOACTIVATE | SWP_NOZORDER);
+        app_.log_system_event("DISPLAY_SCALING_CHANGED", "Display scaling changed");
+        app_.restart_screen_capture();
+        app_.request_rescan();
+        return 0;
+    }
     case WM_POWERBROADCAST:
-        if (wparam == PBT_APMRESUMEAUTOMATIC) { app_.log_system_event("PC_RESUMED", "PC resumed from sleep"); app_.restart_all(); }
+        if (wparam == PBT_APMRESUMEAUTOMATIC) schedule_lifecycle_recovery("PC_RESUMED", "PC resumed from sleep");
         return TRUE;
     case WM_WTSSESSION_CHANGE:
-        if (wparam == WTS_SESSION_UNLOCK) { app_.log_system_event("SESSION_UNLOCKED", "Windows session unlocked"); app_.restart_all(); }
-        else if (wparam == WTS_REMOTE_DISCONNECT) { app_.log_system_event("REMOTE_SESSION_ENDED", "Remote desktop session disconnected"); app_.restart_all(); }
+        if (wparam == WTS_SESSION_UNLOCK) schedule_lifecycle_recovery("SESSION_UNLOCKED", "Windows session unlocked");
+        else if (wparam == WTS_REMOTE_DISCONNECT) schedule_lifecycle_recovery("REMOTE_SESSION_ENDED", "Remote desktop session disconnected");
         return 0;
     case tray_message:
         if (LOWORD(lparam) == WM_LBUTTONUP || LOWORD(lparam) == WM_LBUTTONDBLCLK) show();
@@ -131,6 +145,12 @@ LRESULT TrayWindow::handle_message(const UINT message, const WPARAM wparam, cons
     case WM_DESTROY: WTSUnRegisterSessionNotification(window_); PostQuitMessage(0); return 0;
     default: return DefWindowProcW(window_, message, wparam, lparam);
     }
+}
+
+void TrayWindow::schedule_lifecycle_recovery(std::string code, std::string message) {
+    app_.log_system_event(std::move(code), std::move(message));
+    lifecycle_recovery_.schedule(Clock::now(), lifecycle_recovery_delay);
+    app_.log_system_event("RECOVERY_SCHEDULED", "Full video recovery scheduled after the device-return delay");
 }
 
 void TrayWindow::create_controls() {

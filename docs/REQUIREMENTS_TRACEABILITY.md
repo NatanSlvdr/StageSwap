@@ -28,13 +28,13 @@ This matrix tracks the original specification against authoritative evidence in 
 | Tray startup, status icon/tooltip and required menu actions | `TrayWindow`, installer startup entry; compact text tooltip identifies state/mode, reference state, concrete output device, and tracked screen | Implemented; shell test pending |
 | Compact status dashboard and recent events | `TrayWindow::refresh` shows friendly selected-camera and concrete target/output names; bounded 20-event list includes timestamp, event code/type, component, message, and structured context | Portable event-summary regression passes; Windows UI pending |
 | Persistent structured logs, levels, rotation, export/copy/clear | `EventLog`; Settings and tray both expose diagnostic log actions | Portable write/export/clear tests pass |
-| Recovery controls and automatic graphics/device recovery | `restart_*`, `restart_all`, `recovery_loop` | Implemented; fault-injection pending |
+| Recovery controls and automatic graphics/device recovery | `restart_*`, `restart_all`, `recovery_loop`; resume/unlock/RDP events use a tested two-second coalescing delay, components leave Ready before teardown, and aggregate recovery emits started/succeeded/failed evidence | Portable scheduling tests pass; Windows fault-injection pending |
 | Atomic configuration, backup and invalid-file preservation | `ConfigStore`; confirmed automatic monitor reassignments are persisted; unavailable saved cameras remain selected in Settings | Portable corruption/recovery and unavailable-device tests pass |
 | General, input, capture, detection, output and logging settings | `SettingsWindow`, `AppConfig` | Implemented |
 | Fit/fill/stretch without implicit distortion | compositor transforms | Implemented; visual test pending |
 | Camera, monitor, final-output and reference previews | `PreviewWindow`, 1 fps only while visible | Implemented; UI test pending |
 | Diagnostic counters and reset action | `DiagnosticCounters`, Settings reset button | Implemented |
-| Windows login, sleep/unlock/display recovery | startup registry and Win32 lifecycle handlers | Implemented; lifecycle test pending |
+| Windows login, sleep/unlock/display recovery | startup registry and Win32 lifecycle handlers; deferred resume recovery allows devices to settle and `WM_DPICHANGED` triggers capture restart plus full rescan | Implemented; physical lifecycle test pending |
 | Windows 11 virtual camera visible to Teams/Zoom/Discord/WebRTC | `MFCreateVirtualCamera`, COM media source, RGB32/NV12 1080p/720p | Unproven until Windows consumer matrix passes |
 | Long-run resource stability | bounded newest-frame storage, reusable textures/buffers, rotating logs | Design evidence only; 24-hour test pending |
 | Reproducible Windows build | `CMakePresets.json`; Visual Studio 2022 x64 and Windows SDK 10.0.22621.0 presets; static MSVC runtime | Current-head Debug/Release hosted build and tests pass; repeated/interactive gates pending |

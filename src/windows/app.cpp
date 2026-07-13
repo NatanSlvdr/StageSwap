@@ -22,6 +22,16 @@ std::string video_source_description(const std::string& name, const std::string&
     if (name.empty()) return "unavailable saved source [" + identifier + ']';
     return name + " [" + identifier + ']';
 }
+const char* device_state_name(const DeviceState state) {
+    switch (state) {
+    case DeviceState::unavailable: return "unavailable";
+    case DeviceState::initializing: return "initializing";
+    case DeviceState::ready: return "ready";
+    case DeviceState::recovering: return "recovering";
+    case DeviceState::failed: return "failed";
+    }
+    return "unknown";
+}
 template <typename FrameProvider>
 bool wait_for_valid_frame(FrameProvider&& provider, const std::chrono::milliseconds timeout = 1500ms) {
     const auto deadline = Clock::now() + timeout;
@@ -490,6 +500,7 @@ void App::restart_video_input() {
     std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     ++recovery_attempts_;
     refresh_selected_video_device_name();
+    controller_->set_component_state(Source::camera, DeviceState::recovering, Clock::now());
     log_.write(LogLevel::info, "recovery", "VIDEO_INPUT_RECOVERY_STARTED",
                "Restarting selected video input: " + video_source_description(selected_video_device_name_, config_.selected_video_device_id));
     if (config_.selected_video_device_id.empty()) {
@@ -508,6 +519,7 @@ void App::restart_video_input() {
 void App::restart_screen_capture() {
     std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     ++recovery_attempts_;
+    controller_->set_component_state(Source::screen, DeviceState::recovering, Clock::now());
     log_.write(LogLevel::info, "recovery", "SCREEN_CAPTURE_RECOVERY_STARTED", "Restarting tracked screen capture");
     try { const auto monitors = enumerate_monitors(); const auto selected = resolve_tracked_monitor(monitors); if (!selected) throw std::runtime_error("no monitor available");
           { std::scoped_lock lock(component_mutex_); screen_capture_.start(selected->handle, config_.cursor_visible); }
@@ -518,17 +530,40 @@ void App::restart_screen_capture() {
 void App::restart_virtual_camera() {
     std::scoped_lock lifecycle_lock(lifecycle_mutex_);
     ++recovery_attempts_;
+    controller_->set_virtual_camera_state(DeviceState::recovering);
     log_.write(LogLevel::info, "recovery", "VIRTUAL_CAMERA_RECOVERY_STARTED", "Restarting virtual camera");
     try { virtual_camera_.restart(); controller_->set_virtual_camera_state(DeviceState::ready); log_.write(LogLevel::info, "recovery", "VIRTUAL_CAMERA_RECOVERED", "Virtual camera restarted"); }
     catch (const std::exception& e) { controller_->set_virtual_camera_state(DeviceState::failed); report_error("recovery", "VIRTUAL_CAMERA_RECOVERY_FAILED", e); }
 }
 void App::restart_all() {
     std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+    log_.write(LogLevel::info, "recovery", "RECOVERY_STARTED", "Restarting all video components");
+    publisher_.invalidate();
     restart_video_input();
     restart_screen_capture();
-    { std::scoped_lock compositor_lock(compositor_mutex_); compositor_.reset(); }
+    bool compositor_ready = true;
+    try {
+        std::scoped_lock compositor_lock(compositor_mutex_);
+        compositor_.reset();
+    } catch (const std::exception& e) {
+        compositor_ready = false;
+        report_error("recovery", "COMPOSITOR_RECOVERY_FAILED", e);
+    }
     restart_virtual_camera();
     request_rescan();
+    const auto state = controller_->status();
+    const bool video_ready = config_.selected_video_device_id.empty() ? state.video_input == DeviceState::unavailable :
+                                                                       state.video_input == DeviceState::ready;
+    const bool recovered = video_ready && state.screen_capture == DeviceState::ready &&
+                           state.virtual_camera == DeviceState::ready && compositor_ready;
+    const std::string details = std::string("{\"video_input\":\"") + device_state_name(state.video_input) +
+        "\",\"screen_capture\":\"" + device_state_name(state.screen_capture) +
+        "\",\"virtual_camera\":\"" + device_state_name(state.virtual_camera) +
+        "\",\"compositor_ready\":" + (compositor_ready ? "true" : "false") + '}';
+    log_.write(recovered ? LogLevel::info : LogLevel::error, "recovery",
+               recovered ? "RECOVERY_SUCCEEDED" : "RECOVERY_FAILED",
+               recovered ? "All video components recovered" : "One or more video components did not recover",
+               details);
 }
 void App::export_logs(const std::filesystem::path& destination) const { log_.export_to(destination); }
 void App::clear_logs() { log_.clear(); log_.write(LogLevel::info, "logging", "LOGS_CLEARED", "Diagnostic logs cleared by user"); }

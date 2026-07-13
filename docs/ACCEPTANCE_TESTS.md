@@ -29,7 +29,7 @@ Run these on the exact Windows 11 x64, Zoom, webcam, driver, SDK, and artifact v
 ## Recovery and persistence
 
 1. Disconnect/reconnect the camera. Verify warning, live virtual camera, placeholder/camera fallback, and successful manual restart.
-2. Sleep and resume, then lock and unlock. Verify input, screen capture, virtual camera, and full reference scan recovery events.
+2. Sleep and resume, then lock and unlock. Verify recovery waits briefly for devices to return, coalesces the resulting event storm, and records `RECOVERY_STARTED` followed by `RECOVERY_SUCCEEDED` or actionable `RECOVERY_FAILED` component states before the full reference scan.
 3. Corrupt `config.json`; preserve a valid `config.backup.json`. Verify the invalid file is copied to `config.invalid.json`, the backup loads, and a warning is shown/logged.
 4. Run for 24 hours while sampling private bytes, GPU memory, handle count, and working set. Confirm no sustained growth and continuing 30-second scans.
 

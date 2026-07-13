@@ -1,4 +1,5 @@
 #include "asc/core/decision_engine.hpp"
+#include "asc/core/deferred_trigger.hpp"
 #include "asc/core/device_choices.hpp"
 #include "asc/core/config.hpp"
 #include "asc/core/controller.hpp"
@@ -101,6 +102,26 @@ void transition_test() {
     check(std::abs(state.screen_mix - 0.3) < 0.001, "reverse continues smoothly");
     state = transition.tick(start + 600ms);
     check(!state.active && state.logical_source == asc::Source::camera && state.screen_mix == 0.0, "reverse completes at camera");
+}
+
+void deferred_trigger_test() {
+    using namespace std::chrono_literals;
+    const auto start = asc::Clock::now();
+    asc::DeferredTrigger trigger;
+    check(!trigger.pending() && !trigger.consume_if_due(start), "idle deferred trigger does not fire");
+    trigger.schedule(start, 2s);
+    check(trigger.pending() && !trigger.consume_if_due(start + 1999ms), "deferred trigger waits for the device-return delay");
+    trigger.schedule(start + 1s, 2s);
+    check(trigger.due_at() == start + 3s && !trigger.consume_if_due(start + 2s),
+          "repeated lifecycle events coalesce and extend the settle period");
+    check(trigger.consume_if_due(start + 3s) && !trigger.pending() && !trigger.consume_if_due(start + 4s),
+          "deferred trigger fires exactly once");
+    trigger.schedule(start, 0ms);
+    check(trigger.consume_if_due(start), "zero-delay trigger can run immediately");
+    bool rejected_negative = false;
+    try { trigger.schedule(start, -1ms); }
+    catch (const std::invalid_argument&) { rejected_negative = true; }
+    check(rejected_negative, "negative deferred trigger delay is rejected");
 }
 
 void image_test() {
@@ -661,6 +682,7 @@ int main() {
     run_test("detector", detector_test);
     run_test("decision engine", decision_test);
     run_test("transition", transition_test);
+    run_test("deferred trigger", deferred_trigger_test);
     run_test("image similarity", image_test);
     run_test("pixel conversion", pixel_conversion_test);
     run_test("monitor tracking", monitor_test);
