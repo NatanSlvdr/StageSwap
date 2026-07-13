@@ -17,7 +17,7 @@ jobs:
       matrix:
         configuration: [debug, release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure
         run: cmake --preset windows-x64-${{ matrix.configuration }}
       - name: Build
@@ -33,14 +33,14 @@ jobs:
         run: ./scripts/package.ps1 -TestResultsDirectory out/test-results
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-x64-${{ matrix.configuration }}-test-results
           path: out/test-results
           if-no-files-found: warn
       - name: Upload unsigned release package
         if: matrix.configuration == 'release'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: AutomaticScreenCamera-windows-x64-unsigned
           path: |
@@ -49,7 +49,7 @@ jobs:
           if-no-files-found: error
       - name: Upload Windows verification tools
         if: matrix.configuration == 'release'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: AutomaticScreenCamera-windows-x64-verification-tools
           path: |
@@ -64,7 +64,7 @@ jobs:
     name: Portable core tests (ASan/UBSan)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure
         run: cmake --preset portable-asan
       - name: Build
@@ -78,7 +78,7 @@ jobs:
           ctest --preset portable-asan --output-junit "${{ github.workspace }}/out/test-results/portable-asan.xml"
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: portable-asan-test-results
           path: out/test-results
@@ -88,7 +88,7 @@ jobs:
     name: Portable concurrency tests (TSan)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure
         run: cmake --preset portable-tsan
       - name: Build
@@ -101,7 +101,7 @@ jobs:
           ctest --preset portable-tsan --output-junit "${{ github.workspace }}/out/test-results/portable-tsan.xml"
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: portable-tsan-test-results
           path: out/test-results
