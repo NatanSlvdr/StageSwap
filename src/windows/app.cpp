@@ -142,6 +142,11 @@ std::optional<MonitorDevice> App::resolve_tracked_monitor(const std::vector<Moni
     if (tracked) {
         const auto found = std::find_if(monitors.begin(), monitors.end(), [&](const auto& monitor) { return same_monitor(monitor.identity, *tracked); });
         if (found != monitors.end()) return *found;
+        // A persisted physical display must never be replaced with an
+        // arbitrary primary display merely because it is temporarily absent.
+        // Reference rediscovery is the only automatic path allowed to move
+        // tracking to another monitor.
+        return std::nullopt;
     }
     const auto primary = std::find_if(monitors.begin(), monitors.end(), [](const auto& monitor) {
         MONITORINFO info{sizeof(info)}; return GetMonitorInfoW(monitor.handle, &info) && (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
@@ -393,6 +398,8 @@ void App::full_monitor_scan() {
                            std::string("{\"duration_ms\":") + std::to_string(config_.fade_duration.count()) + "}");
             }
             controller_->set_component_state(Source::screen, new_screen_ready ? DeviceState::ready : DeviceState::recovering, Clock::now());
+            config_.last_tracked_monitor = *result.tracked;
+            save_config();
         }
     }
     log_.write(LogLevel::info, "monitors", "FULL_SCAN_COMPLETED", "Full display scan completed",

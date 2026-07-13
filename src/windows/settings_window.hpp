@@ -32,6 +32,7 @@ private:
     HWND window_{nullptr};
     AppConfig working_;
     std::vector<VideoDevice> devices_;
+    std::vector<std::string> video_option_ids_;
     std::vector<MonitorDevice> monitors_;
     bool finished_{false};
     int scroll_position_{0};

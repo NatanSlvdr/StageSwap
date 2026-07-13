@@ -253,7 +253,13 @@ void TrayWindow::dispatch_command(const UINT command) {
             if (selected >= 2000 && static_cast<std::size_t>(selected - 2000) < monitors.size()) {
                 hide(); app_.set_reference_monitor(monitors[static_cast<std::size_t>(selected - 2000)].identity);
             }
-        } else { hide(); app_.set_current_screen_reference(); }
+        } else if (monitors.size() == 1) {
+            // This is an explicit user choice, so it may replace a persisted
+            // monitor that is currently disconnected.
+            hide(); app_.set_reference_monitor(monitors.front().identity);
+        } else {
+            hide(); app_.set_current_screen_reference();
+        }
         break;
     }
     case import_reference: {

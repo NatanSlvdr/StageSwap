@@ -1,4 +1,5 @@
 #include "asc/core/decision_engine.hpp"
+#include "asc/core/device_choices.hpp"
 #include "asc/core/config.hpp"
 #include "asc/core/controller.hpp"
 #include "asc/core/detector.hpp"
@@ -234,6 +235,23 @@ void config_test() {
       const auto still_valid = asc::ConfigStore::parse(backup_json, backup_error);
       check(still_valid.has_value(), "saving recovered settings does not overwrite a valid backup with an invalid primary"); }
     std::filesystem::remove_all(directory);
+}
+
+void device_choices_test() {
+    const std::vector<std::string> connected{"camera-a", "camera-b"};
+    const auto available = asc::build_persistent_device_choices(connected, "camera-b");
+    check(available.identifiers.size() == 3 && available.selected_index == 2 &&
+              !available.configured_device_unavailable && available.identifiers[available.selected_index] == "camera-b",
+          "connected saved device remains selected");
+
+    const auto unavailable = asc::build_persistent_device_choices(connected, "camera-unplugged");
+    check(unavailable.configured_device_unavailable && unavailable.selected_index == 3 &&
+              unavailable.identifiers[unavailable.selected_index] == "camera-unplugged",
+          "temporarily unavailable saved device remains an explicit selectable choice");
+
+    const auto none = asc::build_persistent_device_choices(connected, "");
+    check(none.selected_index == 0 && none.identifiers.front().empty(),
+          "no-device selection remains an explicit user choice");
 }
 
 void event_log_test() {
@@ -550,6 +568,7 @@ int main() {
     run_test("pixel conversion", pixel_conversion_test);
     run_test("monitor tracking", monitor_test);
     run_test("configuration", config_test);
+    run_test("persistent device choices", device_choices_test);
     run_test("event log", event_log_test);
     run_test("controller", controller_test);
     run_test("controller concurrency", controller_concurrency_test);

@@ -1,5 +1,6 @@
 #include "settings_window.hpp"
 #include "app.hpp"
+#include "asc/core/device_choices.hpp"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -150,7 +151,12 @@ void SettingsWindow::create_controls() {
     HFONT title_font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     add_label(L"VIDEO INPUT", 20, 16, 300);
     add_label(L"Device", 20, 48); const auto device = add_combo(video_device, 195, 44, 490);
-    int device_selected = 0; combo_add(device, L"No video input selected");
+    std::vector<std::string> available_device_ids;
+    available_device_ids.reserve(devices_.size());
+    for (const auto& available : devices_) available_device_ids.push_back(available.identifier);
+    const auto choices = build_persistent_device_choices(available_device_ids, working_.selected_video_device_id);
+    video_option_ids_ = choices.identifiers;
+    combo_add(device, L"No video input selected");
     for (std::size_t i = 0; i < devices_.size(); ++i) {
         std::wostringstream description;
         description << wide(devices_[i].name);
@@ -160,9 +166,12 @@ void SettingsWindow::create_controls() {
                         << (format.denominator ? format.numerator / format.denominator : 0) << L" fps";
         }
         combo_add(device, description.str().c_str());
-        if (devices_[i].identifier == working_.selected_video_device_id) device_selected = static_cast<int>(i + 1);
     }
-    SendMessageW(device, CB_SETCURSEL, device_selected, 0);
+    if (choices.configured_device_unavailable) {
+        const auto unavailable = std::wstring(L"Unavailable saved source — ") + wide(working_.selected_video_device_id);
+        combo_add(device, unavailable.c_str());
+    }
+    SendMessageW(device, CB_SETCURSEL, static_cast<WPARAM>(choices.selected_index), 0);
     add_label(L"Preferred input", 20, 82); const auto in_size = add_combo(input_size, 195, 78, 160); combo_add(in_size, L"1920 × 1080"); combo_add(in_size, L"1280 × 720");
     SendMessageW(in_size, CB_SETCURSEL, working_.preferred_input_size.width == 1280 ? 1 : 0, 0);
     add_label(L"Frame rate", 380, 82, 100); const auto in_fps = add_combo(input_fps, 500, 78, 100); combo_add(in_fps, L"30 fps"); SendMessageW(in_fps, CB_SETCURSEL, 0, 0);
@@ -249,7 +258,9 @@ bool SettingsWindow::checked(const UINT id) const { return SendDlgItemMessageW(w
 void SettingsWindow::save() {
     try {
         const int device = combo_selection(window_, video_device);
-        working_.selected_video_device_id = device > 0 && static_cast<std::size_t>(device) <= devices_.size() ? devices_[static_cast<std::size_t>(device - 1)].identifier : "";
+        if (device < 0 || static_cast<std::size_t>(device) >= video_option_ids_.size())
+            throw std::invalid_argument("The selected video source is no longer available in the settings list");
+        working_.selected_video_device_id = video_option_ids_[static_cast<std::size_t>(device)];
         working_.preferred_input_size = combo_selection(window_, input_size) == 1 ? Size{1280, 720} : Size{1920, 1080};
         working_.preferred_input_fps = 30;
         working_.video_auto_reconnect = checked(auto_reconnect);
