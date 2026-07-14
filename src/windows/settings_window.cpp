@@ -20,7 +20,7 @@ enum Id : UINT {
     output_size, output_fps, fade, placeholder_color, start_windows, start_minimized, start_auto, close_tray, confirm_exit, diagnostic, notifications, language, log_retention, configured_log_level,
     save_button, cancel_button, restart_input_button, restart_capture_button, restart_vcam_button,
     set_reference_settings, import_reference_settings, reset_counters_button, preview_button,
-    open_log_button, export_log_button, clear_log_button
+    open_log_button, export_log_button, clear_log_button, toggle_device_details_button, restart_all_button
 };
 void combo_add(const HWND combo, const wchar_t* text) { SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text)); }
 int combo_selection(const HWND window, const UINT id) { return static_cast<int>(SendDlgItemMessageW(window, id, CB_GETCURSEL, 0, 0)); }
@@ -44,9 +44,11 @@ SettingsWindow::SettingsWindow(const HWND owner, const HINSTANCE instance, App& 
       monitor_observations_(app.status().monitor_observations) {
     WNDCLASSEXW wc{sizeof(wc)}; wc.hInstance = instance_; wc.lpfnWndProc = procedure; wc.lpszClassName = L"AutomaticScreenCameraSettings";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW); wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.hIcon = reinterpret_cast<HICON>(SendMessageW(owner_, WM_GETICON, ICON_BIG, 0));
+    wc.hIconSm = reinterpret_cast<HICON>(SendMessageW(owner_, WM_GETICON, ICON_SMALL, 0));
     RegisterClassExW(&wc);
     window_ = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"Automatic Screen Camera — Settings",
-                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VSCROLL, CW_USEDEFAULT, CW_USEDEFAULT, 735, 680,
+                              WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 800, 680,
                               owner_, nullptr, instance_, this);
     if (!window_) throw HResultError(HRESULT_FROM_WIN32(GetLastError()), "Create settings window");
 }
@@ -63,40 +65,42 @@ LRESULT SettingsWindow::handle(const UINT message, const WPARAM wparam, const LP
     switch (message) {
     case WM_CREATE: {
         create_controls();
-        RECT client{}; GetClientRect(window_, &client);
-        SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS, 0, content_height_, static_cast<UINT>(client.bottom), 0, 0};
-        SetScrollInfo(window_, SB_VERT, &info, TRUE);
         return 0;
     }
-    case WM_SIZE: {
-        SCROLLINFO info{sizeof(info), SIF_PAGE}; info.nPage = HIWORD(lparam);
-        SetScrollInfo(window_, SB_VERT, &info, TRUE);
+    case WM_SIZE:
+        layout_controls();
+        return 0;
+    case WM_GETMINMAXINFO: {
+        auto* bounds = reinterpret_cast<MINMAXINFO*>(lparam);
+        bounds->ptMinTrackSize.x = dip(window_, 760);
+        bounds->ptMinTrackSize.y = dip(window_, 600);
         return 0;
     }
-    case WM_VSCROLL: {
-        SCROLLINFO info{sizeof(info), SIF_ALL}; GetScrollInfo(window_, SB_VERT, &info);
-        int next = scroll_position_;
-        switch (LOWORD(wparam)) {
-        case SB_LINEUP: next -= 24; break; case SB_LINEDOWN: next += 24; break;
-        case SB_PAGEUP: next -= static_cast<int>(info.nPage); break; case SB_PAGEDOWN: next += static_cast<int>(info.nPage); break;
-        case SB_THUMBTRACK: next = info.nTrackPos; break; case SB_TOP: next = 0; break; case SB_BOTTOM: next = info.nMax; break;
+    case WM_DPICHANGED: {
+        const auto* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (suggested) SetWindowPos(window_, nullptr, suggested->left, suggested->top,
+                                    suggested->right - suggested->left, suggested->bottom - suggested->top,
+                                    SWP_NOACTIVATE | SWP_NOZORDER);
+        if (fonts_) {
+            fonts_->recreate(window_);
+            set_children_font(window_, fonts_->body());
+            for (const HWND heading : section_labels_) set_control_font(heading, fonts_->section());
         }
-        next = std::clamp(next, 0, std::max(0, info.nMax - static_cast<int>(info.nPage) + 1));
-        if (next != scroll_position_) {
-            const int delta = scroll_position_ - next; scroll_position_ = next;
-            ScrollWindowEx(window_, 0, delta, nullptr, nullptr, nullptr, nullptr, SW_INVALIDATE | SW_ERASE | SW_SCROLLCHILDREN);
-            info.fMask = SIF_POS; info.nPos = scroll_position_; SetScrollInfo(window_, SB_VERT, &info, TRUE);
-            UpdateWindow(window_);
-        }
+        layout_controls();
         return 0;
     }
-    case WM_MOUSEWHEEL: {
-        const int steps = GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA;
-        for (int i = 0; i < std::abs(steps) * 3; ++i)
-            SendMessageW(window_, WM_VSCROLL, steps > 0 ? SB_LINEUP : SB_LINEDOWN, 0);
+    case WM_NOTIFY:
+        if (reinterpret_cast<NMHDR*>(lparam)->hwndFrom == tabs_ && reinterpret_cast<NMHDR*>(lparam)->code == TCN_SELCHANGE)
+            select_tab(TabCtrl_GetCurSel(tabs_));
         return 0;
-    }
     case WM_COMMAND:
+        if (const HWND control = reinterpret_cast<HWND>(lparam)) {
+            const UINT notification = HIWORD(wparam);
+            if (notification == BN_SETFOCUS || notification == EN_SETFOCUS || notification == CBN_SETFOCUS)
+                tooltips_.show_for_focus(control, true);
+            else if (notification == BN_KILLFOCUS || notification == EN_KILLFOCUS || notification == CBN_KILLFOCUS)
+                tooltips_.show_for_focus(control, false);
+        }
         switch (LOWORD(wparam)) {
         case video_device:
             if (HIWORD(wparam) == CBN_SELCHANGE) update_device_details();
@@ -106,8 +110,10 @@ LRESULT SettingsWindow::handle(const UINT message, const WPARAM wparam, const LP
         case restart_input_button: app_.restart_video_input(); return 0;
         case restart_capture_button: app_.restart_screen_capture(); return 0;
         case restart_vcam_button: app_.restart_virtual_camera(); return 0;
+        case restart_all_button: app_.restart_all(); return 0;
         case reset_counters_button: app_.reset_diagnostic_counters(); return 0;
         case preview_button: show_previews(); return 0;
+        case toggle_device_details_button: set_device_details_expanded(!device_details_expanded_); return 0;
         case open_log_button:
             ShellExecuteW(window_, L"open", (app_.data_directory() / L"logs").c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             return 0;
@@ -148,28 +154,58 @@ LRESULT SettingsWindow::handle(const UINT message, const WPARAM wparam, const LP
     return DefWindowProcW(window_, message, wparam, lparam);
 }
 
-HWND SettingsWindow::add_label(const wchar_t* value, const int x, const int y, const int width) {
-    return CreateWindowExW(0, L"STATIC", value, WS_CHILD | WS_VISIBLE, x, y + 4, width, 22, window_, nullptr, instance_, nullptr);
+void SettingsWindow::register_control(const HWND control, const int page, const int x, const int y,
+                                      const int width, const int height, const bool stretch) {
+    placements_[control] = {page, x, y, width, height, stretch};
+    page_controls_[static_cast<std::size_t>(page)].push_back(control);
 }
-HWND SettingsWindow::add_edit(const UINT id, const std::wstring& value, const int x, const int y, const int width) {
-    return CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", value.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                           x, y, width, 25, window_, control_id(id), instance_, nullptr);
+
+HWND SettingsWindow::add_label(const wchar_t* value, const int page, const int x, const int y,
+                               const int width, const int height, const bool stretch) {
+    const HWND control = CreateWindowExW(0, L"STATIC", value, WS_CHILD | WS_VISIBLE,
+                                         0, 0, 0, 0, window_, nullptr, instance_, nullptr);
+    register_control(control, page, x, y, width, height, stretch);
+    return control;
 }
-HWND SettingsWindow::add_checkbox(const UINT id, const wchar_t* value, const bool is_checked, const int x, const int y, const int width) {
+HWND SettingsWindow::add_edit(const UINT id, const std::wstring& value, const int page, const int x, const int y,
+                              const int width, const bool stretch) {
+    const HWND control = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", value.c_str(),
+                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                         0, 0, 0, 0, window_, control_id(id), instance_, nullptr);
+    register_control(control, page, x, y, width, 26, stretch);
+    return control;
+}
+HWND SettingsWindow::add_checkbox(const UINT id, const wchar_t* value, const bool is_checked,
+                                  const int page, const int x, const int y, const int width) {
     const auto control = CreateWindowExW(0, L"BUTTON", value, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                         x, y, width, 24, window_, control_id(id), instance_, nullptr);
-    SendMessageW(control, BM_SETCHECK, is_checked ? BST_CHECKED : BST_UNCHECKED, 0); return control;
+                                         0, 0, 0, 0, window_, control_id(id), instance_, nullptr);
+    SendMessageW(control, BM_SETCHECK, is_checked ? BST_CHECKED : BST_UNCHECKED, 0);
+    register_control(control, page, x, y, width, 26);
+    return control;
 }
-HWND SettingsWindow::add_combo(const UINT id, const int x, const int y, const int width) {
-    return CreateWindowExW(0, WC_COMBOBOXW, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
-                           x, y, width, 160, window_, control_id(id), instance_, nullptr);
+HWND SettingsWindow::add_combo(const UINT id, const int page, const int x, const int y,
+                               const int width, const bool stretch) {
+    const HWND control = CreateWindowExW(0, WC_COMBOBOXW, nullptr,
+                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                         0, 0, 0, 0, window_, control_id(id), instance_, nullptr);
+    register_control(control, page, x, y, width, 160, stretch);
+    return control;
+}
+HWND SettingsWindow::add_button(const UINT id, const wchar_t* value, const int page, const int x, const int y,
+                                const int width, const int height) {
+    const HWND control = CreateWindowExW(0, L"BUTTON", value, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                         0, 0, 0, 0, window_, control_id(id), instance_, nullptr);
+    register_control(control, page, x, y, width, height);
+    return control;
 }
 
 void SettingsWindow::update_device_details() {
     const int selected = combo_selection(window_, video_device);
     std::wostringstream details;
+    std::wstring status_text;
     if (selected <= 0 || static_cast<std::size_t>(selected) >= video_option_ids_.size()) {
         details << L"Status: No video input selected";
+        status_text = L"No video input selected";
     } else {
         const auto& identifier = video_option_ids_[static_cast<std::size_t>(selected)];
         const auto device = std::find_if(devices_.begin(), devices_.end(), [&identifier](const VideoDevice& candidate) {
@@ -178,6 +214,7 @@ void SettingsWindow::update_device_details() {
         if (device == devices_.end()) {
             details << L"Status: Unavailable (saved selection)\r\nIdentifier: " << wide(identifier)
                     << L"\r\nSupported formats: unavailable until the device reconnects";
+            status_text = L"⚠ Saved source unavailable — reconnect will be retried automatically";
         } else {
             details << L"Status: " << (device->connected ? L"Connected" : L"Unavailable")
                     << L"\r\nIdentifier: " << wide(device->identifier) << L"\r\nSupported formats: ";
@@ -200,9 +237,11 @@ void SettingsWindow::update_device_details() {
                 if (device->formats.size() > displayed_format_limit)
                     details << L"; +" << (device->formats.size() - displayed_format_limit) << L" more";
             }
+            status_text = device->connected ? L"✓ Connected" : L"⚠ Device unavailable";
         }
     }
     SetWindowTextW(GetDlgItem(window_, video_details), details.str().c_str());
+    if (device_status_) SetWindowTextW(device_status_, status_text.c_str());
 }
 
 void SettingsWindow::show_previews() {
@@ -228,54 +267,98 @@ void SettingsWindow::export_logs() {
 }
 
 void SettingsWindow::create_controls() {
-    HFONT title_font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-    add_label(L"VIDEO INPUT", 20, 16, 300);
-    add_label(L"Device", 20, 48); const auto device = add_combo(video_device, 195, 44, 490);
+    constexpr int general_page = 0;
+    constexpr int sources_page = 1;
+    constexpr int detection_page = 2;
+    constexpr int output_page = 3;
+    constexpr int advanced_page = 4;
+
+    tabs_ = CreateWindowExW(0, WC_TABCONTROLW, nullptr,
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS,
+                            0, 0, 0, 0, window_, nullptr, instance_, nullptr);
+    for (const wchar_t* title : {L"General", L"Sources", L"Detection", L"Output", L"Advanced & diagnostics"}) {
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        item.pszText = const_cast<wchar_t*>(title);
+        TabCtrl_InsertItem(tabs_, TabCtrl_GetItemCount(tabs_), &item);
+    }
+
+    const auto heading = [this](const wchar_t* text, const int page, const int y) {
+        const HWND control = add_label(text, page, 16, y, 300, 24);
+        section_labels_.push_back(control);
+        return control;
+    };
+
+    // General
+    heading(L"STARTUP", general_page, 12);
+    add_checkbox(start_windows, L"Start with Windows", working_.start_with_windows, general_page, 16, 46, 240);
+    add_checkbox(start_minimized, L"Start minimized to tray", working_.start_minimized, general_page, 300, 46, 240);
+    add_checkbox(start_auto, L"Start detection automatically", working_.start_automatically, general_page, 16, 80, 260);
+    heading(L"WINDOW BEHAVIOR", general_page, 126);
+    add_checkbox(close_tray, L"Close button minimizes to tray", working_.close_to_tray, general_page, 16, 160, 270);
+    add_checkbox(confirm_exit, L"Confirm before exiting", working_.confirm_exit, general_page, 300, 160, 230);
+    add_checkbox(notifications, L"Show Windows notifications", working_.show_notifications, general_page, 16, 194, 270);
+    add_label(L"Interface language", general_page, 16, 244, 160);
+    const auto languages = add_combo(language, general_page, 190, 238, 250);
+    combo_add(languages, L"English (United States)");
+    SendMessageW(languages, CB_SETCURSEL, 0, 0);
+
+    // Sources
+    heading(L"VIDEO SOURCE", sources_page, 12);
+    add_label(L"Device", sources_page, 16, 48, 140);
+    const auto device = add_combo(video_device, sources_page, 170, 42, 20, true);
     std::vector<std::string> available_device_ids;
     available_device_ids.reserve(devices_.size());
     for (const auto& available : devices_) available_device_ids.push_back(available.identifier);
     const auto choices = build_persistent_device_choices(available_device_ids, working_.selected_video_device_id);
     video_option_ids_ = choices.identifiers;
     combo_add(device, L"No video input selected");
-    for (std::size_t i = 0; i < devices_.size(); ++i) {
+    for (const auto& available : devices_) {
         std::wostringstream description;
-        description << wide(devices_[i].name);
-        if (!devices_[i].formats.empty()) {
-            const auto& format = devices_[i].formats.front();
+        description << wide(available.name);
+        if (!available.formats.empty()) {
+            const auto& format = available.formats.front();
             description << L" — " << format.size.width << L"×" << format.size.height << L" @ "
                         << (format.denominator ? format.numerator / format.denominator : 0) << L" fps";
         }
         combo_add(device, description.str().c_str());
     }
-    if (choices.configured_device_unavailable) {
-        const auto unavailable = std::wstring(L"Unavailable saved source — ") + wide(working_.selected_video_device_id);
-        combo_add(device, unavailable.c_str());
-    }
+    if (choices.configured_device_unavailable)
+        combo_add(device, (std::wstring(L"Unavailable saved source — ") + wide(working_.selected_video_device_id)).c_str());
     SendMessageW(device, CB_SETCURSEL, static_cast<WPARAM>(choices.selected_index), 0);
-    add_label(L"Device details", 20, 78);
-    CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
-                    WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
-                    195, 74, 490, 72, window_, control_id(video_details), instance_, nullptr);
-    update_device_details();
-    add_label(L"Preferred input", 20, 162); const auto in_size = add_combo(input_size, 195, 158, 160); combo_add(in_size, L"1920 × 1080"); combo_add(in_size, L"1280 × 720");
-    SendMessageW(in_size, CB_SETCURSEL, working_.preferred_input_size.width == 1280 ? 1 : 0, 0);
-    add_label(L"Frame rate", 380, 162, 100); const auto in_fps = add_combo(input_fps, 500, 158, 100); combo_add(in_fps, L"30 fps"); SendMessageW(in_fps, CB_SETCURSEL, 0, 0);
-    CreateWindowExW(0, L"BUTTON", L"Restart input", WS_CHILD | WS_VISIBLE, 605, 158, 80, 26, window_, control_id(restart_input_button), instance_, nullptr);
-    add_checkbox(auto_reconnect, L"Reconnect automatically", working_.video_auto_reconnect, 20, 188, 220);
-    add_label(L"Retry interval (s)", 265, 188, 135); add_edit(reconnect_interval, std::to_wstring(working_.video_reconnect_interval.count()), 400, 184, 70);
-    CreateWindowExW(0, L"BUTTON", L"Open previews", WS_CHILD | WS_VISIBLE, 480, 184, 110, 27, window_, control_id(preview_button), instance_, nullptr);
+    device_status_ = add_label(L"Checking connection…", sources_page, 170, 78, 360, 24);
+    device_details_button_ = add_button(toggle_device_details_button, L"Show details", sources_page, 560, 72, 130, 28);
+    const HWND details = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+                                         WS_CHILD | WS_TABSTOP | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
+                                         0, 0, 0, 0, window_, control_id(video_details), instance_, nullptr);
+    register_control(details, sources_page, 170, 104, 20, 72, true);
+    ShowWindow(details, SW_HIDE);
 
-    add_label(L"SCREEN CAPTURE", 20, 222, 300);
-    add_checkbox(cursor, L"Include mouse cursor", working_.cursor_visible, 20, 250);
-    CreateWindowExW(0, L"BUTTON", L"Restart capture", WS_CHILD | WS_VISIBLE, 555, 246, 130, 28, window_, control_id(restart_capture_button), instance_, nullptr);
-    add_label(L"Preferred tracked display", 20, 284); const auto monitor_combo = add_combo(tracked_monitor, 240, 280, 445);
+    add_label(L"Preferred input", sources_page, 16, 122, 140);
+    const auto in_size = add_combo(input_size, sources_page, 170, 116, 170);
+    combo_add(in_size, L"1920 × 1080"); combo_add(in_size, L"1280 × 720");
+    SendMessageW(in_size, CB_SETCURSEL, working_.preferred_input_size.width == 1280 ? 1 : 0, 0);
+    add_label(L"Frame rate", sources_page, 370, 122, 100);
+    const auto in_fps = add_combo(input_fps, sources_page, 470, 116, 100);
+    combo_add(in_fps, L"30 fps"); SendMessageW(in_fps, CB_SETCURSEL, 0, 0);
+    add_button(restart_input_button, L"Restart input", sources_page, 590, 116, 120);
+    add_checkbox(auto_reconnect, L"Reconnect automatically", working_.video_auto_reconnect, sources_page, 16, 158, 230);
+    add_label(L"Retry interval (seconds)", sources_page, 270, 160, 180);
+    add_edit(reconnect_interval, std::to_wstring(working_.video_reconnect_interval.count()), sources_page, 455, 154, 80);
+
+    heading(L"SCREEN CAPTURE", sources_page, 210);
+    add_checkbox(cursor, L"Include mouse cursor", working_.cursor_visible, sources_page, 16, 244, 230);
+    add_button(restart_capture_button, L"Restart capture", sources_page, 560, 238, 150);
+    add_label(L"Preferred tracked display", sources_page, 16, 286, 180);
+    const auto monitor_combo = add_combo(tracked_monitor, sources_page, 210, 280, 20, true);
     combo_add(monitor_combo, L"Keep automatic/reference-based selection");
     int monitor_selected = 0;
     const auto now = Clock::now();
     for (std::size_t i = 0; i < monitors_.size(); ++i) {
-        std::wostringstream description; description << wide(monitors_[i].identity.model) << L" — "
-            << monitors_[i].identity.resolution.width << L"×" << monitors_[i].identity.resolution.height << L" at ("
-            << monitors_[i].identity.desktop_x << L", " << monitors_[i].identity.desktop_y << L")";
+        std::wostringstream description;
+        description << wide(monitors_[i].identity.model) << L" — " << monitors_[i].identity.resolution.width << L"×"
+                    << monitors_[i].identity.resolution.height << L" at (" << monitors_[i].identity.desktop_x << L", "
+                    << monitors_[i].identity.desktop_y << L")";
         const auto observation = std::find_if(monitor_observations_.begin(), monitor_observations_.end(), [&](const MonitorObservation& item) {
             return item.identity.stable_key() == monitors_[i].identity.stable_key();
         });
@@ -285,9 +368,7 @@ void SettingsWindow::create_controls() {
             if (observation->last_reference_detected_at != TimePoint{}) {
                 const auto age = std::max(std::chrono::seconds{0}, std::chrono::duration_cast<std::chrono::seconds>(now - observation->last_reference_detected_at));
                 description << L", reference seen " << age.count() << L" s ago";
-            } else {
-                description << L", reference not yet seen";
-            }
+            } else description << L", reference not yet seen";
             if (observation->previously_tracked) description << L", previously tracked";
         }
         combo_add(monitor_combo, description.str().c_str());
@@ -295,55 +376,153 @@ void SettingsWindow::create_controls() {
             monitor_selected = static_cast<int>(i + 1);
     }
     SendMessageW(monitor_combo, CB_SETCURSEL, monitor_selected, 0);
+    add_button(preview_button, L"Open previews", sources_page, 16, 330, 140);
 
-    add_label(L"REFERENCE DETECTION", 20, 320, 300);
-    CreateWindowExW(0, L"BUTTON", L"Set current screen", WS_CHILD | WS_VISIBLE, 370, 314, 145, 27, window_, control_id(set_reference_settings), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Import image…", WS_CHILD | WS_VISIBLE, 525, 314, 160, 27, window_, control_id(import_reference_settings), instance_, nullptr);
-    add_label(L"Similarity threshold (%)", 20, 352); add_edit(threshold, std::to_wstring(working_.detector.threshold * 100.0), 240, 348);
-    add_label(L"Detection interval (ms)", 380, 352, 180); add_edit(detection_interval, std::to_wstring(working_.detection_interval.count()), 575, 348, 110);
-    add_label(L"Matching confirmations", 20, 386); add_edit(matches, std::to_wstring(working_.detector.matches_required), 240, 382);
-    add_label(L"Mismatch confirmations", 380, 386, 180); add_edit(mismatches, std::to_wstring(working_.detector.mismatches_required), 575, 382, 110);
-    add_label(L"Full rescan interval (s)", 20, 420); add_edit(scan_interval, std::to_wstring(working_.full_scan_interval.count()), 240, 416);
-    add_label(L"Reassignment confirmations", 380, 420, 190); add_edit(reassignments, std::to_wstring(working_.monitor_tracker.confirmations_required), 575, 416, 110);
-    add_label(L"When reference is missing", 20, 454); const auto missing = add_combo(missing_behavior, 240, 450, 445);
-    combo_add(missing, L"Use webcam/video (safe default)"); combo_add(missing, L"Keep current output"); combo_add(missing, L"Use last tracked screen"); combo_add(missing, L"Use safe placeholder");
+    // Detection
+    heading(L"REFERENCE", detection_page, 12);
+    add_label(L"Capture the visual that keeps the webcam active in Automatic mode.", detection_page, 16, 44, 20, 24, true);
+    add_button(set_reference_settings, L"Set current screen", detection_page, 16, 78, 170);
+    add_button(import_reference_settings, L"Import image…", detection_page, 198, 78, 150);
+    heading(L"DETECTION BEHAVIOR", detection_page, 132);
+    add_label(L"Similarity threshold (%)", detection_page, 16, 170, 190);
+    add_edit(threshold, std::to_wstring(working_.detector.threshold * 100.0), detection_page, 220, 164, 100);
+    add_label(L"Detection interval (ms)", detection_page, 370, 170, 190);
+    add_edit(detection_interval, std::to_wstring(working_.detection_interval.count()), detection_page, 570, 164, 110);
+    add_label(L"Matching confirmations", detection_page, 16, 208, 190);
+    add_edit(matches, std::to_wstring(working_.detector.matches_required), detection_page, 220, 202, 100);
+    add_label(L"Mismatch confirmations", detection_page, 370, 208, 190);
+    add_edit(mismatches, std::to_wstring(working_.detector.mismatches_required), detection_page, 570, 202, 110);
+    add_label(L"Full rescan interval (seconds)", detection_page, 16, 246, 210);
+    add_edit(scan_interval, std::to_wstring(working_.full_scan_interval.count()), detection_page, 240, 240, 100);
+    add_label(L"Reassignment confirmations", detection_page, 370, 246, 200);
+    add_edit(reassignments, std::to_wstring(working_.monitor_tracker.confirmations_required), detection_page, 570, 240, 110);
+    add_label(L"When reference is missing", detection_page, 16, 292, 200);
+    const auto missing = add_combo(missing_behavior, detection_page, 230, 286, 20, true);
+    combo_add(missing, L"Use webcam/video (safe default)"); combo_add(missing, L"Keep current output");
+    combo_add(missing, L"Use last tracked screen"); combo_add(missing, L"Use safe placeholder");
     SendMessageW(missing, CB_SETCURSEL, static_cast<int>(working_.missing_behavior), 0);
 
-    add_label(L"OUTPUT", 20, 494, 300);
-    add_label(L"Resolution", 20, 526); const auto out_size = add_combo(output_size, 195, 522, 160); combo_add(out_size, L"1920 × 1080"); combo_add(out_size, L"1280 × 720");
+    // Output
+    heading(L"VIRTUAL CAMERA OUTPUT", output_page, 12);
+    add_label(L"Resolution", output_page, 16, 52, 140);
+    const auto out_size = add_combo(output_size, output_page, 170, 46, 180);
+    combo_add(out_size, L"1920 × 1080"); combo_add(out_size, L"1280 × 720");
     SendMessageW(out_size, CB_SETCURSEL, working_.output_size.width == 1280 ? 1 : 0, 0);
-    add_label(L"Frame rate", 380, 526, 100); const auto out_fps = add_combo(output_fps, 500, 522, 90); combo_add(out_fps, L"30 fps"); SendMessageW(out_fps, CB_SETCURSEL, 0, 0);
-    CreateWindowExW(0, L"BUTTON", L"Restart virtual camera", WS_CHILD | WS_VISIBLE, 596, 522, 90, 27, window_, control_id(restart_vcam_button), instance_, nullptr);
-    add_label(L"Fade duration (0–2000 ms)", 20, 560); add_edit(fade, std::to_wstring(working_.fade_duration.count()), 240, 556);
-    add_label(L"Webcam scaling", 380, 560, 130); const auto camera = add_combo(camera_scale, 515, 556, 170);
-    combo_add(camera, L"Fit with letterboxing"); combo_add(camera, L"Fill and crop"); combo_add(camera, L"Stretch"); SendMessageW(camera, CB_SETCURSEL, static_cast<int>(working_.camera_scaling), 0);
-    add_label(L"Screen scaling", 380, 594, 130); const auto screen = add_combo(screen_scale, 515, 590, 170);
-    combo_add(screen, L"Fit with letterboxing"); combo_add(screen, L"Fill and crop"); combo_add(screen, L"Stretch"); SendMessageW(screen, CB_SETCURSEL, static_cast<int>(working_.screen_scaling), 0);
-    std::wostringstream color_text; color_text << L'#' << std::hex << std::setfill(L'0') << std::setw(6) << (working_.placeholder_color_bgra & 0x00ffffffu);
-    add_label(L"Placeholder color", 20, 594); add_edit(placeholder_color, color_text.str(), 195, 590, 120);
+    add_label(L"Frame rate", output_page, 380, 52, 110);
+    const auto out_fps = add_combo(output_fps, output_page, 500, 46, 100);
+    combo_add(out_fps, L"30 fps"); SendMessageW(out_fps, CB_SETCURSEL, 0, 0);
+    add_button(restart_vcam_button, L"Restart virtual camera", output_page, 16, 92, 190);
+    heading(L"TRANSITION AND SCALING", output_page, 148);
+    add_label(L"Fade duration (0–2000 ms)", output_page, 16, 188, 210);
+    add_edit(fade, std::to_wstring(working_.fade_duration.count()), output_page, 240, 182, 110);
+    add_label(L"Webcam scaling", output_page, 16, 230, 180);
+    const auto camera = add_combo(camera_scale, output_page, 210, 224, 240);
+    combo_add(camera, L"Fit with letterboxing"); combo_add(camera, L"Fill and crop"); combo_add(camera, L"Stretch");
+    SendMessageW(camera, CB_SETCURSEL, static_cast<int>(working_.camera_scaling), 0);
+    add_label(L"Screen scaling", output_page, 16, 272, 180);
+    const auto screen = add_combo(screen_scale, output_page, 210, 266, 240);
+    combo_add(screen, L"Fit with letterboxing"); combo_add(screen, L"Fill and crop"); combo_add(screen, L"Stretch");
+    SendMessageW(screen, CB_SETCURSEL, static_cast<int>(working_.screen_scaling), 0);
 
-    add_label(L"GENERAL AND LOGGING", 20, 630, 300);
-    add_checkbox(start_windows, L"Start with Windows", working_.start_with_windows, 20, 658, 190);
-    add_checkbox(start_minimized, L"Start minimized to tray", working_.start_minimized, 220, 658, 210);
-    add_checkbox(start_auto, L"Start detection automatically", working_.start_automatically, 440, 658, 245);
-    add_checkbox(close_tray, L"Close button minimizes to tray", working_.close_to_tray, 20, 684, 240);
-    add_checkbox(confirm_exit, L"Confirm before exiting", working_.confirm_exit, 270, 684, 190);
-    add_checkbox(diagnostic, L"Diagnostic logging", working_.diagnostic_logging, 470, 684, 190);
-    add_checkbox(notifications, L"Show Windows notifications", working_.show_notifications, 20, 710, 240);
-    add_label(L"Interface language", 280, 710, 150); const auto languages = add_combo(language, 440, 706, 245);
-    combo_add(languages, L"English (United States)"); SendMessageW(languages, CB_SETCURSEL, 0, 0);
-    add_label(L"Log retention (days)", 20, 740, 180); add_edit(log_retention, std::to_wstring(working_.log_retention_days), 205, 736, 90);
-    add_label(L"Log level", 380, 740, 100); const auto levels = add_combo(configured_log_level, 500, 736, 185);
+    // Advanced & diagnostics
+    heading(L"SAFE FALLBACK", advanced_page, 12);
+    std::wostringstream color_text;
+    color_text << L'#' << std::hex << std::setfill(L'0') << std::setw(6) << (working_.placeholder_color_bgra & 0x00ffffffu);
+    add_label(L"Placeholder color", advanced_page, 16, 50, 160);
+    add_edit(placeholder_color, color_text.str(), advanced_page, 190, 44, 130);
+    heading(L"RECOVERY", advanced_page, 96);
+    add_button(restart_all_button, L"Restart all video components", advanced_page, 16, 130, 230);
+    heading(L"LOGGING", advanced_page, 184);
+    add_checkbox(diagnostic, L"Diagnostic logging", working_.diagnostic_logging, advanced_page, 16, 218, 220);
+    add_label(L"Log retention (days)", advanced_page, 280, 220, 170);
+    add_edit(log_retention, std::to_wstring(working_.log_retention_days), advanced_page, 460, 214, 90);
+    add_label(L"Log level", advanced_page, 16, 260, 150);
+    const auto levels = add_combo(configured_log_level, advanced_page, 180, 254, 190);
     combo_add(levels, L"Trace"); combo_add(levels, L"Debug"); combo_add(levels, L"Info"); combo_add(levels, L"Warning"); combo_add(levels, L"Error");
     SendMessageW(levels, CB_SETCURSEL, static_cast<int>(working_.log_level), 0);
+    add_button(open_log_button, L"Open log folder", advanced_page, 16, 308, 150);
+    add_button(export_log_button, L"Export logs…", advanced_page, 178, 308, 130);
+    add_button(clear_log_button, L"Clear logs", advanced_page, 320, 308, 120);
+    add_button(reset_counters_button, L"Reset diagnostic counters", advanced_page, 16, 354, 220);
 
-    CreateWindowExW(0, L"BUTTON", L"Open log folder", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 20, 774, 145, 30, window_, control_id(open_log_button), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Export logs…", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 175, 774, 125, 30, window_, control_id(export_log_button), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Clear logs", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 310, 774, 110, 30, window_, control_id(clear_log_button), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Reset diagnostic counters", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 20, 816, 210, 30, window_, control_id(reset_counters_button), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 505, 816, 85, 30, window_, control_id(save_button), instance_, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 600, 816, 85, 30, window_, control_id(cancel_button), instance_, nullptr);
-    SendMessageW(window_, WM_SETFONT, reinterpret_cast<WPARAM>(title_font), TRUE);
+    save_button_ = CreateWindowExW(0, L"BUTTON", L"Save changes", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                   0, 0, 0, 0, window_, control_id(save_button), instance_, nullptr);
+    cancel_button_ = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                     0, 0, 0, 0, window_, control_id(cancel_button), instance_, nullptr);
+
+    fonts_ = std::make_unique<UiFonts>(window_);
+    set_children_font(window_, fonts_->body());
+    for (const HWND section : section_labels_) set_control_font(section, fonts_->section());
+    tooltips_.create(window_, instance_);
+    tooltips_.set(GetDlgItem(window_, reconnect_interval), L"How often the app retries a disconnected saved video source. Accepted range: 1–60 seconds.", true);
+    tooltips_.set(GetDlgItem(window_, tracked_monitor), L"Choose a physical display or keep reference-based automatic selection.", true);
+    tooltips_.set(GetDlgItem(window_, threshold), L"Minimum image similarity counted as a reference match. Accepted range: 0–100%.", true);
+    tooltips_.set(GetDlgItem(window_, detection_interval), L"Time between fast reference checks. Accepted range: 100–1000 ms.", true);
+    tooltips_.set(GetDlgItem(window_, matches), L"Consecutive matches required before returning to webcam/video. Accepted range: 1–30.", true);
+    tooltips_.set(GetDlgItem(window_, mismatches), L"Consecutive mismatches required before switching to screen. Accepted range: 1–30.", true);
+    tooltips_.set(GetDlgItem(window_, scan_interval), L"Time between full scans of every connected display. Accepted range: 5–3600 seconds.", true);
+    tooltips_.set(GetDlgItem(window_, reassignments), L"Repeated unambiguous scans required before moving tracking to another display. Accepted range: 1–10.", true);
+    tooltips_.set(GetDlgItem(window_, missing_behavior), L"Privacy-safe behavior used when the reference or tracked capture is unavailable.", true);
+    tooltips_.set(GetDlgItem(window_, fade), L"Crossfade duration for output changes. Accepted range: 0–2000 ms.", true);
+    tooltips_.set(GetDlgItem(window_, camera_scale), L"Controls how webcam frames fit the virtual-camera resolution.", true);
+    tooltips_.set(GetDlgItem(window_, screen_scale), L"Controls how screen frames fit the virtual-camera resolution.", true);
+    tooltips_.set(GetDlgItem(window_, placeholder_color), L"Safe fallback color in #RRGGBB format.", true);
+    tooltips_.set(GetDlgItem(window_, log_retention), L"Number of days to keep rotating logs. Accepted range: 1–365.", true);
+    tooltips_.set(GetDlgItem(window_, configured_log_level), L"Minimum severity written when diagnostic logging is off.", true);
+
+    update_device_details();
+    select_tab(general_page);
+    layout_controls();
+}
+
+void SettingsWindow::layout_controls() {
+    if (!tabs_) return;
+    RECT client{};
+    GetClientRect(window_, &client);
+    const int pad = dip(window_, 16);
+    const int footer_height = dip(window_, 58);
+    const int tab_width = std::max(1, client.right - pad * 2);
+    const int tab_height = std::max(dip(window_, 420), client.bottom - pad - footer_height);
+    MoveWindow(tabs_, pad, pad, tab_width, tab_height, TRUE);
+
+    const int page_x = pad + dip(window_, 12);
+    const int page_y = pad + dip(window_, 38);
+    const int page_width = std::max(1, tab_width - dip(window_, 24));
+    const HWND details = GetDlgItem(window_, video_details);
+    for (const auto& [control, placement] : placements_) {
+        int y = placement.y;
+        if (placement.page == 1 && control != details && placement.y >= 116 && device_details_expanded_) y += 78;
+        const int control_width = placement.stretch ? std::max(dip(window_, 60), page_width - dip(window_, placement.x + placement.width))
+                                                    : dip(window_, placement.width);
+        MoveWindow(control, page_x + dip(window_, placement.x), page_y + dip(window_, y),
+                   control_width, dip(window_, placement.height), TRUE);
+    }
+
+    const int footer_y = client.bottom - pad - dip(window_, 34);
+    MoveWindow(cancel_button_, client.right - pad - dip(window_, 100), footer_y, dip(window_, 100), dip(window_, 32), TRUE);
+    MoveWindow(save_button_, client.right - pad - dip(window_, 100) - dip(window_, 132), footer_y,
+               dip(window_, 120), dip(window_, 32), TRUE);
+}
+
+void SettingsWindow::select_tab(const int index) {
+    selected_tab_ = std::clamp(index, 0, static_cast<int>(page_controls_.size()) - 1);
+    TabCtrl_SetCurSel(tabs_, selected_tab_);
+    for (std::size_t page = 0; page < page_controls_.size(); ++page) {
+        const bool visible = static_cast<int>(page) == selected_tab_;
+        for (const HWND control : page_controls_[page]) {
+            bool show = visible;
+            if (control == GetDlgItem(window_, video_details) && !device_details_expanded_) show = false;
+            ShowWindow(control, show ? SW_SHOW : SW_HIDE);
+        }
+    }
+    layout_controls();
+}
+
+void SettingsWindow::set_device_details_expanded(const bool expanded) {
+    device_details_expanded_ = expanded;
+    SetWindowTextW(device_details_button_, expanded ? L"Hide details" : L"Show details");
+    ShowWindow(GetDlgItem(window_, video_details), expanded && selected_tab_ == 1 ? SW_SHOW : SW_HIDE);
+    layout_controls();
 }
 
 std::wstring SettingsWindow::text(const UINT id) const { wchar_t value[256]{}; GetDlgItemTextW(window_, id, value, ARRAYSIZE(value)); return value; }

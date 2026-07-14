@@ -43,6 +43,18 @@ Run these on the exact Windows 11 x64, Zoom, webcam, driver, SDK, and artifact v
 3. Corrupt `config.json`; preserve a valid `config.backup.json`. Verify the invalid file is copied to `config.invalid.json`, the backup loads, and a warning is shown/logged.
 4. Run for 24 hours while sampling private bytes, GPU memory, handle count, and working set. Confirm no sustained growth and continuing 30-second scans.
 
+## Dashboard and settings usability
+
+1. Open the dashboard at 100%, 150%, and 200% Windows scaling. Resize it to its minimum size and verify the output preview, current output, mode, reference, tracked display, health, actions, and three activity rows remain readable without overlap.
+2. Hover the output, reference, display, and health summaries and verify their technical tooltips match the expanded Technical details text. Reach each information button by keyboard and verify the same tooltip appears on focus.
+3. Exercise Automatic, Force webcam/video, and Force screen. Verify manual override is always visible, Return to Automatic remains available, and warnings replace neither the current-output label nor the safe-placeholder state.
+4. Expand Technical details and verify all former dashboard metrics and all 20 recent events remain selectable. Use View all and verify focus moves to the full activity list.
+5. Hide and minimize the dashboard while monitoring preview calls; verify the dashboard output preview stops refreshing. Restore it and verify refresh resumes at no more than once per second.
+6. Open Settings and navigate General, Sources, Detection, Output, and Advanced & diagnostics using only the keyboard. Verify Save and Cancel stay visible on every page.
+7. Expand Sources device details and verify the stable identifier and supported formats appear without covering later controls. Collapse it and verify the compact connection status remains visible.
+8. Change one setting on each page, save, reopen Settings, and verify every value persisted. Repeat, choose Cancel, and verify none of the pending values changed.
+9. Enable Windows high contrast and repeat the dashboard status checks. Verify every colored state remains paired with readable text and focus remains visible.
+
 ## Timing measurements
 
 - Output cadence: 30 fps with monotonic 100 ns sample timestamps.

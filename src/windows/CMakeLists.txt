@@ -12,6 +12,8 @@ set(ASC_WINDOWS_APP_SOURCES
     reference_store.cpp
     settings_window.cpp
     preview_window.cpp
+    status_presentation.cpp
+    ui_helpers.cpp
     virtual_camera.cpp
     tray_window.cpp
 )

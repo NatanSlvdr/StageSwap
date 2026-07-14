@@ -9,16 +9,20 @@ PreviewWindow::PreviewWindow(const HINSTANCE instance, App& app) : instance_(ins
     WNDCLASSEXW wc{sizeof(wc)};
     wc.hInstance = instance_; wc.lpfnWndProc = procedure; wc.lpszClassName = L"AutomaticScreenCameraPreviews";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW); wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    icon_large_ = create_app_icon(32); icon_small_ = create_app_icon(16);
+    wc.hIcon = icon_large_; wc.hIconSm = icon_small_;
     RegisterClassExW(&wc);
     window_ = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"Automatic Screen Camera — Previews",
-                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 530, 380, nullptr, nullptr, instance_, this);
+                              WS_OVERLAPPEDWINDOW,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 620, 460, nullptr, nullptr, instance_, this);
     if (!window_) throw HResultError(HRESULT_FROM_WIN32(GetLastError()), "Create preview window");
 }
 
 PreviewWindow::~PreviewWindow() {
     if (window_) DestroyWindow(window_);
     for (const auto bitmap : bitmaps_) if (bitmap) DeleteObject(bitmap);
+    if (icon_large_) DestroyIcon(icon_large_);
+    if (icon_small_) DestroyIcon(icon_small_);
 }
 
 LRESULT CALLBACK PreviewWindow::procedure(const HWND window, const UINT message, const WPARAM wparam, const LPARAM lparam) {
@@ -35,22 +39,60 @@ LRESULT PreviewWindow::handle(const UINT message, const WPARAM wparam, const LPA
     case WM_CREATE: {
         constexpr const wchar_t* labels[]{L"Webcam / video input", L"Tracked monitor", L"Final virtual camera output", L"Saved reference (detection only)"};
         for (std::size_t i = 0; i < 4; ++i) {
-            const int column = static_cast<int>(i % 2); const int row = static_cast<int>(i / 2);
-            const int x = 12 + column * 254; const int y = 10 + row * 168;
-            CreateWindowExW(0, L"STATIC", labels[i], WS_CHILD | WS_VISIBLE, x, y, 240, 22, window_, nullptr, instance_, nullptr);
+            labels_[i] = CreateWindowExW(0, L"STATIC", labels[i], WS_CHILD | WS_VISIBLE,
+                                         0, 0, 0, 0, window_, nullptr, instance_, nullptr);
             image_controls_[i] = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC", nullptr,
                                                   WS_CHILD | WS_VISIBLE | SS_BITMAP | SS_CENTERIMAGE,
-                                                  x, y + 24, 240, 135, window_, nullptr, instance_, nullptr);
+                                                  0, 0, 0, 0, window_, nullptr, instance_, nullptr);
         }
+        fonts_ = std::make_unique<UiFonts>(window_);
+        set_children_font(window_, fonts_->body());
+        layout_controls();
         return 0;
     }
     case WM_TIMER: refresh(); return 0;
     case WM_SIZE:
+        layout_controls();
         if (wparam == SIZE_MINIMIZED) KillTimer(window_, preview_timer);
         else if (IsWindowVisible(window_)) SetTimer(window_, preview_timer, 1000, nullptr);
         return 0;
+    case WM_GETMINMAXINFO: {
+        auto* bounds = reinterpret_cast<MINMAXINFO*>(lparam);
+        bounds->ptMinTrackSize.x = dip(window_, 530);
+        bounds->ptMinTrackSize.y = dip(window_, 380);
+        return 0;
+    }
+    case WM_DPICHANGED: {
+        const auto* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (suggested) SetWindowPos(window_, nullptr, suggested->left, suggested->top,
+                                    suggested->right - suggested->left, suggested->bottom - suggested->top,
+                                    SWP_NOACTIVATE | SWP_NOZORDER);
+        if (fonts_) { fonts_->recreate(window_); set_children_font(window_, fonts_->body()); }
+        layout_controls();
+        return 0;
+    }
     case WM_CLOSE: KillTimer(window_, preview_timer); ShowWindow(window_, SW_HIDE); return 0;
     default: return DefWindowProcW(window_, message, wparam, lparam);
+    }
+}
+
+void PreviewWindow::layout_controls() {
+    if (!labels_[0]) return;
+    RECT client{};
+    GetClientRect(window_, &client);
+    const int pad = dip(window_, 14);
+    const int gap = dip(window_, 16);
+    const int label_height = dip(window_, 24);
+    const int cell_width = std::max(1, (client.right - pad * 2 - gap) / 2);
+    const int cell_height = std::max(1, (client.bottom - pad * 2 - gap) / 2);
+    for (std::size_t index = 0; index < labels_.size(); ++index) {
+        const int column = static_cast<int>(index % 2);
+        const int row = static_cast<int>(index / 2);
+        const int x = pad + column * (cell_width + gap);
+        const int y = pad + row * (cell_height + gap);
+        MoveWindow(labels_[index], x, y, cell_width, label_height, TRUE);
+        MoveWindow(image_controls_[index], x, y + label_height, cell_width,
+                   std::max(1, cell_height - label_height), TRUE);
     }
 }
 
@@ -71,7 +113,10 @@ HBITMAP PreviewWindow::create_bitmap(const PreviewImage& image) {
 
 void PreviewWindow::update_preview(const std::size_t index, const PreviewKind kind) {
     HBITMAP bitmap = nullptr;
-    try { if (const auto image = app_.preview(kind)) bitmap = create_bitmap(*image); }
+    RECT bounds{}; GetClientRect(image_controls_[index], &bounds);
+    const Size target{static_cast<std::uint32_t>(std::max(1L, bounds.right)),
+                      static_cast<std::uint32_t>(std::max(1L, bounds.bottom))};
+    try { if (const auto image = app_.preview(kind, target)) bitmap = create_bitmap(*image); }
     catch (...) {}
     const auto old = reinterpret_cast<HBITMAP>(SendMessageW(image_controls_[index], STM_SETIMAGE, IMAGE_BITMAP, reinterpret_cast<LPARAM>(bitmap)));
     if (old) DeleteObject(old);

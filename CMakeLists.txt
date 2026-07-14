@@ -99,6 +99,17 @@ if(ASC_BUILD_TESTS)
     asc_enable_sanitizers(asc_core_tests)
     add_test(NAME asc_core_tests COMMAND asc_core_tests)
     set_tests_properties(asc_core_tests PROPERTIES TIMEOUT 180)
+
+    add_executable(asc_ui_presentation_tests
+        tests/ui_presentation_tests.cpp
+        src/windows/status_presentation.cpp
+    )
+    target_include_directories(asc_ui_presentation_tests PRIVATE include src/windows)
+    target_link_libraries(asc_ui_presentation_tests PRIVATE asc_core Threads::Threads)
+    asc_enable_project_warnings(asc_ui_presentation_tests)
+    asc_enable_sanitizers(asc_ui_presentation_tests)
+    add_test(NAME asc_ui_presentation_tests COMMAND asc_ui_presentation_tests)
+    set_tests_properties(asc_ui_presentation_tests PROPERTIES TIMEOUT 30)
 endif()
 
 if(ASC_BUILD_WINDOWS_APP)
