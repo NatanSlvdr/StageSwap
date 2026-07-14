@@ -2,6 +2,8 @@
 
 Automatic Screen Camera is a local-only Windows desktop application that exposes a virtual camera and crossfades it between a selected camera source and a tracked monitor. A saved reference image controls the automatic choice: while the reference is visible the camera is shown; when it disappears the tracked monitor is shown.
 
+Prebuilt Windows packages are available from the [latest GitHub release](https://github.com/NatanSlvdr/WebcamSwitcher/releases/latest). Download the `AutomaticScreenCamera-*-windows-x64-unsigned.zip` file and its matching `.sha256` checksum.
+
 The Media Foundation virtual-camera API requires Windows 11 build 22000 or later. Release confidence is intentionally narrower: it applies only to the exact current Windows 11 x64, Zoom, webcam, driver, and artifact versions recorded by the release gate. The control plane is platform-neutral and independently tested; Windows adapters provide Media Foundation camera input, Windows Graphics Capture, Direct3D compositing, and the tray UI.
 
 ## Build
@@ -29,6 +31,13 @@ The installer defaults to the Release preset output directory and prefers packag
 
 ```powershell
 .\scripts\package.ps1 -TestResultsDirectory .\out\test-results
+```
+
+Maintainers publish a downloadable GitHub Release by pushing a semantic-version tag. The workflow builds and tests that exact commit before creating the release, and derives the package version from the tag:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
 Elevation is needed only to place and register the Media Foundation source DLL where Windows Frame Server can load it. The tray application itself runs unelevated. Uninstall with `scripts\uninstall.ps1`; user configuration and logs are intentionally retained.
