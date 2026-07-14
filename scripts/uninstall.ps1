@@ -37,4 +37,9 @@ if (Test-Path -LiteralPath $installDirectory) {
     Remove-Item -LiteralPath $installDirectory -Recurse -Force -ErrorAction Stop
 }
 if (Test-Path -LiteralPath $installDirectory) { throw "Install directory could not be removed: $installDirectory" }
+$deploymentRegistryPath = 'HKLM:\SOFTWARE\AutomaticScreenCamera\Deployment'
+$deployment = Get-ItemProperty -LiteralPath $deploymentRegistryPath -ErrorAction SilentlyContinue
+if ($deployment.Mode -eq 'installed') {
+    Remove-Item -LiteralPath $deploymentRegistryPath -Recurse -Force -ErrorAction Stop
+}
 Write-Host 'Automatic Screen Camera uninstalled. User configuration and logs were retained in LocalAppData.'

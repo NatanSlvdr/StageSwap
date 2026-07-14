@@ -1,6 +1,16 @@
 # Windows acceptance tests
 
-Run these on the exact Windows 11 x64, Zoom, webcam, driver, SDK, and artifact versions named in the release report, with camera privacy access enabled. Build 22000 is the API minimum, not the breadth of the reliability claim. Install the Release build using an elevated PowerShell session, then launch the app normally as the target user.
+Run these on the exact Windows 11 x64, Zoom, webcam, driver, SDK, and artifact versions named in the release report, with camera privacy access enabled. Build 22000 is the API minimum, not the breadth of the reliability claim. Test the versioned Setup and portable EXEs separately as the target user.
+
+## Distribution lifecycle
+
+1. Verify each EXE against its matching `.sha256` sidecar and confirm the sidecar identifies the expected version, revision, Release configuration, x64 architecture, and SDK.
+2. Launch the portable EXE on a clean machine. Accept UAC once, verify only `AutomaticScreenCameraSource.dll` is retained under `%ProgramFiles%\Automatic Screen Camera Portable`, and confirm the tray process is not elevated.
+3. Exit and relaunch the same portable EXE. Verify there is no UAC prompt. Move the EXE and repeat.
+4. Launch a newer portable build while the old tray app is running and verify the update refuses until the tray exits. After exit, verify atomic payload replacement and successful camera enumeration.
+5. Run `portable.exe --cleanup-portable`; verify it refuses while the tray app is active, then removes the virtual camera, COM registration, deployment marker, and protected DLL after the app exits while retaining LocalAppData.
+6. Install from Setup. Verify the Start-menu and Programs entries, unchecked Start-with-Windows default, optional unelevated post-install launch, upgrade behavior, and complete uninstall with LocalAppData retained.
+7. With portable mode active, run Setup and verify automatic migration. With installed mode active, verify the portable launcher refuses to replace it.
 
 ## Functional switching
 

@@ -19,6 +19,31 @@ $artifactSourceRevision = $null
 $artifactConfiguration = $null
 $artifactArchitecture = $null
 $artifactWindowsSdk = $null
+
+function Read-And-Validate-ChecksumSidecar([System.IO.FileInfo]$Artifact, [string]$ActualHash) {
+    $externalHashPath = $Artifact.FullName + '.sha256'
+    if (-not (Test-Path -LiteralPath $externalHashPath -PathType Leaf)) {
+        throw "External artifact checksum is missing: $externalHashPath"
+    }
+    $lines = @(Get-Content -LiteralPath $externalHashPath -Encoding UTF8)
+    $hashPattern = '^([0-9a-fA-F]{64}) \*' + [Regex]::Escape($Artifact.Name) + '$'
+    $hashLines = @($lines | Where-Object { $_ -match $hashPattern })
+    if ($hashLines.Count -ne 1) { throw 'Artifact checksum sidecar does not contain exactly one matching SHA-256 entry.' }
+    $hashMatch = [Regex]::Match($hashLines[0], $hashPattern)
+    if (-not $hashMatch.Success -or $hashMatch.Groups[1].Value -ne $ActualHash) {
+        throw 'Artifact does not match its external SHA-256 checksum.'
+    }
+    $metadata = @{}
+    foreach ($line in $lines) {
+        if ($line -match '^# (?<key>[A-Za-z][A-Za-z0-9]*)=(?<value>.*)$') {
+            if ($metadata.ContainsKey($Matches.key)) { throw "Duplicate checksum metadata key: $($Matches.key)" }
+            $metadata[$Matches.key] = $Matches.value
+        }
+    }
+    return $metadata
+}
+
+$checksumMetadata = Read-And-Validate-ChecksumSidecar $artifact $artifactHash.Hash
 if ($artifact.Extension -eq '.zip') {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [System.IO.Compression.ZipFile]::OpenRead($artifact.FullName)
@@ -37,17 +62,22 @@ if ($artifact.Extension -eq '.zip') {
         $archive.Dispose()
     }
     if (-not $metadataEntry) { throw 'Release ZIP does not contain release-metadata.json.' }
-    $externalHashPath = $artifact.FullName + '.sha256'
-    if (-not (Test-Path -LiteralPath $externalHashPath -PathType Leaf)) {
-        throw "External archive checksum is missing: $externalHashPath"
+} elseif ($artifact.Extension -eq '.exe') {
+    foreach ($requiredKey in @('applicationVersion', 'sourceRevision', 'architecture', 'configuration', 'windowsSdk')) {
+        if (-not $checksumMetadata.ContainsKey($requiredKey) -or -not $checksumMetadata[$requiredKey]) {
+            throw "Executable checksum sidecar is missing metadata key '$requiredKey'."
+        }
     }
-    $externalHashPattern = '^([0-9a-fA-F]{64}) \*' + [Regex]::Escape($artifact.Name) + '$'
-    $externalHashLines = @(Get-Content -LiteralPath $externalHashPath -Encoding UTF8 | Where-Object { $_ -match $externalHashPattern })
-    $externalHashMatch = if ($externalHashLines.Count -eq 1) { [Regex]::Match($externalHashLines[0], $externalHashPattern) } else { $null }
-    if (-not $externalHashMatch -or -not $externalHashMatch.Success -or
-        $externalHashMatch.Groups[1].Value -ne $artifactHash.Hash) {
-        throw 'Release ZIP does not match its external SHA-256 checksum.'
+    $artifactVersion = $checksumMetadata.applicationVersion
+    $artifactSourceRevision = $checksumMetadata.sourceRevision
+    $artifactConfiguration = $checksumMetadata.configuration
+    $artifactArchitecture = $checksumMetadata.architecture
+    $artifactWindowsSdk = $checksumMetadata.windowsSdk
+    if ($artifact.VersionInfo.ProductVersion -and $artifact.VersionInfo.ProductVersion -ne $artifactVersion) {
+        throw "Executable ProductVersion '$($artifact.VersionInfo.ProductVersion)' does not match sidecar version '$artifactVersion'."
     }
+} else {
+    throw 'Release environment collection supports packaged .exe and legacy .zip artifacts only.'
 }
 
 if (-not $ZoomPath) {

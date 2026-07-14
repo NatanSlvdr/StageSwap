@@ -18,6 +18,8 @@ Only the final composited BGRA frame crosses the process boundary. Raw camera an
 - `AutomaticScreenCamera.exe`: Win32 tray UI, Media Foundation input, Windows Graphics Capture, D3D11 compositor, monitoring workers, recovery, and final-frame publisher.
 - `AutomaticScreenCameraSource.dll`: COM `IMFActivate` plus live `IMFMediaSourceEx`/`IMFMediaStream2`, loaded by Windows Frame Server. It advertises RGB32 at 1920×1080p30 and 1280×720p30.
 
+The installed release places both binaries under Program Files. The portable release embeds the same source DLL into the tray EXE and extracts only that DLL to an administrator-protected Program Files directory before registration. The portable EXE itself runs from its original location and remains unelevated. A machine-wide deployment marker prevents portable and installed copies from replacing each other's COM registration.
+
 ## Threading
 
 - The UI thread owns the window, tray icon, menus, settings, and Windows lifecycle messages.

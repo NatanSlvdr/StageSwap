@@ -11,45 +11,18 @@ if (-not [Environment]::Is64BitOperatingSystem -or -not [Environment]::Is64BitPr
 }
 
 $installDirectory = Join-Path $env:ProgramFiles 'Automatic Screen Camera'
+$deploymentRegistryPath = 'HKLM:\SOFTWARE\AutomaticScreenCamera\Deployment'
+$priorDeployment = Get-ItemProperty -LiteralPath $deploymentRegistryPath -ErrorAction SilentlyContinue
+if ($priorDeployment.Mode -eq 'portable') {
+    throw 'The portable edition is active. Run its --cleanup-portable command or use the Setup EXE to migrate it automatically.'
+}
 $transactionId = [Guid]::NewGuid().ToString('N')
 $stagingDirectory = Join-Path $env:ProgramFiles "Automatic Screen Camera.installing-$transactionId"
 $backupDirectory = Join-Path $env:ProgramFiles "Automatic Screen Camera.backup-$transactionId"
-$packagedSource = Join-Path $PSScriptRoot 'AutomaticScreenCameraSource.dll'
-$packagedApplication = Join-Path $PSScriptRoot 'AutomaticScreenCamera.exe'
-$usingPackagedArtifacts = (
-    (Test-Path -LiteralPath $packagedSource -PathType Leaf) -and
-    (Test-Path -LiteralPath $packagedApplication -PathType Leaf)
-)
-if ($usingPackagedArtifacts) {
-    $sourceDll = $packagedSource
-    $application = $packagedApplication
-} else {
-    $sourceDll = Join-Path $BuildDirectory 'src\windows\media_source\Release\AutomaticScreenCameraSource.dll'
-    $application = Join-Path $BuildDirectory 'src\windows\Release\AutomaticScreenCamera.exe'
-}
+$sourceDll = Join-Path $BuildDirectory 'src\windows\media_source\Release\AutomaticScreenCameraSource.dll'
+$application = Join-Path $BuildDirectory 'src\windows\Release\AutomaticScreenCamera.exe'
 if (-not (Test-Path $sourceDll) -or -not (Test-Path $application)) {
     throw "Build outputs were not found under $BuildDirectory. Build the Release configuration first."
-}
-
-$checksumManifest = Join-Path $PSScriptRoot 'SHA256SUMS.txt'
-if ($usingPackagedArtifacts -and -not (Test-Path -LiteralPath $checksumManifest -PathType Leaf)) {
-    throw 'Packaged artifacts require SHA256SUMS.txt; refusing an unverifiable install.'
-}
-if ($usingPackagedArtifacts) {
-    $manifestLines = Get-Content -LiteralPath $checksumManifest
-    foreach ($artifact in @($application, $sourceDll)) {
-        $fileName = [IO.Path]::GetFileName($artifact)
-        $pattern = '^[0-9a-fA-F]{64} \*' + [Regex]::Escape($fileName) + '$'
-        $entries = @($manifestLines | Where-Object { $_ -match $pattern })
-        if ($entries.Count -ne 1) {
-            throw "Checksum manifest does not contain exactly one entry for $fileName."
-        }
-        $expectedHash = ($entries[0] -split ' ')[0]
-        $actualHash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
-        if ($expectedHash -ne $actualHash) {
-            throw "Package checksum verification failed for $fileName."
-        }
-    }
 }
 
 function Invoke-Registration([string]$DllPath, [switch]$Unregister, [switch]$AllowFailure) {
@@ -87,6 +60,20 @@ $installedSource = Join-Path $installDirectory 'AutomaticScreenCameraSource.dll'
 $installedPreviously = Test-Path -LiteralPath $installDirectory -PathType Container
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $priorRunValue = (Get-ItemProperty -Path $runKey -Name AutomaticScreenCamera -ErrorAction SilentlyContinue).AutomaticScreenCamera
+$deploymentMarkerChanged = $false
+
+function Restore-DeploymentMarker {
+    Remove-Item -LiteralPath $deploymentRegistryPath -Recurse -Force -ErrorAction SilentlyContinue
+    if ($priorDeployment -and $priorDeployment.Mode) {
+        New-Item -Path $deploymentRegistryPath -Force | Out-Null
+        foreach ($name in @('Mode', 'Version', 'SourcePath')) {
+            $value = $priorDeployment.$name
+            if ($null -ne $value) {
+                New-ItemProperty -LiteralPath $deploymentRegistryPath -Name $name -Value $value -PropertyType String -Force | Out-Null
+            }
+        }
+    }
+}
 
 try {
     New-Item -ItemType Directory -Path $stagingDirectory | Out-Null
@@ -170,6 +157,14 @@ try {
     } else {
         Remove-ItemProperty -Path $runKey -Name AutomaticScreenCamera -ErrorAction SilentlyContinue
     }
+
+    $deploymentMarkerChanged = $true
+    New-Item -Path $deploymentRegistryPath -Force | Out-Null
+    New-ItemProperty -LiteralPath $deploymentRegistryPath -Name Mode -Value installed -PropertyType String -Force | Out-Null
+    $installedVersion = (Get-Item -LiteralPath $installedApplication).VersionInfo.ProductVersion
+    if (-not $installedVersion) { $installedVersion = 'development' }
+    New-ItemProperty -LiteralPath $deploymentRegistryPath -Name Version -Value $installedVersion -PropertyType String -Force | Out-Null
+    New-ItemProperty -LiteralPath $deploymentRegistryPath -Name SourcePath -Value $installedSource -PropertyType String -Force | Out-Null
 } catch {
     $installError = $_
     if (Test-Path -LiteralPath $installedSource -PathType Leaf) {
@@ -188,6 +183,7 @@ try {
         Remove-ItemProperty -Path $runKey -Name AutomaticScreenCamera -ErrorAction SilentlyContinue
     }
     if (-not $installedPreviously) { Remove-Item -LiteralPath $startMenu -Force -ErrorAction SilentlyContinue }
+    if ($deploymentMarkerChanged) { Restore-DeploymentMarker }
     if ($installedPreviously -and $previousVirtualCameraRemoved -and
         (Test-Path -LiteralPath $installedApplication -PathType Leaf)) {
         try { Start-Process -FilePath $installedApplication | Out-Null }

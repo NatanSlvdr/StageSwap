@@ -1,0 +1,18 @@
+if(NOT DEFINED INPUT OR NOT EXISTS "${INPUT}")
+    message(FATAL_ERROR "Portable payload input was not found: ${INPUT}")
+endif()
+if(NOT DEFINED RESOURCE_OUTPUT OR NOT DEFINED HEADER_OUTPUT OR
+   NOT DEFINED CONFIGURATION OR NOT DEFINED WINDOWS_SDK)
+    message(FATAL_ERROR "RESOURCE_OUTPUT, HEADER_OUTPUT, CONFIGURATION, and WINDOWS_SDK are required")
+endif()
+
+file(SHA256 "${INPUT}" payload_sha256)
+file(TO_CMAKE_PATH "${INPUT}" resource_input)
+file(WRITE "${RESOURCE_OUTPUT}" "201 RCDATA \"${resource_input}\"\n")
+file(WRITE "${HEADER_OUTPUT}" "#pragma once\n")
+file(APPEND "${HEADER_OUTPUT}" "inline constexpr char ASC_PORTABLE_SOURCE_SHA256[] = \"${payload_sha256}\";\n")
+file(APPEND "${HEADER_OUTPUT}" "inline constexpr wchar_t ASC_RELEASE_VERSION[] = L\"${VERSION}\";\n")
+file(APPEND "${HEADER_OUTPUT}" "inline constexpr wchar_t ASC_SOURCE_REVISION[] = L\"${REVISION}\";\n")
+file(APPEND "${HEADER_OUTPUT}" "inline constexpr wchar_t ASC_RELEASE_ARCHITECTURE[] = L\"x64\";\n")
+file(APPEND "${HEADER_OUTPUT}" "inline constexpr wchar_t ASC_RELEASE_CONFIGURATION[] = L\"${CONFIGURATION}\";\n")
+file(APPEND "${HEADER_OUTPUT}" "inline constexpr wchar_t ASC_RELEASE_WINDOWS_SDK[] = L\"${WINDOWS_SDK}\";\n")

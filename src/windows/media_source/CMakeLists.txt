@@ -5,6 +5,7 @@ add_library(AutomaticScreenCameraSource SHARED
     media_source.cpp
     media_stream.cpp
     ../shared_frame.cpp
+    ${ASC_MEDIA_SOURCE_VERSION_RESOURCE}
 )
 target_include_directories(AutomaticScreenCameraSource PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

@@ -2,6 +2,7 @@
 #include "app.hpp"
 #include "settings_window.hpp"
 #include "preview_window.hpp"
+#include "deployment.hpp"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -143,6 +144,10 @@ LRESULT TrayWindow::handle_message(const UINT message, const WPARAM wparam, cons
             MessageBoxW(window_, L"Exit Automatic Screen Camera? The virtual camera will stop.", L"Confirm exit", MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
         DestroyWindow(window_); return 0;
     case WM_DESTROY: WTSUnRegisterSessionNotification(window_); PostQuitMessage(0); return 0;
+    case deployment::exit_for_deployment_message:
+        exiting_ = true;
+        app_.exit();
+        return 0;
     default: return DefWindowProcW(window_, message, wparam, lparam);
     }
 }

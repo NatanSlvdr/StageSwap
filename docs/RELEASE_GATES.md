@@ -17,7 +17,7 @@ Store hosted JUnit files, interactive probe JSON, screenshots, and failure class
 
 ## Hosted gate
 
-Run five clean `Build, test, and package` workflows from fresh checkouts of the same commit. Every Debug, Release, and portable sanitizer job must pass. Retain the unsigned release ZIP, its external SHA-256 file, and all JUnit artifacts from each run.
+Run five clean `Build, test, and package` workflows from fresh checkouts of the same commit. Every Debug, Release, and portable sanitizer job must pass. Retain both unsigned release EXEs, their external SHA-256 metadata files, and all JUnit artifacts from each run.
 
 ## Persistent interactive Windows 11 gate
 
@@ -25,7 +25,7 @@ Use a persistent Windows 11 x64 VM with an interactive desktop, administrator ac
 
 The release candidate qualifies only after all of these pass:
 
-- 20 clean install/uninstall or upgrade cycles, with correct COM registration and no stale virtual-camera entries.
+- 20 clean deployment cycles split across portable launch/cleanup, Setup install/uninstall, upgrades, and portable-to-Setup migration, with correct COM registration and no stale virtual-camera entries.
 - 100 application cold-start/exit cycles and 100 virtual-camera open/close cycles.
 - 300 automatic camera/screen switches, with no black or stale output longer than two seconds.
 - 50 webcam disconnect/reconnect cycles, each recovering within ten seconds.
@@ -50,12 +50,12 @@ asc_mf_output_probe.exe --duration-seconds 86400 --warmup-seconds 60 `
 
 # Capture the exact release environment and artifact identity.
 .\scripts\collect-release-environment.ps1 `
-  -ArtifactPath .\AutomaticScreenCamera-0.1.0-windows-x64-unsigned.zip `
+  -ArtifactPath .\AutomaticScreenCamera-0.1.0-windows-x64-setup.exe `
   -OutputPath .\release-environment.json -ZoomChannel stable `
   -VmImageId 'win11-release-vm-2026-07' -UsbPassthroughId 'usb-port-3-uvc-fixture'
 ```
 
-Copy `docs/release-evidence.example.json` into the evidence directory and update only counters backed by retained logs/screenshots. Give each soak a distinct run ID, round-trip UTC start/completion timestamps (for example `2026-07-13T00:00:00.0000000+00:00`), probe path, and the tested archive's SHA-256. Reference the environment report, then evaluate the full claim:
+Copy `docs/release-evidence.example.json` into the evidence directory and update only counters backed by retained logs/screenshots. Give each soak a distinct run ID, round-trip UTC start/completion timestamps (for example `2026-07-13T00:00:00.0000000+00:00`), probe path, and the tested executable's SHA-256. Reference the environment report, then evaluate the full claim:
 
 ```powershell
 .\scripts\evaluate-release-gates.ps1 -EvidenceManifest .\release-evidence.json `
