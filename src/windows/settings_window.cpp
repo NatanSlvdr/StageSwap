@@ -495,8 +495,9 @@ void SettingsWindow::layout_controls() {
     GetClientRect(window_, &client);
     const int pad = dip(window_, 16);
     const int footer_height = dip(window_, 58);
-    const int tab_width = std::max(1, client.right - pad * 2);
-    const int tab_height = std::max(dip(window_, 420), client.bottom - pad - footer_height);
+    const int tab_width = std::max(1, static_cast<int>(client.right) - pad * 2);
+    const int tab_height = std::max(dip(window_, 420),
+                                    static_cast<int>(client.bottom) - pad - footer_height);
     MoveWindow(tabs_, pad, pad, tab_width, tab_height, TRUE);
 
     const int page_x = pad + dip(window_, 12);

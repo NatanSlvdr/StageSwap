@@ -384,7 +384,8 @@ void TrayWindow::layout_controls() {
 
     if (details_expanded_) {
         const int details_y = footer_y + dip(window_, 44);
-        const int available_height = std::max(dip(window_, 100), client.bottom - details_y - pad);
+        const int available_height = std::max(
+            dip(window_, 100), static_cast<int>(client.bottom) - details_y - pad);
         const int half = (content_width - gap) / 2;
         MoveWindow(technical_text_, pad, details_y, half, available_height, TRUE);
         MoveWindow(full_activity_list_, pad + half + gap, details_y, content_width - half - gap, available_height, TRUE);
@@ -401,11 +402,13 @@ void TrayWindow::set_details_expanded(const bool expanded, const bool resize_win
         RECT bounds{};
         GetWindowRect(window_, &bounds);
         const int delta = dip(window_, 250) * (expanded ? 1 : -1);
-        int height = std::max(dip(window_, 680), bounds.bottom - bounds.top + delta);
+        int height = std::max(dip(window_, 680),
+                              static_cast<int>(bounds.bottom - bounds.top) + delta);
         if (expanded) {
             MONITORINFO monitor{sizeof(monitor)};
             if (GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor))
-                height = std::min(height, monitor.rcWork.bottom - bounds.top);
+                height = std::min(height,
+                                  static_cast<int>(monitor.rcWork.bottom - bounds.top));
         }
         SetWindowPos(window_, nullptr, 0, 0, bounds.right - bounds.left, height,
                      SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -445,7 +448,9 @@ void TrayWindow::refresh() {
     const auto banners = dashboard_banner_visibility(presentation_);
     const bool show_warning = banners.show_warning;
     const bool show_override = banners.show_override;
-    const bool banner_changed = IsWindowVisible(warning_banner_) != show_warning || IsWindowVisible(override_banner_) != show_override;
+    const bool warning_visible = IsWindowVisible(warning_banner_) != FALSE;
+    const bool override_visible = IsWindowVisible(override_banner_) != FALSE;
+    const bool banner_changed = warning_visible != show_warning || override_visible != show_override;
     ShowWindow(warning_banner_, show_warning ? SW_SHOW : SW_HIDE);
     ShowWindow(override_banner_, show_override ? SW_SHOW : SW_HIDE);
     ShowWindow(return_automatic_button_, show_override ? SW_SHOW : SW_HIDE);

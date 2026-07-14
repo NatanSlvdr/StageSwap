@@ -92,8 +92,8 @@ void PreviewWindow::layout_controls() {
     const int pad = dip(window_, 14);
     const int gap = dip(window_, 16);
     const int label_height = dip(window_, 24);
-    const int cell_width = std::max(1, (client.right - pad * 2 - gap) / 2);
-    const int cell_height = std::max(1, (client.bottom - pad * 2 - gap) / 2);
+    const int cell_width = std::max(1, (static_cast<int>(client.right) - pad * 2 - gap) / 2);
+    const int cell_height = std::max(1, (static_cast<int>(client.bottom) - pad * 2 - gap) / 2);
     for (std::size_t index = 0; index < labels_.size(); ++index) {
         const int column = static_cast<int>(index % 2);
         const int row = static_cast<int>(index / 2);
