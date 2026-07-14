@@ -73,8 +73,9 @@ if ($artifact.Extension -eq '.zip') {
     $artifactConfiguration = $checksumMetadata.configuration
     $artifactArchitecture = $checksumMetadata.architecture
     $artifactWindowsSdk = $checksumMetadata.windowsSdk
-    if ($artifact.VersionInfo.ProductVersion -and $artifact.VersionInfo.ProductVersion -ne $artifactVersion) {
-        throw "Executable ProductVersion '$($artifact.VersionInfo.ProductVersion)' does not match sidecar version '$artifactVersion'."
+    $productVersion = ([string]$artifact.VersionInfo.ProductVersion).Trim()
+    if ($productVersion -and $productVersion -ne $artifactVersion) {
+        throw "Executable ProductVersion '$productVersion' does not match sidecar version '$artifactVersion'."
     }
 } else {
     throw 'Release environment collection supports packaged .exe and legacy .zip artifacts only.'

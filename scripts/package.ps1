@@ -26,6 +26,12 @@ function Require-File([string]$Path) {
     return (Resolve-Path -LiteralPath $Path).Path
 }
 
+function Get-ProductVersion([string]$Path) {
+    $productVersion = (Get-Item -LiteralPath $Path).VersionInfo.ProductVersion
+    if (-not $productVersion) { throw "ProductVersion is missing from '$Path'." }
+    return $productVersion.Trim()
+}
+
 function Resolve-Iscc([string]$RequestedPath) {
     if ($RequestedPath) { return (Require-File $RequestedPath) }
     $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
@@ -193,12 +199,12 @@ try {
 }
 $null = Require-File $setupOutput
 
-$portableVersion = (Get-Item -LiteralPath $portableOutput).VersionInfo.ProductVersion
-$setupVersion = (Get-Item -LiteralPath $setupOutput).VersionInfo.ProductVersion
+$portableVersion = Get-ProductVersion $portableOutput
+$setupVersion = Get-ProductVersion $setupOutput
 if ($portableVersion -ne $Version) { throw "Portable ProductVersion '$portableVersion' does not match '$Version'. Reconfigure CMake with ASC_PACKAGE_VERSION." }
 if ($setupVersion -ne $Version) { throw "Setup ProductVersion '$setupVersion' does not match '$Version'." }
 foreach ($binary in @($applicationSource, $mediaSource)) {
-    $binaryVersion = (Get-Item -LiteralPath $binary).VersionInfo.ProductVersion
+    $binaryVersion = Get-ProductVersion $binary
     if ($binaryVersion -ne $Version) { throw "ProductVersion '$binaryVersion' in '$binary' does not match '$Version'." }
 }
 foreach ($binary in @($portableOutput, $applicationSource, $mediaSource)) {
