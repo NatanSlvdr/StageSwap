@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "status_presentation.hpp"
 #include "tray_window.hpp"
 
 #include <mfapi.h>
@@ -607,8 +608,10 @@ std::optional<PreviewImage> App::preview(const PreviewKind kind, const Size targ
     if (kind == PreviewKind::reference) {
         std::scoped_lock lock(reference_mutex_);
         if (!reference_thumbnail_.valid()) return std::nullopt;
-        const auto gray = reference_thumbnail_.size == target ? reference_thumbnail_ : resize_bilinear(reference_thumbnail_, target);
-        PreviewImage result{target, std::vector<std::uint8_t>(static_cast<std::size_t>(target.width) * target.height * 4)};
+        const Size preview_size = fit_preview_size(reference_thumbnail_.size, target);
+        const auto gray = reference_thumbnail_.size == preview_size
+            ? reference_thumbnail_ : resize_bilinear(reference_thumbnail_, preview_size);
+        PreviewImage result{preview_size, std::vector<std::uint8_t>(static_cast<std::size_t>(preview_size.width) * preview_size.height * 4)};
         for (std::size_t i = 0; i < gray.pixels.size(); ++i) {
             result.bgra[i * 4] = result.bgra[i * 4 + 1] = result.bgra[i * 4 + 2] = gray.pixels[i];
             result.bgra[i * 4 + 3] = 255;
@@ -621,6 +624,7 @@ std::optional<PreviewImage> App::preview(const PreviewKind kind, const Size targ
     else if (kind == PreviewKind::screen) frame = screen_capture_.latest_frame();
     else frame = final_output_frame_;
     if (!frame.valid()) return std::nullopt;
+    const Size preview_size = fit_preview_size(frame.size, target);
     D3D11_TEXTURE2D_DESC desc{}; frame.texture->GetDesc(&desc);
     desc.BindFlags = 0; desc.MiscFlags = 0; desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> staging;
@@ -628,12 +632,12 @@ std::optional<PreviewImage> App::preview(const PreviewKind kind, const Size targ
     d3d_.context()->CopyResource(staging.Get(), frame.texture.Get());
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(d3d_.context()->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return std::nullopt;
-    PreviewImage result{target, std::vector<std::uint8_t>(static_cast<std::size_t>(target.width) * target.height * 4)};
-    for (std::uint32_t y = 0; y < target.height; ++y) {
-        const auto source_y = std::min(frame.size.height - 1, static_cast<std::uint32_t>((static_cast<std::uint64_t>(y) * frame.size.height) / target.height));
-        for (std::uint32_t x = 0; x < target.width; ++x) {
-            const auto source_x = std::min(frame.size.width - 1, static_cast<std::uint32_t>((static_cast<std::uint64_t>(x) * frame.size.width) / target.width));
-            auto* destination = result.bgra.data() + (static_cast<std::size_t>(y) * target.width + x) * 4;
+    PreviewImage result{preview_size, std::vector<std::uint8_t>(static_cast<std::size_t>(preview_size.width) * preview_size.height * 4)};
+    for (std::uint32_t y = 0; y < preview_size.height; ++y) {
+        const auto source_y = std::min(frame.size.height - 1, static_cast<std::uint32_t>((static_cast<std::uint64_t>(y) * frame.size.height) / preview_size.height));
+        for (std::uint32_t x = 0; x < preview_size.width; ++x) {
+            const auto source_x = std::min(frame.size.width - 1, static_cast<std::uint32_t>((static_cast<std::uint64_t>(x) * frame.size.width) / preview_size.width));
+            auto* destination = result.bgra.data() + (static_cast<std::size_t>(y) * preview_size.width + x) * 4;
             const auto* source = static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(source_y) * mapped.RowPitch + source_x * 4;
             if (frame.format == DXGI_FORMAT_R8G8B8A8_UNORM) {
                 destination[0] = source[2]; destination[1] = source[1]; destination[2] = source[0]; destination[3] = source[3];

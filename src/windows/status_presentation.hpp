@@ -34,6 +34,20 @@ struct DashboardPresentation {
     std::vector<std::string> full_activity;
 };
 
+struct DashboardBannerVisibility {
+    bool show_warning{false};
+    bool show_override{false};
+    int row_count{0};
+};
+
+inline constexpr Size preview_resolution_cap{640, 360};
+
+[[nodiscard]] DashboardBannerVisibility dashboard_banner_visibility(
+    const DashboardPresentation& presentation) noexcept;
+[[nodiscard]] Size fit_preview_size(Size source, Size bounds,
+                                    Size cap = preview_resolution_cap) noexcept;
+[[nodiscard]] std::string unavailable_video_source_status(bool automatic_reconnect);
+
 [[nodiscard]] DashboardPresentation build_dashboard_presentation(
     const AppStatus& status,
     const AppConfig& config,

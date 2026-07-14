@@ -134,6 +134,36 @@ const MonitorObservation* tracked_observation(const AppStatus& status) {
 
 } // namespace
 
+DashboardBannerVisibility dashboard_banner_visibility(
+    const DashboardPresentation& presentation) noexcept {
+    const bool show_warning = presentation.warning_active;
+    const bool show_override = presentation.manual_override;
+    return {show_warning, show_override,
+            static_cast<int>(show_warning) + static_cast<int>(show_override)};
+}
+
+Size fit_preview_size(const Size source, const Size bounds, const Size cap) noexcept {
+    if (source.width == 0 || source.height == 0 || bounds.width == 0 || bounds.height == 0 ||
+        cap.width == 0 || cap.height == 0) return {};
+
+    const Size available{std::min(bounds.width, cap.width), std::min(bounds.height, cap.height)};
+    if (static_cast<std::uint64_t>(available.width) * source.height <=
+        static_cast<std::uint64_t>(available.height) * source.width) {
+        return {available.width,
+                std::max(1U, static_cast<std::uint32_t>(static_cast<std::uint64_t>(available.width) *
+                                                       source.height / source.width))};
+    }
+    return {std::max(1U, static_cast<std::uint32_t>(static_cast<std::uint64_t>(available.height) *
+                                                   source.width / source.height)),
+            available.height};
+}
+
+std::string unavailable_video_source_status(const bool automatic_reconnect) {
+    return automatic_reconnect
+        ? "Saved source unavailable — reconnect will be retried automatically"
+        : "Saved source unavailable — automatic reconnect is disabled";
+}
+
 DashboardPresentation build_dashboard_presentation(const AppStatus& status, const AppConfig& config,
                                                    const VideoSourcePresentation& video,
                                                    const std::vector<LogEvent>& events,

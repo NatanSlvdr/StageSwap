@@ -12,9 +12,18 @@ PreviewWindow::PreviewWindow(const HINSTANCE instance, App& app) : instance_(ins
     icon_large_ = create_app_icon(32); icon_small_ = create_app_icon(16);
     wc.hIcon = icon_large_; wc.hIconSm = icon_small_;
     RegisterClassExW(&wc);
-    window_ = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"Automatic Screen Camera — Previews",
-                              WS_OVERLAPPEDWINDOW,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 620, 460, nullptr, nullptr, instance_, this);
+    constexpr DWORD window_style = WS_OVERLAPPEDWINDOW;
+    constexpr DWORD window_ex_style = WS_EX_TOOLWINDOW;
+    const UINT system_dpi = GetDpiForSystem();
+    const UINT dpi = system_dpi == 0 ? 96U : system_dpi;
+    RECT initial_bounds{0, 0, MulDiv(620, static_cast<int>(dpi), 96),
+                        MulDiv(460, static_cast<int>(dpi), 96)};
+    if (!AdjustWindowRectExForDpi(&initial_bounds, window_style, FALSE, window_ex_style, dpi))
+        AdjustWindowRectEx(&initial_bounds, window_style, FALSE, window_ex_style);
+    window_ = CreateWindowExW(window_ex_style, wc.lpszClassName, L"Automatic Screen Camera — Previews",
+                              window_style, CW_USEDEFAULT, CW_USEDEFAULT,
+                              initial_bounds.right - initial_bounds.left, initial_bounds.bottom - initial_bounds.top,
+                              nullptr, nullptr, instance_, this);
     if (!window_) throw HResultError(HRESULT_FROM_WIN32(GetLastError()), "Create preview window");
 }
 

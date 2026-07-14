@@ -82,6 +82,18 @@ void override_and_transition_test() {
           contains(view.output_tooltip, "180 ms remaining"), "transition telemetry remains available");
 }
 
+void warning_during_override_test() {
+    const auto now = asc::Clock::now();
+    auto status = ready_status(now);
+    status.mode = asc::OutputMode::force_screen;
+    status.warning = "screen capture is recovering";
+    const auto view = asc::win::build_dashboard_presentation(
+        status, asc::AppConfig{}, {"camera-id", "Camera"}, {}, now);
+    const auto banners = asc::win::dashboard_banner_visibility(view);
+    check(banners.show_warning && banners.show_override && banners.row_count == 2,
+          "warning and manual override use two simultaneous dashboard rows");
+}
+
 void failure_and_placeholder_test() {
     const auto now = asc::Clock::now();
     auto status = ready_status(now);
@@ -117,13 +129,30 @@ void unavailable_source_and_activity_limit_test() {
           "expanded activity retains every event and structured context");
 }
 
+void preview_size_and_reconnect_text_test() {
+    check(asc::win::fit_preview_size({1920, 1080}, {400, 400}) == asc::Size{400, 225},
+          "preview fitting preserves a landscape aspect ratio");
+    check(asc::win::fit_preview_size({1200, 1800}, {400, 300}) == asc::Size{200, 300},
+          "preview fitting preserves a portrait aspect ratio");
+    check(asc::win::fit_preview_size({3840, 2160}, {4000, 3000}) == asc::Size{640, 360},
+          "preview fitting caps large render targets");
+    check(asc::win::fit_preview_size({1920, 1080}, {0, 300}) == asc::Size{},
+          "preview fitting rejects empty bounds");
+    check(contains(asc::win::unavailable_video_source_status(true), "retried automatically"),
+          "enabled reconnect status describes automatic retries");
+    check(contains(asc::win::unavailable_video_source_status(false), "reconnect is disabled"),
+          "disabled reconnect status does not promise retries");
+}
+
 } // namespace
 
 int main() {
     automatic_presentation_test();
     override_and_transition_test();
+    warning_during_override_test();
     failure_and_placeholder_test();
     unavailable_source_and_activity_limit_test();
+    preview_size_and_reconnect_text_test();
     if (failures == 0) std::cout << "All UI presentation tests passed\n";
     return failures == 0 ? 0 : 1;
 }

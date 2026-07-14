@@ -45,7 +45,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path out/test-results | Out-Null
           ctest --preset windows-x64-${{ matrix.configuration }} --output-junit "${{ github.workspace }}/out/test-results/windows-x64-${{ matrix.configuration }}.xml"
-      - name: Package unsigned release
+      # package.ps1 maps the EXE as resource data and hashes its RCDATA without
+      # executing the app or resolving Windows 11-only imports on Server 2022.
+      - name: Package unsigned release (static payload verification)
         if: matrix.configuration == 'release'
         shell: pwsh
         run: ./scripts/package.ps1 -Version $env:RELEASE_VERSION -SourceRevision "${{ github.sha }}"

@@ -82,8 +82,18 @@ TrayWindow::TrayWindow(const HINSTANCE instance, App& app) : instance_(instance)
     window_class.hIcon = app_icon_large_;
     window_class.hIconSm = app_icon_small_;
     RegisterClassExW(&window_class);
-    window_ = CreateWindowExW(0, window_class.lpszClassName, L"Automatic Screen Camera", WS_OVERLAPPEDWINDOW,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 790, 720, nullptr, nullptr, instance_, this);
+    constexpr DWORD window_style = WS_OVERLAPPEDWINDOW;
+    constexpr DWORD window_ex_style = WS_EX_CONTROLPARENT;
+    const UINT system_dpi = GetDpiForSystem();
+    const UINT dpi = system_dpi == 0 ? 96U : system_dpi;
+    RECT initial_bounds{0, 0, MulDiv(790, static_cast<int>(dpi), 96),
+                        MulDiv(720, static_cast<int>(dpi), 96)};
+    if (!AdjustWindowRectExForDpi(&initial_bounds, window_style, FALSE, window_ex_style, dpi))
+        AdjustWindowRectEx(&initial_bounds, window_style, FALSE, window_ex_style);
+    window_ = CreateWindowExW(window_ex_style, window_class.lpszClassName, L"Automatic Screen Camera", window_style,
+                              CW_USEDEFAULT, CW_USEDEFAULT,
+                              initial_bounds.right - initial_bounds.left, initial_bounds.bottom - initial_bounds.top,
+                              nullptr, nullptr, instance_, this);
     if (!window_) throw HResultError(HRESULT_FROM_WIN32(GetLastError()), "Create main window");
     tray_.cbSize = sizeof(tray_); tray_.hWnd = window_; tray_.uID = 1;
     tray_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP; tray_.uCallbackMessage = tray_message;
@@ -139,8 +149,15 @@ LRESULT TrayWindow::handle_message(const UINT message, const WPARAM wparam, cons
         return 0;
     case WM_GETMINMAXINFO: {
         auto* bounds = reinterpret_cast<MINMAXINFO*>(lparam);
-        bounds->ptMinTrackSize.x = dip(window_, 720);
-        bounds->ptMinTrackSize.y = dip(window_, 680);
+        const UINT dpi = window_dpi(window_);
+        const int minimum_client_height = details_expanded_ ? 804 : 692;
+        RECT minimum{0, 0, dip(window_, 720), dip(window_, minimum_client_height)};
+        const auto style = static_cast<DWORD>(GetWindowLongPtrW(window_, GWL_STYLE));
+        const auto ex_style = static_cast<DWORD>(GetWindowLongPtrW(window_, GWL_EXSTYLE));
+        if (!AdjustWindowRectExForDpi(&minimum, style, FALSE, ex_style, dpi))
+            AdjustWindowRectEx(&minimum, style, FALSE, ex_style);
+        bounds->ptMinTrackSize.x = minimum.right - minimum.left;
+        bounds->ptMinTrackSize.y = minimum.bottom - minimum.top;
         return 0;
     }
     case WM_CTLCOLORSTATIC: {
@@ -225,8 +242,10 @@ void TrayWindow::create_controls() {
         return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | style,
                                0, 0, 0, 0, window_, nullptr, instance_, nullptr);
     };
-    const auto button = [this](const wchar_t* text, const UINT id, const DWORD extra = 0U) {
-        return CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | extra,
+    const auto button = [this](const wchar_t* text, const UINT id, const DWORD extra = 0U,
+                               const bool tab_stop = true) {
+        const DWORD style = WS_CHILD | WS_VISIBLE | extra | (tab_stop ? WS_TABSTOP : 0U);
+        return CreateWindowExW(0, L"BUTTON", text, style,
                                0, 0, 0, 0, window_, control_id(id), instance_, nullptr);
     };
 
@@ -246,13 +265,13 @@ void TrayWindow::create_controls() {
     output_info_ = button(L"ⓘ", output_info, BS_NOTIFY);
 
     mode_heading_ = label(L"OUTPUT MODE");
-    mode_buttons_[0] = button(L"Automatic", automatic, BS_AUTORADIOBUTTON);
-    mode_buttons_[1] = button(L"Webcam / video", force_camera, BS_AUTORADIOBUTTON);
-    mode_buttons_[2] = button(L"Screen", force_screen, BS_AUTORADIOBUTTON);
+    mode_buttons_[0] = button(L"Automatic", automatic, BS_AUTORADIOBUTTON | WS_GROUP);
+    mode_buttons_[1] = button(L"Webcam / video", force_camera, BS_AUTORADIOBUTTON, false);
+    mode_buttons_[2] = button(L"Screen", force_screen, BS_AUTORADIOBUTTON, false);
 
     reference_caption_ = label(L"Reference");
     reference_value_ = label(L"Unknown");
-    reference_info_ = button(L"ⓘ", reference_info, BS_NOTIFY);
+    reference_info_ = button(L"ⓘ", reference_info, BS_NOTIFY | WS_GROUP);
     display_caption_ = label(L"Tracked display");
     display_value_ = label(L"Not identified", SS_LEFT | SS_ENDELLIPSIS);
     display_info_ = button(L"ⓘ", display_info, BS_NOTIFY);
@@ -302,7 +321,7 @@ void TrayWindow::layout_controls() {
     const int gap = dip(window_, 16);
     const int width = client.right - client.left;
     const int content_width = std::max(1, width - pad * 2);
-    const bool banner_visible = IsWindowVisible(warning_banner_) || IsWindowVisible(override_banner_);
+    const auto banners = dashboard_banner_visibility(presentation_);
     const int header_y = dip(window_, 14);
     const int header_height = dip(window_, 34);
     MoveWindow(title_label_, pad, header_y, content_width - dip(window_, 260), header_height, TRUE);
@@ -311,9 +330,11 @@ void TrayWindow::layout_controls() {
 
     const int banner_y = dip(window_, 54);
     MoveWindow(warning_banner_, pad, banner_y, content_width, dip(window_, 30), TRUE);
-    MoveWindow(override_banner_, pad, banner_y, content_width - dip(window_, 180), dip(window_, 30), TRUE);
-    MoveWindow(return_automatic_button_, width - pad - dip(window_, 172), banner_y - dip(window_, 3), dip(window_, 172), dip(window_, 30), TRUE);
-    const int top = banner_visible ? dip(window_, 96) : dip(window_, 64);
+    const int override_y = banner_y + (banners.show_warning ? dip(window_, 36) : 0);
+    MoveWindow(override_banner_, pad, override_y, content_width - dip(window_, 180), dip(window_, 30), TRUE);
+    MoveWindow(return_automatic_button_, width - pad - dip(window_, 172), override_y - dip(window_, 3), dip(window_, 172), dip(window_, 30), TRUE);
+    const int top = banners.row_count == 0 ? dip(window_, 64)
+                                           : banner_y + dip(window_, 42 + (banners.row_count - 1) * 36);
 
     MoveWindow(output_heading_, pad, top, content_width, dip(window_, 22), TRUE);
     const int preview_y = top + dip(window_, 28);
@@ -392,6 +413,27 @@ void TrayWindow::set_details_expanded(const bool expanded, const bool resize_win
     layout_controls();
 }
 
+void TrayWindow::update_technical_details() {
+    if (!technical_text_ || displayed_technical_details_ == presentation_.technical_details) return;
+    if (GetFocus() == technical_text_ || GetCapture() == technical_text_) return;
+
+    const auto text = wide(presentation_.technical_details);
+    DWORD selection_start = 0;
+    DWORD selection_end = 0;
+    SendMessageW(technical_text_, EM_GETSEL, reinterpret_cast<WPARAM>(&selection_start),
+                 reinterpret_cast<LPARAM>(&selection_end));
+    const int first_visible_line = static_cast<int>(SendMessageW(technical_text_, EM_GETFIRSTVISIBLELINE, 0, 0));
+    SendMessageW(technical_text_, WM_SETREDRAW, FALSE, 0);
+    SetWindowTextW(technical_text_, text.c_str());
+    displayed_technical_details_ = presentation_.technical_details;
+    SendMessageW(technical_text_, EM_SETSEL, selection_start, selection_end);
+    const int current_first_line = static_cast<int>(SendMessageW(technical_text_, EM_GETFIRSTVISIBLELINE, 0, 0));
+    if (current_first_line != first_visible_line)
+        SendMessageW(technical_text_, EM_LINESCROLL, 0, first_visible_line - current_first_line);
+    SendMessageW(technical_text_, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(technical_text_, nullptr, FALSE);
+}
+
 void TrayWindow::refresh() {
     const auto state = app_.status();
     const auto config = app_.config();
@@ -400,8 +442,9 @@ void TrayWindow::refresh() {
                                                   {selected_video.identifier, selected_video.display_name},
                                                   app_.recent_events());
 
-    const bool show_warning = presentation_.warning_active;
-    const bool show_override = presentation_.manual_override && !show_warning;
+    const auto banners = dashboard_banner_visibility(presentation_);
+    const bool show_warning = banners.show_warning;
+    const bool show_override = banners.show_override;
     const bool banner_changed = IsWindowVisible(warning_banner_) != show_warning || IsWindowVisible(override_banner_) != show_override;
     ShowWindow(warning_banner_, show_warning ? SW_SHOW : SW_HIDE);
     ShowWindow(override_banner_, show_override ? SW_SHOW : SW_HIDE);
@@ -417,7 +460,7 @@ void TrayWindow::refresh() {
     SetWindowTextW(reference_value_, wide(presentation_.reference_label).c_str());
     SetWindowTextW(display_value_, wide(presentation_.display_label).c_str());
     SetWindowTextW(health_value_, wide(presentation_.health_label).c_str());
-    SetWindowTextW(technical_text_, wide(presentation_.technical_details).c_str());
+    update_technical_details();
     SetWindowTextW(start_stop_button_, app_.automation_running() ? L"Stop" : L"Start");
     SetWindowLongPtrW(start_stop_button_, GWLP_ID, app_.automation_running() ? stop : start);
     CheckRadioButton(window_, automatic, force_screen, state.mode == OutputMode::automatic ? automatic : state.mode == OutputMode::force_camera ? force_camera : force_screen);
@@ -631,7 +674,16 @@ void TrayWindow::dispatch_command(const UINT command) {
     refresh();
 }
 
-int TrayWindow::message_loop() { MSG message{}; while (GetMessageW(&message, nullptr, 0, 0) > 0) { TranslateMessage(&message); DispatchMessageW(&message); } return static_cast<int>(message.wParam); }
+int TrayWindow::message_loop() {
+    MSG message{};
+    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(window_, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    return static_cast<int>(message.wParam);
+}
 void TrayWindow::show() {
     ShowWindow(window_, SW_SHOW);
     SetForegroundWindow(window_);

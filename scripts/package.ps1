@@ -55,6 +55,97 @@ function Write-ArtifactChecksum([string]$ArtifactPath) {
     [IO.File]::WriteAllText("$($artifact.FullName).sha256", (($lines -join "`n") + "`n"), $utf8NoBom)
 }
 
+function Get-PeResourceSha256(
+    [string]$Path,
+    [UInt16]$TypeId,
+    [UInt16]$NameId
+) {
+    if (-not ('AutomaticScreenCamera.PeResourceVerifier' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+
+namespace AutomaticScreenCamera
+{
+    public static class PeResourceVerifier
+    {
+        private const uint LoadLibraryAsDataFileExclusive = 0x00000040;
+        private const uint LoadLibraryAsImageResource = 0x00000020;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr LoadLibraryEx(string fileName, IntPtr file,
+                                                   uint flags);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr FindResource(IntPtr module, IntPtr name,
+                                                  IntPtr type);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr LoadResource(IntPtr module, IntPtr resource);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint SizeofResource(IntPtr module, IntPtr resource);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LockResource(IntPtr resourceData);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool FreeLibrary(IntPtr module);
+
+        private static Win32Exception LastError(string operation)
+        {
+            return new Win32Exception(Marshal.GetLastWin32Error(), operation);
+        }
+
+        public static string Sha256(string path, ushort typeId, ushort nameId)
+        {
+            IntPtr module = LoadLibraryEx(path, IntPtr.Zero,
+                LoadLibraryAsDataFileExclusive | LoadLibraryAsImageResource);
+            if (module == IntPtr.Zero)
+                throw LastError("Map portable executable as a non-executable resource image");
+            try
+            {
+                IntPtr resource = FindResource(module, new IntPtr(nameId),
+                                               new IntPtr(typeId));
+                if (resource == IntPtr.Zero)
+                    throw LastError("Locate embedded portable payload resource");
+                uint rawSize = SizeofResource(module, resource);
+                if (rawSize == 0 || rawSize > Int32.MaxValue)
+                    throw new InvalidDataException("Embedded portable payload has an invalid size.");
+                IntPtr loaded = LoadResource(module, resource);
+                if (loaded == IntPtr.Zero)
+                    throw LastError("Load embedded portable payload resource");
+                IntPtr data = LockResource(loaded);
+                if (data == IntPtr.Zero)
+                    throw new InvalidDataException("Embedded portable payload could not be locked.");
+
+                byte[] payload = new byte[(int)rawSize];
+                Marshal.Copy(data, payload, 0, payload.Length);
+                using (SHA256 hash = SHA256.Create())
+                {
+                    byte[] digest = hash.ComputeHash(payload);
+                    return BitConverter.ToString(digest).Replace("-", "").ToLowerInvariant();
+                }
+            }
+            finally
+            {
+                FreeLibrary(module);
+            }
+        }
+    }
+}
+'@
+    }
+
+    return [AutomaticScreenCamera.PeResourceVerifier]::Sha256(
+        (Resolve-Path -LiteralPath $Path).Path,
+        $TypeId,
+        $NameId)
+}
+
 $applicationDirectory = Join-Path $BuildDirectory "src\windows\$Configuration"
 $sourceDirectory = Join-Path $BuildDirectory "src\windows\media_source\$Configuration"
 $portableSource = Require-File (Join-Path $applicationDirectory 'AutomaticScreenCameraPortable.exe')
@@ -72,9 +163,10 @@ Get-ChildItem -LiteralPath $resolvedOutput -File |
     Remove-Item -Force
 
 Copy-Item -LiteralPath $portableSource -Destination $portableOutput
-$portableProcess = Start-Process -FilePath $portableOutput -ArgumentList '--verify-portable-payload' -Wait -PassThru
-if ($portableProcess.ExitCode -ne 0) {
-    throw "Portable payload verification failed with exit code $($portableProcess.ExitCode)."
+$embeddedPayloadHash = Get-PeResourceSha256 -Path $portableOutput -TypeId 10 -NameId 201
+$mediaSourceHash = (Get-FileHash -LiteralPath $mediaSource -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($embeddedPayloadHash -ne $mediaSourceHash) {
+    throw "Embedded portable payload SHA-256 '$embeddedPayloadHash' does not match '$mediaSourceHash' from '$mediaSource'."
 }
 
 $resolvedBuild = (Resolve-Path -LiteralPath $BuildDirectory).Path

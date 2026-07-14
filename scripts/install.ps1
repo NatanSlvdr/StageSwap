@@ -10,6 +10,22 @@ if (-not [Environment]::Is64BitOperatingSystem -or -not [Environment]::Is64BitPr
     throw 'Automatic Screen Camera requires 64-bit Windows and a 64-bit PowerShell process.'
 }
 
+function Wait-NamedMutex([Threading.Mutex]$Mutex, [int]$Milliseconds) {
+    try { return $Mutex.WaitOne($Milliseconds) }
+    catch [Threading.AbandonedMutexException] { return $true }
+}
+
+$deploymentMutex = [Threading.Mutex]::new($false, 'Global\AutomaticScreenCamera.StartupDeployment.v1')
+$machineApplicationMutex = $null
+$legacyApplicationMutex = $null
+$deploymentMutexOwned = Wait-NamedMutex $deploymentMutex 30000
+$machineApplicationMutexOwned = $false
+$legacyApplicationMutexOwned = $false
+try {
+    if (-not $deploymentMutexOwned) {
+        throw 'Another Automatic Screen Camera launch or deployment is still in progress.'
+    }
+
 $installDirectory = Join-Path $env:ProgramFiles 'Automatic Screen Camera'
 $deploymentRegistryPath = 'HKLM:\SOFTWARE\AutomaticScreenCamera\Deployment'
 $priorDeployment = Get-ItemProperty -LiteralPath $deploymentRegistryPath -ErrorAction SilentlyContinue
@@ -99,8 +115,18 @@ $newInstallationPlaced = $false
 $previousVirtualCameraRemoved = $false
 try {
     Stop-ApplicationProcess
+    $machineApplicationMutex = [Threading.Mutex]::new($false, 'Global\AutomaticScreenCamera.TrayLifetime.v2')
+    $machineApplicationMutexOwned = Wait-NamedMutex $machineApplicationMutex 0
+    if (-not $machineApplicationMutexOwned) {
+        throw 'Automatic Screen Camera is still running in another Windows session.'
+    }
+    $legacyApplicationMutex = [Threading.Mutex]::new($false, 'Local\AutomaticScreenCamera.TrayInstance.v1')
+    $legacyApplicationMutexOwned = Wait-NamedMutex $legacyApplicationMutex 0
+    if (-not $legacyApplicationMutexOwned) {
+        throw 'Automatic Screen Camera is still running in this Windows session.'
+    }
     if (Test-Path -LiteralPath $installedApplication -PathType Leaf) {
-        $removal = Start-Process -FilePath $installedApplication -ArgumentList '--remove-virtual-camera' -Wait -PassThru
+        $removal = Start-Process -FilePath $application -ArgumentList '--remove-virtual-camera-under-lock' -Wait -PassThru
         if ($removal.ExitCode -ne 0) {
             throw "Existing virtual-camera removal failed with exit code $($removal.ExitCode)."
         }
@@ -196,3 +222,11 @@ Remove-Item -LiteralPath $backupDirectory -Recurse -Force -ErrorAction SilentlyC
 
 Write-Host "Automatic Screen Camera installed to $installDirectory"
 Write-Host 'Launch it from the Start menu. Windows camera privacy access must be enabled.'
+} finally {
+    if ($legacyApplicationMutexOwned) { $legacyApplicationMutex.ReleaseMutex() }
+    if ($legacyApplicationMutex) { $legacyApplicationMutex.Dispose() }
+    if ($machineApplicationMutexOwned) { $machineApplicationMutex.ReleaseMutex() }
+    if ($machineApplicationMutex) { $machineApplicationMutex.Dispose() }
+    if ($deploymentMutexOwned) { $deploymentMutex.ReleaseMutex() }
+    $deploymentMutex.Dispose()
+}

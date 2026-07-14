@@ -32,6 +32,7 @@ private:
     void layout_controls();
     void refresh();
     void refresh_preview();
+    void update_technical_details();
     void set_details_expanded(bool expanded, bool resize_window = true);
     void show_tray_menu(POINT point);
     void dispatch_command(UINT command);
@@ -83,6 +84,7 @@ private:
     TooltipHost tooltips_;
     DashboardPresentation presentation_;
     std::vector<std::string> displayed_activity_;
+    std::string displayed_technical_details_;
     bool details_expanded_{false};
     bool exiting_{false};
     DeferredTrigger lifecycle_recovery_;

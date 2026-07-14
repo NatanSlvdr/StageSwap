@@ -339,18 +339,8 @@ bool is_portable_build() noexcept {
 #endif
 }
 
-void require_application_stopped() {
-    const HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, application_mutex_name);
-    if (!mutex) {
-        if (GetLastError() == ERROR_FILE_NOT_FOUND) return;
-        throw_last_error("Check whether Automatic Screen Camera is running");
-    }
-    CloseHandle(mutex);
-    throw std::runtime_error("Exit Automatic Screen Camera from the system tray before continuing");
-}
-
 void stop_application_for_deployment() {
-    const HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, application_mutex_name);
+    const HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, legacy_application_mutex_name);
     if (!mutex) {
         if (GetLastError() == ERROR_FILE_NOT_FOUND) return;
         throw_last_error("Check whether Automatic Screen Camera is running");
@@ -362,7 +352,7 @@ void stop_application_for_deployment() {
     }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     while (std::chrono::steady_clock::now() < deadline) {
-        const HANDLE remaining = OpenMutexW(SYNCHRONIZE, FALSE, application_mutex_name);
+        const HANDLE remaining = OpenMutexW(SYNCHRONIZE, FALSE, legacy_application_mutex_name);
         if (!remaining && GetLastError() == ERROR_FILE_NOT_FOUND) return;
         if (remaining) CloseHandle(remaining);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -454,7 +444,10 @@ void install_portable_source(const HINSTANCE instance) {
 #endif
 }
 
-void ensure_portable_source(const HINSTANCE instance) {
+void ensure_portable_source(const HINSTANCE instance, const HANDLE owned_application_mutex) {
+    if (!owned_application_mutex) {
+        throw std::invalid_argument("Portable deployment requires the caller to own the application mutex");
+    }
 #ifdef ASC_PORTABLE_BUILD
     const auto mode = current_mode();
     if (mode == Mode::installed) {
@@ -472,11 +465,11 @@ void ensure_portable_source(const HINSTANCE instance) {
         !marked_source.empty() && equal_paths(marked_source, source) &&
         equal_paths(registered_source, source) && hash_file(source) == ASC_PORTABLE_SOURCE_SHA256;
     if (!ready) {
-        require_application_stopped();
-        run_elevated(L"--portable-register");
+        run_elevated(L"--portable-register-under-lock");
     }
 #else
     (void)instance;
+    (void)owned_application_mutex;
 #endif
 }
 
@@ -504,7 +497,7 @@ void remove_portable_source() {
 
 void remove_portable_source_elevated() {
     if (is_process_elevated()) remove_portable_source();
-    else run_elevated(L"--portable-unregister");
+    else run_elevated(L"--portable-unregister-under-lock");
 }
 
 } // namespace asc::win::deployment

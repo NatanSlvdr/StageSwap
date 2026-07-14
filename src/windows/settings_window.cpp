@@ -1,6 +1,7 @@
 #include "settings_window.hpp"
 #include "app.hpp"
 #include "preview_window.hpp"
+#include "status_presentation.hpp"
 #include "asc/core/device_choices.hpp"
 
 #include <commctrl.h>
@@ -47,8 +48,17 @@ SettingsWindow::SettingsWindow(const HWND owner, const HINSTANCE instance, App& 
     wc.hIcon = reinterpret_cast<HICON>(SendMessageW(owner_, WM_GETICON, ICON_BIG, 0));
     wc.hIconSm = reinterpret_cast<HICON>(SendMessageW(owner_, WM_GETICON, ICON_SMALL, 0));
     RegisterClassExW(&wc);
-    window_ = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"Automatic Screen Camera — Settings",
-                              WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 800, 680,
+    constexpr DWORD window_style = WS_OVERLAPPEDWINDOW;
+    constexpr DWORD window_ex_style = WS_EX_DLGMODALFRAME;
+    const UINT owner_dpi = GetDpiForWindow(owner_);
+    const UINT dpi = owner_dpi == 0 ? 96U : owner_dpi;
+    RECT initial_bounds{0, 0, MulDiv(800, static_cast<int>(dpi), 96),
+                        MulDiv(680, static_cast<int>(dpi), 96)};
+    if (!AdjustWindowRectExForDpi(&initial_bounds, window_style, FALSE, window_ex_style, dpi))
+        AdjustWindowRectEx(&initial_bounds, window_style, FALSE, window_ex_style);
+    window_ = CreateWindowExW(window_ex_style, wc.lpszClassName, L"Automatic Screen Camera — Settings",
+                              window_style, CW_USEDEFAULT, CW_USEDEFAULT,
+                              initial_bounds.right - initial_bounds.left, initial_bounds.bottom - initial_bounds.top,
                               owner_, nullptr, instance_, this);
     if (!window_) throw HResultError(HRESULT_FROM_WIN32(GetLastError()), "Create settings window");
 }
@@ -104,6 +114,9 @@ LRESULT SettingsWindow::handle(const UINT message, const WPARAM wparam, const LP
         switch (LOWORD(wparam)) {
         case video_device:
             if (HIWORD(wparam) == CBN_SELCHANGE) update_device_details();
+            return 0;
+        case auto_reconnect:
+            if (HIWORD(wparam) == BN_CLICKED) update_device_details();
             return 0;
         case save_button: save(); return 0;
         case cancel_button: SendMessageW(window_, WM_CLOSE, 0, 0); return 0;
@@ -214,7 +227,8 @@ void SettingsWindow::update_device_details() {
         if (device == devices_.end()) {
             details << L"Status: Unavailable (saved selection)\r\nIdentifier: " << wide(identifier)
                     << L"\r\nSupported formats: unavailable until the device reconnects";
-            status_text = L"⚠ Saved source unavailable — reconnect will be retried automatically";
+            status_text = L"⚠ ";
+            status_text += wide(unavailable_video_source_status(checked(auto_reconnect)));
         } else {
             details << L"Status: " << (device->connected ? L"Connected" : L"Unavailable")
                     << L"\r\nIdentifier: " << wide(device->identifier) << L"\r\nSupported formats: ";
