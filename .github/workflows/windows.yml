@@ -140,6 +140,7 @@ jobs:
       - name: Publish release and assets
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           prerelease=()
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
