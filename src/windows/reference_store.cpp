@@ -42,28 +42,16 @@ void encode_png(IWICImagingFactory* factory, const std::filesystem::path& path, 
 }
 }
 
-ReferenceStore::ReferenceStore(D3DDevice& d3d) : d3d_(d3d) {
+ReferenceStore::ReferenceStore() {
     check_hresult(CoCreateInstance(CLSID_WICImagingFactory2, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory_)), "Create WIC factory");
 }
 GrayImage ReferenceStore::load_thumbnail(const std::filesystem::path& path, const Size size) { return decode_thumbnail(factory_.Get(), path, size); }
 
 GrayImage ReferenceStore::save_frame(const VideoFrame& frame, const std::filesystem::path& path, const Size thumbnail_size) {
     if (!frame.valid()) throw std::runtime_error("no valid screen frame to save as reference");
-    D3D11_TEXTURE2D_DESC desc{}; frame.texture->GetDesc(&desc);
-    desc.BindFlags = 0; desc.MiscFlags = 0; desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    ComPtr<ID3D11Texture2D> staging;
-    check_hresult(d3d_.device()->CreateTexture2D(&desc, nullptr, &staging), "Create reference readback texture");
-    d3d_.context()->CopyResource(staging.Get(), frame.texture.Get());
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    check_hresult(d3d_.context()->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "Map reference screen frame");
-    try {
-        std::filesystem::create_directories(path.parent_path());
-        encode_png(factory_.Get(), path, static_cast<const std::uint8_t*>(mapped.pData), frame.size, mapped.RowPitch);
-        const auto bytes = std::span{static_cast<const std::uint8_t*>(mapped.pData), static_cast<std::size_t>(mapped.RowPitch) * frame.size.height};
-        auto thumbnail = resize_bilinear(bgra_to_gray(bytes, frame.size, mapped.RowPitch), thumbnail_size);
-        d3d_.context()->Unmap(staging.Get(), 0);
-        return thumbnail;
-    } catch (...) { d3d_.context()->Unmap(staging.Get(), 0); throw; }
+    std::filesystem::create_directories(path.parent_path());
+    encode_png(factory_.Get(), path, frame.bgra.data(), frame.size, frame.stride);
+    return resize_bilinear(bgra_to_gray(frame.bgra, frame.size, frame.stride), thumbnail_size);
 }
 
 GrayImage ReferenceStore::import_image(const std::filesystem::path& source, const std::filesystem::path& destination,

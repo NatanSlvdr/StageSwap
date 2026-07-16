@@ -45,7 +45,7 @@ void VirtualCamera::start_unlocked(const std::wstring& pipe_name, const std::uin
     ComPtr<IMFActivate> registration_check;
     check_hresult(CoCreateInstance(CLSID_AutomaticScreenCameraSource, nullptr, CLSCTX_INPROC_SERVER,
                                    IID_PPV_ARGS(&registration_check)),
-                  "Load AutomaticScreenCameraSource (run installer as administrator if missing)");
+                  "Load AutomaticScreenCameraSource (relaunch the portable executable and approve registration if missing)");
     check_hresult(MFCreateVirtualCamera(MFVirtualCameraType_SoftwareCameraSource, MFVirtualCameraLifetime_System,
                                         MFVirtualCameraAccess_CurrentUser, L"Automatic Screen Camera",
                                         CLSID_AutomaticScreenCameraSourceText, nullptr, 0, &camera_),
@@ -78,7 +78,7 @@ void VirtualCamera::stop_unlocked() noexcept {
     // active consumer, which would prevent the out-of-process media source from
     // switching to its privacy placeholder when the tray exits. Releasing this
     // controller leaves registration and existing Frame Server sessions alive;
-    // uninstall is the only path that calls Remove().
+    // Portable cleanup is the only path that calls Remove().
     camera_.Reset();
     callback_.Reset();
     callback_state_->running = false;

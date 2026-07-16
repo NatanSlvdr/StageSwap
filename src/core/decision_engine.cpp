@@ -9,7 +9,7 @@ Source DecisionEngine::safe_available(const Source requested, const SourceAvaila
     return Source::placeholder;
 }
 
-Decision DecisionEngine::decide(const OutputMode mode, const DetectionState detection, const Source current,
+Decision DecisionEngine::decide(const OutputMode mode, const DetectionState detection, const Source,
                                 const SourceAvailability& availability) const {
     Source automatic = Source::camera;
     std::string reason;
@@ -20,13 +20,8 @@ Decision DecisionEngine::decide(const OutputMode mode, const DetectionState dete
         automatic = Source::screen;
         reason = "reference absent";
     } else {
-        switch (settings_.missing_behavior) {
-        case MissingReferenceBehavior::use_camera: automatic = Source::camera; break;
-        case MissingReferenceBehavior::keep_current: automatic = current; break;
-        case MissingReferenceBehavior::use_last_screen: automatic = Source::screen; break;
-        case MissingReferenceBehavior::use_placeholder: automatic = Source::placeholder; break;
-        }
-        reason = detection == DetectionState::ambiguous ? "reference ambiguous" : "reference unavailable";
+        automatic = Source::camera;
+        reason = "reference unavailable";
     }
 
     Source requested = automatic;
@@ -38,4 +33,3 @@ Decision DecisionEngine::decide(const OutputMode mode, const DetectionState dete
 }
 
 } // namespace asc
-

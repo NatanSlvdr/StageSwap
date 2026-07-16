@@ -20,9 +20,9 @@ BEGIN
             VALUE "ProductName", "Automatic Screen Camera\0"
             VALUE "ProductVersion", "@ASC_PACKAGE_VERSION@\0"
 #ifdef _DEBUG
-            VALUE "Comments", "Source revision @ASC_SOURCE_REVISION@; Debug; x64; Windows SDK 10.0.22621.0\0"
+            VALUE "Comments", "Source revision @ASC_SOURCE_REVISION@; Debug; @CMAKE_GENERATOR_PLATFORM@; Windows SDK @CMAKE_SYSTEM_VERSION@\0"
 #else
-            VALUE "Comments", "Source revision @ASC_SOURCE_REVISION@; Release; x64; Windows SDK 10.0.22621.0\0"
+            VALUE "Comments", "Source revision @ASC_SOURCE_REVISION@; Release; @CMAKE_GENERATOR_PLATFORM@; Windows SDK @CMAKE_SYSTEM_VERSION@\0"
 #endif
         END
     END

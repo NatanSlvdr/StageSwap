@@ -16,13 +16,10 @@ const char* mode_name(const OutputMode mode) {
 }
 
 AppController::AppController(AppConfig config, EventLog& log)
-    : config_(std::move(config)), log_(log), detector_(config_.detector), monitor_tracker_(config_.monitor_tracker),
-      decision_engine_({config_.missing_behavior}), transition_(config_.fade_duration) {
+    : config_(std::move(config)), log_(log),
+      detector_({config_.similarity_threshold, 5, 3}),
+      monitor_tracker_({config_.similarity_threshold}), transition_(std::chrono::milliseconds{500}) {
     status_.mode = config_.output_mode;
-    if (config_.last_tracked_monitor) {
-        monitor_tracker_.restore_preferred(*config_.last_tracked_monitor);
-        status_.tracked_monitor = config_.last_tracked_monitor;
-    }
 }
 
 void AppController::begin_start() {
@@ -38,8 +35,8 @@ void AppController::begin_start() {
 
 void AppController::finish_start(const bool video_ready, const bool screen_ready, const bool virtual_camera_ready) {
     std::scoped_lock lock(mutex_);
-    status_.video_input = video_ready ? DeviceState::ready : DeviceState::recovering;
-    status_.screen_capture = screen_ready ? DeviceState::ready : DeviceState::recovering;
+    status_.video_input = video_ready ? DeviceState::ready : DeviceState::unavailable;
+    status_.screen_capture = screen_ready ? DeviceState::ready : DeviceState::unavailable;
     status_.virtual_camera = virtual_camera_ready ? DeviceState::ready : DeviceState::failed;
     status_.availability = {video_ready, screen_ready, true};
     status_.run_state = virtual_camera_ready ? RunState::running : RunState::error;
@@ -138,9 +135,8 @@ MonitorTrackingResult AppController::on_monitor_scan(const std::vector<MonitorSc
     const auto previous_detection = status_.detection.state;
     auto result = monitor_tracker_.apply_scan(scores, now);
     status_.tracked_monitor = result.tracked;
-    status_.monitor_observations = result.observations;
     status_.last_full_scan = now;
-    if (result.scan_state == DetectionState::reference_missing || result.scan_state == DetectionState::ambiguous) {
+    if (result.scan_state == DetectionState::reference_missing) {
         scan_safety_state_ = result.scan_state;
         status_.detection.state = result.scan_state;
     } else {
@@ -156,14 +152,10 @@ MonitorTrackingResult AppController::on_monitor_scan(const std::vector<MonitorSc
         log_.write(LogLevel::info, "monitors", "TRACKED_MONITOR_CHANGED", result.message,
                    std::string("{\"similarity\":") + std::to_string(result.best_similarity) + "}");
     }
-    if (result.scan_state == DetectionState::ambiguous) {
-        status_.warning = result.message;
-        log_.write(LogLevel::warning, "monitors", "DUPLICATE_REFERENCE", result.message);
-    } else if (result.scan_state == DetectionState::reference_missing) {
+    if (result.scan_state == DetectionState::reference_missing) {
         status_.warning = result.message;
         log_.write(LogLevel::warning, "monitors", "REFERENCE_NOT_FOUND", result.message);
-    } else if (status_.warning.starts_with("reference") || status_.warning.starts_with("duplicate") ||
-               status_.warning.starts_with("new match") || status_.warning.starts_with("candidate monitor")) {
+    } else if (status_.warning.starts_with("reference") || status_.warning.starts_with("candidate monitor")) {
         status_.warning.clear();
     }
     evaluate(now);
@@ -183,7 +175,7 @@ void AppController::evaluate(const TimePoint now) {
     if (status_.transition.active && (!before.active || before.target != status_.transition.target)) {
         log_.write(LogLevel::info, "compositor", status_.transition.reversed ? "FADE_REVERSED" : "FADE_STARTED",
                    std::string(status_.transition.reversed ? "Fade reversed toward " : "Fading to ") + source_name(decision.desired_output),
-                   std::string("{\"duration_ms\":") + std::to_string(config_.fade_duration.count()) + "}");
+                   "{\"duration_ms\":500}");
     }
     if (!status_.transition.active) status_.actual_output = status_.transition.logical_source;
 }
@@ -202,19 +194,17 @@ void AppController::tick(const TimePoint now) {
 void AppController::reconfigure(const AppConfig& config, const TimePoint now) {
     std::scoped_lock lock(mutex_);
     config_ = config;
-    detector_.configure(config_.detector);
-    monitor_tracker_.configure(config_.monitor_tracker);
-    decision_engine_.configure({config_.missing_behavior});
-    transition_.set_duration(config_.fade_duration);
+    detector_.configure({config_.similarity_threshold, 5, 3});
+    monitor_tracker_.configure({config_.similarity_threshold});
+    transition_.set_duration(std::chrono::milliseconds{500});
     status_.mode = config_.output_mode;
     evaluate(now);
     log_.write(LogLevel::info, "configuration", "CONFIGURATION_APPLIED", "Configuration changes applied");
 }
 
-void AppController::set_tracked_monitor(MonitorIdentity monitor) {
+void AppController::set_tracked_monitor(RuntimeMonitorDescriptor monitor) {
     std::scoped_lock lock(mutex_);
-    monitor_tracker_.restore_preferred(monitor);
-    status_.monitor_observations = monitor_tracker_.observations();
+    monitor_tracker_.select(monitor);
     status_.tracked_monitor = std::move(monitor);
     log_.write(LogLevel::info, "monitors", "TRACKED_MONITOR_SELECTED", "Tracked monitor selected by user");
 }

@@ -1,6 +1,5 @@
 #include "d3d_device.hpp"
 
-#include <mfapi.h>
 #include <d3d10.h>
 
 namespace asc::win {
@@ -11,7 +10,7 @@ void D3DDevice::create() {
     device_.Reset();
     context_.Reset();
     constexpr D3D_FEATURE_LEVEL levels[]{D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
-    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
 #ifdef _DEBUG
     flags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
@@ -29,10 +28,6 @@ void D3DDevice::create() {
     ComPtr<ID3D10Multithread> multithread;
     check_hresult(device_.As(&multithread), "Query ID3D10Multithread");
     multithread->SetMultithreadProtected(TRUE);
-    if (!mf_manager_) check_hresult(MFCreateDXGIDeviceManager(&mf_reset_token_, &mf_manager_), "MFCreateDXGIDeviceManager");
-    check_hresult(mf_manager_->ResetDevice(device_.Get(), mf_reset_token_), "IMFDXGIDeviceManager::ResetDevice");
 }
-
-void D3DDevice::reset_after_device_loss() { create(); }
 
 } // namespace asc::win

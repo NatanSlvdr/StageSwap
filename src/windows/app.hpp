@@ -29,14 +29,6 @@ struct SelectedVideoSourceInfo {
     std::string identifier;
     std::string display_name;
 };
-struct DiagnosticCounters {
-    std::uint64_t frames_published{0};
-    std::uint64_t detection_checks{0};
-    std::uint64_t full_scans{0};
-    std::uint64_t recovery_attempts{0};
-    std::uint64_t failures{0};
-};
-
 class App {
 public:
     explicit App(HINSTANCE instance);
@@ -47,8 +39,8 @@ public:
     void stop_automation();
     void set_mode(OutputMode mode);
     void set_current_screen_reference();
-    void set_reference_monitor(const MonitorIdentity& monitor);
-    void select_tracked_monitor(const MonitorIdentity& monitor);
+    void set_reference_monitor(const RuntimeMonitorDescriptor& monitor);
+    void select_tracked_monitor(const RuntimeMonitorDescriptor& monitor);
     void import_reference(const std::filesystem::path& source);
     void request_rescan();
     void restart_video_input();
@@ -58,8 +50,6 @@ public:
     void export_logs(const std::filesystem::path& destination) const;
     void clear_logs();
     [[nodiscard]] std::optional<PreviewImage> preview(PreviewKind kind, Size target = {240, 135});
-    [[nodiscard]] DiagnosticCounters diagnostic_counters() const noexcept;
-    void reset_diagnostic_counters();
     void log_system_event(std::string code, std::string message);
     void exit();
 
@@ -81,7 +71,6 @@ private:
     void compositor_loop(std::stop_token stop);
     void detector_loop(std::stop_token stop);
     void rescan_loop(std::stop_token stop);
-    void recovery_loop(std::stop_token stop);
     void full_monitor_scan();
     void suspend_screen_capture();
     void refresh_selected_video_device_name();
@@ -118,25 +107,15 @@ private:
     std::atomic<bool> automation_running_{false};
     std::atomic<bool> rescan_requested_{false};
     std::atomic<bool> exiting_{false};
+    std::atomic<bool> graphics_relaunch_required_{false};
     std::jthread compositor_thread_;
     std::jthread detector_thread_;
     std::jthread rescan_thread_;
-    std::jthread recovery_thread_;
     std::jthread reference_worker_;
-    std::vector<MonitorIdentity> known_monitors_;
     std::string selected_video_device_name_;
     std::string selected_video_device_name_for_id_;
     std::string configuration_warning_;
-    VideoFrame previous_screen_frame_;
-    VideoFrame safe_screen_frame_;
     VideoFrame final_output_frame_;
-    std::atomic<bool> raw_reference_matching_{false};
-    TimePoint screen_switch_started_{};
-    std::atomic<std::uint64_t> frames_published_{0};
-    std::atomic<std::uint64_t> detection_checks_{0};
-    std::atomic<std::uint64_t> full_scans_{0};
-    std::atomic<std::uint64_t> recovery_attempts_{0};
-    std::atomic<std::uint64_t> failures_{0};
 };
 
 } // namespace asc::win

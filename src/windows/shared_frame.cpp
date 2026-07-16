@@ -64,11 +64,10 @@ std::size_t checked_capacity(const Size size) {
 }
 }
 
-SharedFramePublisher::SharedFramePublisher(D3DDevice& d3d, const Size maximum_size, std::wstring pipe_name)
-    : d3d_(d3d), slot_capacity_(checked_capacity(maximum_size)), pipe_name_(std::move(pipe_name)) {
+SharedFramePublisher::SharedFramePublisher(const Size maximum_size, std::wstring pipe_name)
+    : slot_capacity_(checked_capacity(maximum_size)), pipe_name_(std::move(pipe_name)) {
     if (pipe_name_.empty()) throw std::invalid_argument("IPC pipe name must not be empty");
     latest_pixels_.reserve(slot_capacity_);
-    staging_pixels_.reserve(slot_capacity_);
     server_thread_ = std::jthread([this](const std::stop_token stop) { server_loop(stop); });
 }
 
@@ -84,93 +83,24 @@ SharedFramePublisher::~SharedFramePublisher() {
     }
 }
 
-void SharedFramePublisher::prepare_readback(ReadbackSlot& slot, ID3D11Texture2D* source, const Size size) {
-    if (slot.texture && slot.ready && slot.size == size) return;
-    slot = {};
-    D3D11_TEXTURE2D_DESC desc{};
-    source->GetDesc(&desc);
-    if (desc.Width != size.width || desc.Height != size.height || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
-        desc.ArraySize != 1 || desc.MipLevels != 1 || desc.SampleDesc.Count != 1)
-        throw std::runtime_error("frame texture is not a supported BGRA surface");
-    desc.BindFlags = 0;
-    desc.MiscFlags = 0;
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    check_hresult(d3d_.device()->CreateTexture2D(&desc, nullptr, &slot.texture), "Create virtual camera readback texture");
-    D3D11_QUERY_DESC query_desc{D3D11_QUERY_EVENT, 0};
-    check_hresult(d3d_.device()->CreateQuery(&query_desc, &slot.ready), "Create virtual camera readback query");
-    slot.size = size;
-}
-
-bool SharedFramePublisher::collect_oldest_readback() {
-    ReadbackSlot* oldest = nullptr;
-    for (auto& slot : readbacks_) {
-        if (slot.pending && (!oldest || slot.submission < oldest->submission)) oldest = &slot;
-    }
-    if (!oldest) return false;
-    const auto ready = d3d_.context()->GetData(oldest->ready.Get(), nullptr, 0, 0);
-    if (ready == S_FALSE) return false;
-    check_hresult(ready, "Poll virtual camera readback");
-    const auto frame_bytes = static_cast<std::size_t>(oldest->size.width) * oldest->size.height * 4;
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    const auto mapped_result = d3d_.context()->Map(oldest->texture.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
-    if (mapped_result == DXGI_ERROR_WAS_STILL_DRAWING) return false;
-    check_hresult(mapped_result, "Map virtual camera frame");
-    staging_pixels_.resize(frame_bytes);
-    const auto stride = oldest->size.width * 4;
-    if (mapped.RowPitch < stride) {
-        d3d_.context()->Unmap(oldest->texture.Get(), 0);
-        throw std::runtime_error("virtual camera readback stride is too small");
-    }
-    for (std::uint32_t y = 0; y < oldest->size.height; ++y)
-        std::memcpy(staging_pixels_.data() + static_cast<std::size_t>(y) * stride,
-                    static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch, stride);
-    d3d_.context()->Unmap(oldest->texture.Get(), 0);
+void SharedFramePublisher::publish(const VideoFrame& frame) {
+    if (!frame.valid()) return;
+    const auto frame_bytes = static_cast<std::uint64_t>(frame.stride) * frame.size.height;
+    if (frame_bytes > slot_capacity_) throw std::runtime_error("frame exceeds IPC capacity");
     {
         std::scoped_lock lock(frame_mutex_);
         ++latest_packet_.sequence;
-        latest_packet_.width = oldest->size.width; latest_packet_.height = oldest->size.height; latest_packet_.stride = stride;
-        latest_packet_.timestamp_100ns = oldest->timestamp_100ns;
+        latest_packet_.width = frame.size.width;
+        latest_packet_.height = frame.size.height;
+        latest_packet_.stride = frame.stride;
+        latest_packet_.timestamp_100ns = frame.presentation_time_100ns;
         latest_packet_.frame_bytes = static_cast<std::uint32_t>(frame_bytes);
-        latest_pixels_.swap(staging_pixels_);
+        latest_pixels_ = frame.bgra;
     }
     frame_ready_.notify_all();
-    oldest->pending = false;
-    return true;
-}
-
-void SharedFramePublisher::publish(const VideoFrame& frame) {
-    if (!frame.valid()) return;
-    const auto frame_bytes = static_cast<std::uint64_t>(frame.size.width) * frame.size.height * 4;
-    if (frame_bytes > slot_capacity_) throw std::runtime_error("frame exceeds IPC capacity");
-    std::scoped_lock readback_lock(readback_mutex_);
-    (void)collect_oldest_readback();
-    ReadbackSlot* destination = nullptr;
-    for (std::size_t offset = 0; offset < readbacks_.size(); ++offset) {
-        auto& candidate = readbacks_[(next_readback_ + offset) % readbacks_.size()];
-        if (!candidate.pending) { destination = &candidate; next_readback_ = (next_readback_ + offset + 1) % readbacks_.size(); break; }
-    }
-    // If the GPU is more than three frames behind, retain the last good frame instead of blocking this thread.
-    if (!destination) return;
-    prepare_readback(*destination, frame.texture.Get(), frame.size);
-    d3d_.context()->CopyResource(destination->texture.Get(), frame.texture.Get());
-    d3d_.context()->End(destination->ready.Get());
-    destination->timestamp_100ns = frame.presentation_time_100ns;
-    destination->submission = next_submission_++;
-    destination->pending = true;
-}
-
-void SharedFramePublisher::reset_device() {
-    std::scoped_lock lock(readback_mutex_);
-    readbacks_ = {};
-    next_submission_ = 1;
-    next_readback_ = 0;
 }
 
 void SharedFramePublisher::invalidate() {
-    std::scoped_lock readback_lock(readback_mutex_);
-    for (auto& slot : readbacks_) slot.pending = false;
-    next_submission_ = 1;
     {
         std::scoped_lock lock(frame_mutex_);
         ++latest_packet_.sequence;

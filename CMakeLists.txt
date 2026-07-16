@@ -76,6 +76,7 @@ add_library(asc_core STATIC
     src/core/config.cpp
     src/core/controller.cpp
     src/core/event_log.cpp
+    src/core/frame.cpp
     src/core/image.cpp
     src/core/detector.cpp
     src/core/decision_engine.cpp

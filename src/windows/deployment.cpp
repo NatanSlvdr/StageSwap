@@ -14,7 +14,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -25,7 +24,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 namespace asc::win::deployment {
@@ -305,6 +303,23 @@ bool equal_paths(const std::filesystem::path& left, const std::filesystem::path&
     return normalize(left) == normalize(right);
 }
 
+void validate_native_architecture() {
+    USHORT process_machine = IMAGE_FILE_MACHINE_UNKNOWN;
+    USHORT native_machine = IMAGE_FILE_MACHINE_UNKNOWN;
+    if (!IsWow64Process2(GetCurrentProcess(), &process_machine, &native_machine))
+        throw_last_error("Validate native package architecture");
+#if defined(_M_ARM64)
+    constexpr USHORT package_machine = IMAGE_FILE_MACHINE_ARM64;
+#elif defined(_M_X64)
+    constexpr USHORT package_machine = IMAGE_FILE_MACHINE_AMD64;
+#else
+#error Automatic Screen Camera portable builds must target x64 or ARM64.
+#endif
+    if (native_machine != package_machine || process_machine != IMAGE_FILE_MACHINE_UNKNOWN) {
+        throw std::runtime_error("This portable executable must run on matching native Windows architecture; cross-architecture deployment is not supported");
+    }
+}
+
 #ifdef ASC_PORTABLE_BUILD
 void write_payload_file(const HINSTANCE instance, const std::filesystem::path& destination) {
     const auto payload = portable_payload(instance);
@@ -327,38 +342,9 @@ Mode current_mode() {
     const auto value = registry_string(HKEY_LOCAL_MACHINE, deployment_key_path, L"Mode");
     if (value.empty()) return Mode::none;
     if (_wcsicmp(value.c_str(), L"portable") == 0) return Mode::portable;
-    if (_wcsicmp(value.c_str(), L"installed") == 0) return Mode::installed;
-    return Mode::unknown;
+    throw std::runtime_error("Portable deployment registry data is not recognized");
 }
 
-bool is_portable_build() noexcept {
-#ifdef ASC_PORTABLE_BUILD
-    return true;
-#else
-    return false;
-#endif
-}
-
-void stop_application_for_deployment() {
-    const HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, legacy_application_mutex_name);
-    if (!mutex) {
-        if (GetLastError() == ERROR_FILE_NOT_FOUND) return;
-        throw_last_error("Check whether Automatic Screen Camera is running");
-    }
-    CloseHandle(mutex);
-    const HWND window = FindWindowW(application_window_class, nullptr);
-    if (!window || !PostMessageW(window, exit_for_deployment_message, 0, 0)) {
-        throw std::runtime_error("Automatic Screen Camera is running but could not be asked to exit");
-    }
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-    while (std::chrono::steady_clock::now() < deadline) {
-        const HANDLE remaining = OpenMutexW(SYNCHRONIZE, FALSE, legacy_application_mutex_name);
-        if (!remaining && GetLastError() == ERROR_FILE_NOT_FOUND) return;
-        if (remaining) CloseHandle(remaining);
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    throw std::runtime_error("Automatic Screen Camera did not exit within 15 seconds");
-}
 
 void remove_current_user_startup_entry() {
     constexpr wchar_t run_key[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -380,11 +366,8 @@ void verify_portable_payload(const HINSTANCE instance) {
 void install_portable_source(const HINSTANCE instance) {
     require_elevation();
 #ifdef ASC_PORTABLE_BUILD
+    validate_native_architecture();
     const auto mode = current_mode();
-    if (mode == Mode::installed) {
-        throw std::runtime_error("The installed edition is present. Uninstall it before using the portable edition");
-    }
-    if (mode == Mode::unknown) throw std::runtime_error("Deployment registry data is not recognized");
     const auto existing_registration = registered_source_path();
     if (mode == Mode::none && !existing_registration.empty() &&
         !equal_paths(existing_registration, portable_source_path())) {
@@ -449,16 +432,13 @@ void ensure_portable_source(const HINSTANCE instance, const HANDLE owned_applica
         throw std::invalid_argument("Portable deployment requires the caller to own the application mutex");
     }
 #ifdef ASC_PORTABLE_BUILD
+    validate_native_architecture();
     const auto mode = current_mode();
-    if (mode == Mode::installed) {
-        throw std::runtime_error("The installed edition is present. Launch it from the Start menu or uninstall it before using the portable edition");
-    }
-    if (mode == Mode::unknown) throw std::runtime_error("Deployment registry data is not recognized");
     validate_payload(instance);
     const auto source = portable_source_path();
     const auto registered_source = registered_source_path();
     if (mode == Mode::none && !registered_source.empty() && !equal_paths(registered_source, source)) {
-        throw std::runtime_error("A camera source is already registered by a developer or installed build; remove it before using the portable edition");
+        throw std::runtime_error("A camera source is already registered outside this portable deployment; remove it before continuing");
     }
     const auto marked_source = registry_string(HKEY_LOCAL_MACHINE, deployment_key_path, L"SourcePath");
     const bool ready = mode == Mode::portable && std::filesystem::is_regular_file(source) &&
@@ -475,9 +455,7 @@ void ensure_portable_source(const HINSTANCE instance, const HANDLE owned_applica
 
 void remove_portable_source() {
     require_elevation();
-    const auto mode = current_mode();
-    if (mode == Mode::installed) throw std::runtime_error("Refusing to remove the installed edition as portable data");
-    if (mode == Mode::unknown) throw std::runtime_error("Deployment registry data is not recognized");
+    (void)current_mode();
     const auto source = portable_source_path();
     const auto registered_source = registered_source_path();
     if (std::filesystem::is_regular_file(source)) {

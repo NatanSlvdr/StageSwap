@@ -2,6 +2,7 @@
 
 #include "asc/core/config.hpp"
 #include "asc/core/decision_engine.hpp"
+#include "asc/core/detector.hpp"
 #include "asc/core/event_log.hpp"
 #include "asc/core/monitor_tracker.hpp"
 #include "asc/core/transition.hpp"
@@ -26,8 +27,7 @@ struct AppStatus {
     DeviceState video_input{DeviceState::unavailable};
     DeviceState screen_capture{DeviceState::unavailable};
     DeviceState virtual_camera{DeviceState::unavailable};
-    std::optional<MonitorIdentity> tracked_monitor;
-    std::vector<MonitorObservation> monitor_observations;
+    std::optional<RuntimeMonitorDescriptor> tracked_monitor;
     TimePoint last_full_scan{};
     std::string warning;
 };
@@ -47,7 +47,7 @@ public:
     [[nodiscard]] MonitorTrackingResult on_monitor_scan(const std::vector<MonitorScore>& scores, TimePoint now);
     void tick(TimePoint now);
     void reconfigure(const AppConfig& config, TimePoint now);
-    void set_tracked_monitor(MonitorIdentity monitor);
+    void set_tracked_monitor(RuntimeMonitorDescriptor monitor);
     [[nodiscard]] AppStatus status() const;
     [[nodiscard]] AppConfig config() const;
 

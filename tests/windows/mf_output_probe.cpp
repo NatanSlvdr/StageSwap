@@ -359,7 +359,8 @@ int wmain(const int argc, wchar_t** argv) {
                 MFGetAttributeRatio(media_type.Get(), MF_MT_FRAME_RATE, &numerator, &denominator);
             }
 
-            HANDLE producer = open_process_by_name(L"AutomaticScreenCamera.exe");
+            HANDLE producer = open_process_by_name(L"windows-x64-portable.exe");
+            if (!producer) producer = open_process_by_name(L"windows-arm64-portable.exe");
             std::vector<ProcessSample> process_samples;
             if (producer != nullptr) {
                 if (const auto sample = sample_process(producer)) process_samples.push_back(*sample);

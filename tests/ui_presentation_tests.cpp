@@ -19,13 +19,8 @@ bool contains(const std::string& text, const std::string_view expected) {
     return text.find(expected) != std::string::npos;
 }
 
-asc::MonitorIdentity example_monitor() {
-    asc::MonitorIdentity monitor;
-    monitor.hardware_id = "MONITOR-1";
-    monitor.model = "Studio Display";
-    monitor.resolution = {3840, 2160};
-    monitor.desktop_x = 1920;
-    return monitor;
+asc::RuntimeMonitorDescriptor example_monitor() {
+    return {"\\\\.\\DISPLAY1", "Studio Display", {1920, 0, 3840, 2160}, 1};
 }
 
 asc::AppStatus ready_status(const asc::TimePoint now) {
@@ -40,7 +35,6 @@ asc::AppStatus ready_status(const asc::TimePoint now) {
     status.virtual_camera = asc::DeviceState::ready;
     status.tracked_monitor = example_monitor();
     status.last_full_scan = now - std::chrono::seconds{12};
-    status.monitor_observations.push_back({*status.tracked_monitor, 0.942, true, now - std::chrono::seconds{12}, now - std::chrono::seconds{4}, true});
     return status;
 }
 
@@ -48,7 +42,7 @@ void automatic_presentation_test() {
     const auto now = asc::Clock::now();
     const auto status = ready_status(now);
     asc::AppConfig config;
-    config.detector.threshold = 0.9;
+    config.similarity_threshold = 0.9;
     const asc::win::VideoSourcePresentation video{"camera-id", "Logitech Brio"};
     const std::vector<asc::LogEvent> events{
         {std::chrono::system_clock::now(), asc::LogLevel::info, "detector", "REFERENCE_DETECTED", "Reference detected", "{}"}
@@ -129,7 +123,7 @@ void unavailable_source_and_activity_limit_test() {
           "expanded activity retains every event and structured context");
 }
 
-void preview_size_and_reconnect_text_test() {
+void preview_size_test() {
     check(asc::win::fit_preview_size({1920, 1080}, {400, 400}) == asc::Size{400, 225},
           "preview fitting preserves a landscape aspect ratio");
     check(asc::win::fit_preview_size({1200, 1800}, {400, 300}) == asc::Size{200, 300},
@@ -138,10 +132,6 @@ void preview_size_and_reconnect_text_test() {
           "preview fitting caps large render targets");
     check(asc::win::fit_preview_size({1920, 1080}, {0, 300}) == asc::Size{},
           "preview fitting rejects empty bounds");
-    check(contains(asc::win::unavailable_video_source_status(true), "retried automatically"),
-          "enabled reconnect status describes automatic retries");
-    check(contains(asc::win::unavailable_video_source_status(false), "reconnect is disabled"),
-          "disabled reconnect status does not promise retries");
 }
 
 } // namespace
@@ -152,7 +142,7 @@ int main() {
     warning_during_override_test();
     failure_and_placeholder_test();
     unavailable_source_and_activity_limit_test();
-    preview_size_and_reconnect_text_test();
+    preview_size_test();
     if (failures == 0) std::cout << "All UI presentation tests passed\n";
     return failures == 0 ? 0 : 1;
 }

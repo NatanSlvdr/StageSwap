@@ -2,12 +2,10 @@
 #include "app.hpp"
 #include "settings_window.hpp"
 #include "preview_window.hpp"
-#include "deployment.hpp"
 
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
-#include <wtsapi32.h>
 #include <array>
 #include <chrono>
 #include <iomanip>
@@ -21,7 +19,6 @@ namespace {
 constexpr UINT tray_message = WM_APP + 1;
 constexpr UINT timer_id = 1;
 constexpr UINT preview_timer_id = 2;
-constexpr auto lifecycle_recovery_delay = std::chrono::seconds{2};
 HMENU control_id(const UINT id) noexcept { return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)); }
 enum Command : UINT {
     open = 100, start, stop, automatic, force_camera, force_screen, set_reference, import_reference,
@@ -30,7 +27,7 @@ enum Command : UINT {
 };
 const wchar_t* detection_name(const DetectionState state) {
     switch (state) { case DetectionState::unknown: return L"Unknown"; case DetectionState::matching: return L"Detected";
-    case DetectionState::not_matching: return L"Absent"; case DetectionState::reference_missing: return L"Missing"; case DetectionState::ambiguous: return L"Ambiguous"; }
+    case DetectionState::not_matching: return L"Absent"; case DetectionState::reference_missing: return L"Missing"; }
     return L"Unknown";
 }
 std::wstring selected_video_name(const SelectedVideoSourceInfo& source) {
@@ -38,14 +35,14 @@ std::wstring selected_video_name(const SelectedVideoSourceInfo& source) {
     if (!source.display_name.empty()) return wide(source.display_name);
     return L"Unavailable saved source";
 }
-std::wstring monitor_name(const std::optional<MonitorIdentity>& monitor) {
+std::wstring monitor_name(const std::optional<RuntimeMonitorDescriptor>& monitor) {
     if (!monitor) return L"Not identified";
-    if (!monitor->model.empty()) return wide(monitor->model);
-    if (!monitor->device_path.empty()) return wide(monitor->device_path);
+    if (!monitor->label.empty()) return wide(monitor->label);
+    if (!monitor->gdi_display_name.empty()) return wide(monitor->gdi_display_name);
     return L"Unidentified display";
 }
 std::wstring output_name(const Source source, const SelectedVideoSourceInfo& video,
-                         const std::optional<MonitorIdentity>& monitor) {
+                         const std::optional<RuntimeMonitorDescriptor>& monitor) {
     switch (source) {
     case Source::camera: return selected_video_name(video);
     case Source::screen: return monitor_name(monitor);
@@ -125,7 +122,6 @@ LRESULT TrayWindow::handle_message(const UINT message, const WPARAM wparam, cons
     case WM_CREATE: create_controls(); return 0;
     case WM_TIMER:
         if (wparam == timer_id) {
-            if (lifecycle_recovery_.consume_if_due(Clock::now())) app_.restart_all();
             refresh();
         } else if (wparam == preview_timer_id) {
             refresh_preview();
@@ -182,7 +178,6 @@ LRESULT TrayWindow::handle_message(const UINT message, const WPARAM wparam, cons
         SetBkMode(dc, TRANSPARENT);
         return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
     }
-    case WM_DISPLAYCHANGE: app_.log_system_event("DISPLAY_LAYOUT_CHANGED", "Display layout or resolution changed"); app_.restart_screen_capture(); app_.request_rescan(); return 0;
     case WM_DEVICECHANGE: app_.log_system_event("DISPLAY_DEVICE_CHANGED", "A display or video device changed"); app_.restart_screen_capture(); app_.request_rescan(); return 0;
     case WM_DPICHANGED: {
         const auto* suggested = reinterpret_cast<const RECT*>(lparam);
@@ -201,13 +196,6 @@ LRESULT TrayWindow::handle_message(const UINT message, const WPARAM wparam, cons
         app_.request_rescan();
         return 0;
     }
-    case WM_POWERBROADCAST:
-        if (wparam == PBT_APMRESUMEAUTOMATIC) schedule_lifecycle_recovery("PC_RESUMED", "PC resumed from sleep");
-        return TRUE;
-    case WM_WTSSESSION_CHANGE:
-        if (wparam == WTS_SESSION_UNLOCK) schedule_lifecycle_recovery("SESSION_UNLOCKED", "Windows session unlocked");
-        else if (wparam == WTS_REMOTE_DISCONNECT) schedule_lifecycle_recovery("REMOTE_SESSION_ENDED", "Remote desktop session disconnected");
-        return 0;
     case tray_message:
         if (LOWORD(lparam) == WM_LBUTTONUP || LOWORD(lparam) == WM_LBUTTONDBLCLK) show();
         else if (LOWORD(lparam) == WM_RBUTTONUP || LOWORD(lparam) == WM_CONTEXTMENU) { POINT p{}; GetCursorPos(&p); show_tray_menu(p); }
@@ -220,21 +208,10 @@ LRESULT TrayWindow::handle_message(const UINT message, const WPARAM wparam, cons
     case WM_DESTROY:
         KillTimer(window_, timer_id);
         KillTimer(window_, preview_timer_id);
-        WTSUnRegisterSessionNotification(window_);
         PostQuitMessage(0);
-        return 0;
-    case deployment::exit_for_deployment_message:
-        exiting_ = true;
-        app_.exit();
         return 0;
     default: return DefWindowProcW(window_, message, wparam, lparam);
     }
-}
-
-void TrayWindow::schedule_lifecycle_recovery(std::string code, std::string message) {
-    app_.log_system_event(std::move(code), std::move(message));
-    lifecycle_recovery_.schedule(Clock::now(), lifecycle_recovery_delay);
-    app_.log_system_event("RECOVERY_SCHEDULED", "Full video recovery scheduled after the device-return delay");
 }
 
 void TrayWindow::create_controls() {
@@ -308,7 +285,6 @@ void TrayWindow::create_controls() {
     ShowWindow(return_automatic_button_, SW_HIDE);
     ShowWindow(technical_text_, SW_HIDE);
     ShowWindow(full_activity_list_, SW_HIDE);
-    WTSRegisterSessionNotification(window_, NOTIFY_FOR_THIS_SESSION);
     layout_controls();
     refresh();
 }
@@ -611,20 +587,20 @@ void TrayWindow::dispatch_command(const UINT command) {
             HMENU choices = CreatePopupMenu();
             for (std::size_t i = 0; i < monitors.size(); ++i) {
                 std::wostringstream label;
-                label << wide(monitors[i].identity.model) << L" — " << monitors[i].identity.resolution.width << L" × "
-                      << monitors[i].identity.resolution.height << L" at (" << monitors[i].identity.desktop_x << L", " << monitors[i].identity.desktop_y << L")";
+                label << wide(monitors[i].descriptor.label) << L" — " << monitors[i].descriptor.geometry.width << L" × "
+                      << monitors[i].descriptor.geometry.height << L" at (" << monitors[i].descriptor.geometry.x << L", " << monitors[i].descriptor.geometry.y << L")";
                 AppendMenuW(choices, MF_STRING, static_cast<UINT_PTR>(2000 + i), label.str().c_str());
             }
             POINT point{}; GetCursorPos(&point);
             const auto selected = TrackPopupMenu(choices, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window_, nullptr);
             DestroyMenu(choices);
             if (selected >= 2000 && static_cast<std::size_t>(selected - 2000) < monitors.size()) {
-                hide(); app_.set_reference_monitor(monitors[static_cast<std::size_t>(selected - 2000)].identity);
+                hide(); app_.set_reference_monitor(monitors[static_cast<std::size_t>(selected - 2000)].descriptor);
             }
         } else if (monitors.size() == 1) {
             // This is an explicit user choice, so it may replace a persisted
             // monitor that is currently disconnected.
-            hide(); app_.set_reference_monitor(monitors.front().identity);
+            hide(); app_.set_reference_monitor(monitors.front().descriptor);
         } else {
             hide(); app_.set_current_screen_reference();
         }

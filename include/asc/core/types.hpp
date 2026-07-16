@@ -13,10 +13,8 @@ using TimePoint = Clock::time_point;
 
 enum class OutputMode { automatic, force_camera, force_screen };
 enum class Source { camera, screen, placeholder };
-enum class DetectionState { unknown, matching, not_matching, reference_missing, ambiguous };
+enum class DetectionState { unknown, matching, not_matching, reference_missing };
 enum class DeviceState { unavailable, initializing, ready, recovering, failed };
-enum class MissingReferenceBehavior { use_camera, keep_current, use_last_screen, use_placeholder };
-enum class ScalingMode { fit, fill, stretch };
 
 struct Size {
     std::uint32_t width{0};
@@ -24,42 +22,30 @@ struct Size {
     friend bool operator==(const Size&, const Size&) = default;
 };
 
-struct MonitorIdentity {
-    std::string device_path;
-    std::string hardware_id;
-    std::string manufacturer;
-    std::string model;
-    std::string serial;
-    std::string adapter_id;
-    Size resolution;
-    std::uint32_t orientation_degrees{0};
-    std::uint32_t refresh_rate_millihz{0};
-    std::int32_t desktop_x{0};
-    std::int32_t desktop_y{0};
+struct MonitorGeometry {
+    std::int32_t x{0};
+    std::int32_t y{0};
+    std::uint32_t width{0};
+    std::uint32_t height{0};
+    friend bool operator==(const MonitorGeometry&, const MonitorGeometry&) = default;
+};
 
-    [[nodiscard]] std::string stable_key() const {
-        if (!hardware_id.empty()) return hardware_id + "|" + serial;
-        if (!device_path.empty()) return device_path;
-        return manufacturer + "|" + model + "|" + std::to_string(desktop_x) + "|" + std::to_string(desktop_y);
-    }
+// Runtime-only monitor metadata. It intentionally contains no EDID or other
+// persisted hardware identity; the GDI name is valid only for this session.
+struct RuntimeMonitorDescriptor {
+    std::string gdi_display_name;
+    std::string label;
+    MonitorGeometry geometry;
+    std::uintptr_t native_handle{0};
+
+    [[nodiscard]] std::string runtime_key() const { return gdi_display_name; }
+    friend bool operator==(const RuntimeMonitorDescriptor&, const RuntimeMonitorDescriptor&) = default;
 };
 
 struct MonitorScore {
-    MonitorIdentity monitor;
+    RuntimeMonitorDescriptor monitor;
     double similarity{0.0};
     bool capture_valid{false};
-};
-
-// Runtime rediscovery metadata for a monitor that was present in the latest
-// full scan. Identity stays separate so persisted hardware matching does not
-// depend on transient observations.
-struct MonitorObservation {
-    MonitorIdentity identity;
-    double last_similarity{0.0};
-    bool capture_valid{false};
-    TimePoint last_scanned_at{};
-    TimePoint last_reference_detected_at{};
-    bool previously_tracked{false};
 };
 
 struct DetectionSnapshot {

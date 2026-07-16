@@ -14,11 +14,12 @@ permissions:
 
 jobs:
   windows-build:
-    name: Windows x64 ${{ matrix.configuration }}
+    name: Windows ${{ matrix.architecture }} ${{ matrix.configuration }}
     runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
+        architecture: [x64, arm64]
         configuration: [debug, release]
     steps:
       - uses: actions/checkout@v6
@@ -37,32 +38,31 @@ jobs:
           "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Configure
         shell: pwsh
-        run: cmake --preset windows-x64-${{ matrix.configuration }} -DASC_PACKAGE_VERSION="$env:RELEASE_VERSION" -DASC_SOURCE_REVISION="${{ github.sha }}"
+        run: cmake --preset windows-${{ matrix.architecture }}-${{ matrix.configuration }} -DASC_PACKAGE_VERSION="$env:RELEASE_VERSION" -DASC_SOURCE_REVISION="${{ github.sha }}"
       - name: Build
-        run: cmake --build --preset windows-x64-${{ matrix.configuration }} --parallel
+        run: cmake --build --preset windows-${{ matrix.architecture }}-${{ matrix.configuration }} --parallel
       - name: Test
+        if: matrix.architecture == 'x64'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path out/test-results | Out-Null
-          ctest --preset windows-x64-${{ matrix.configuration }} --output-junit "${{ github.workspace }}/out/test-results/windows-x64-${{ matrix.configuration }}.xml"
-      # package.ps1 maps the EXE as resource data and hashes its RCDATA without
-      # executing the app or resolving Windows 11-only imports on Server 2022.
-      - name: Package unsigned release (static payload verification)
+          ctest --preset windows-${{ matrix.architecture }}-${{ matrix.configuration }} --output-junit "${{ github.workspace }}/out/test-results/windows-${{ matrix.architecture }}-${{ matrix.configuration }}.xml"
+      - name: Package unsigned native portable release
         if: matrix.configuration == 'release'
         shell: pwsh
-        run: ./scripts/package.ps1 -Version $env:RELEASE_VERSION -SourceRevision "${{ github.sha }}"
+        run: ./scripts/package.ps1 -Architecture ${{ matrix.architecture }} -Version $env:RELEASE_VERSION -SourceRevision "${{ github.sha }}"
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: windows-x64-${{ matrix.configuration }}-test-results
+          name: windows-${{ matrix.architecture }}-${{ matrix.configuration }}-test-results
           path: out/test-results
           if-no-files-found: warn
       - name: Upload unsigned release executables
         if: matrix.configuration == 'release'
         uses: actions/upload-artifact@v7
         with:
-          name: AutomaticScreenCamera-windows-x64-unsigned
+          name: AutomaticScreenCamera-windows-${{ matrix.architecture }}-unsigned
           path: |
             out/package/*.exe
             out/package/*.sha256
@@ -71,13 +71,13 @@ jobs:
         if: matrix.configuration == 'release'
         uses: actions/upload-artifact@v7
         with:
-          name: AutomaticScreenCamera-windows-x64-symbols
+          name: AutomaticScreenCamera-windows-${{ matrix.architecture }}-symbols
           path: |
-            out/build/windows-x64-release/src/windows/Release/*.pdb
-            out/build/windows-x64-release/src/windows/media_source/Release/*.pdb
+            out/build/windows-${{ matrix.architecture }}-release/src/windows/Release/*.pdb
+            out/build/windows-${{ matrix.architecture }}-release/src/windows/media_source/Release/*.pdb
           if-no-files-found: error
       - name: Upload Windows verification tools
-        if: matrix.configuration == 'release'
+        if: matrix.configuration == 'release' && matrix.architecture == 'x64'
         uses: actions/upload-artifact@v7
         with:
           name: AutomaticScreenCamera-windows-x64-verification-tools
@@ -147,10 +147,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download Windows release package
+      - name: Download Windows release packages
         uses: actions/download-artifact@v8
         with:
-          name: AutomaticScreenCamera-windows-x64-unsigned
+          pattern: AutomaticScreenCamera-windows-*-unsigned
+          merge-multiple: true
           path: release-assets
       - name: Publish release and assets
         env:

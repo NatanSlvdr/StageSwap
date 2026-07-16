@@ -46,8 +46,6 @@ inline constexpr Size preview_resolution_cap{640, 360};
     const DashboardPresentation& presentation) noexcept;
 [[nodiscard]] Size fit_preview_size(Size source, Size bounds,
                                     Size cap = preview_resolution_cap) noexcept;
-[[nodiscard]] std::string unavailable_video_source_status(bool automatic_reconnect);
-
 [[nodiscard]] DashboardPresentation build_dashboard_presentation(
     const AppStatus& status,
     const AppConfig& config,

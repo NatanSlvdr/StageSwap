@@ -3,7 +3,6 @@
 #include "common.hpp"
 #include "status_presentation.hpp"
 #include "ui_helpers.hpp"
-#include "asc/core/deferred_trigger.hpp"
 
 #include <shellapi.h>
 #include <array>
@@ -37,7 +36,6 @@ private:
     void show_tray_menu(POINT point);
     void dispatch_command(UINT command);
     void update_tray_icon();
-    void schedule_lifecycle_recovery(std::string code, std::string message);
     [[nodiscard]] HICON make_status_icon(COLORREF color) const;
     [[nodiscard]] HBITMAP create_preview_bitmap(const PreviewImage& image) const;
     HINSTANCE instance_;
@@ -87,7 +85,6 @@ private:
     std::string displayed_technical_details_;
     bool details_expanded_{false};
     bool exiting_{false};
-    DeferredTrigger lifecycle_recovery_;
     std::string last_notified_warning_;
     std::unique_ptr<PreviewWindow> previews_;
 };

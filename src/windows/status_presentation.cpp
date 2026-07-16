@@ -37,7 +37,6 @@ const char* detection_name(const DetectionState state) {
     case DetectionState::matching: return "Detected";
     case DetectionState::not_matching: return "Not detected";
     case DetectionState::reference_missing: return "Missing";
-    case DetectionState::ambiguous: return "Ambiguous";
     }
     return "Unknown";
 }
@@ -53,11 +52,10 @@ const char* device_name(const DeviceState state) {
     return "Unknown";
 }
 
-std::string monitor_name(const std::optional<MonitorIdentity>& monitor) {
+std::string monitor_name(const std::optional<RuntimeMonitorDescriptor>& monitor) {
     if (!monitor) return "Not identified";
-    if (!monitor->model.empty()) return monitor->model;
-    if (!monitor->manufacturer.empty()) return monitor->manufacturer + " display";
-    if (!monitor->device_path.empty()) return monitor->device_path;
+    if (!monitor->label.empty()) return monitor->label;
+    if (!monitor->gdi_display_name.empty()) return monitor->gdi_display_name;
     return "Unidentified display";
 }
 
@@ -68,7 +66,7 @@ std::string video_name(const VideoSourcePresentation& video) {
 }
 
 std::string source_name(const Source source, const VideoSourcePresentation& video,
-                        const std::optional<MonitorIdentity>& monitor) {
+                        const std::optional<RuntimeMonitorDescriptor>& monitor) {
     switch (source) {
     case Source::camera: return video_name(video);
     case Source::screen: return monitor_name(monitor);
@@ -122,16 +120,6 @@ std::string short_event_line(const LogEvent& event) {
     return time.empty() ? event.message : time + "  " + event.message;
 }
 
-const MonitorObservation* tracked_observation(const AppStatus& status) {
-    if (!status.tracked_monitor) return nullptr;
-    const auto key = status.tracked_monitor->stable_key();
-    const auto found = std::find_if(status.monitor_observations.begin(), status.monitor_observations.end(),
-                                    [&key](const MonitorObservation& observation) {
-                                        return observation.identity.stable_key() == key;
-                                    });
-    return found == status.monitor_observations.end() ? nullptr : &*found;
-}
-
 } // namespace
 
 DashboardBannerVisibility dashboard_banner_visibility(
@@ -156,12 +144,6 @@ Size fit_preview_size(const Size source, const Size bounds, const Size cap) noex
     return {std::max(1U, static_cast<std::uint32_t>(static_cast<std::uint64_t>(available.height) *
                                                    source.width / source.height)),
             available.height};
-}
-
-std::string unavailable_video_source_status(const bool automatic_reconnect) {
-    return automatic_reconnect
-        ? "Saved source unavailable — reconnect will be retried automatically"
-        : "Saved source unavailable — automatic reconnect is disabled";
 }
 
 DashboardPresentation build_dashboard_presentation(const AppStatus& status, const AppConfig& config,
@@ -192,7 +174,7 @@ DashboardPresentation build_dashboard_presentation(const AppStatus& status, cons
     {
         std::ostringstream text;
         text << "Similarity: " << percent(status.detection.similarity)
-             << "\r\nThreshold: " << percent(config.detector.threshold)
+             << "\r\nThreshold: " << percent(config.similarity_threshold)
              << "\r\nConfirmations: " << status.detection.consecutive_matches << " matching / "
              << status.detection.consecutive_mismatches << " mismatching"
              << "\r\nLast detection: " << age_text(status.detection.measured_at, now, true);
@@ -202,15 +184,10 @@ DashboardPresentation build_dashboard_presentation(const AppStatus& status, cons
         std::ostringstream text;
         text << "Display: " << result.display_label;
         if (status.tracked_monitor) {
-            text << "\r\nResolution: " << status.tracked_monitor->resolution.width << " x "
-                 << status.tracked_monitor->resolution.height
-                 << "\r\nDesktop position: (" << status.tracked_monitor->desktop_x << ", "
-                 << status.tracked_monitor->desktop_y << ')';
-            if (const auto* observation = tracked_observation(status)) {
-                text << "\r\nLatest capture: " << (observation->capture_valid ? "Available" : "Unavailable")
-                     << "; similarity " << percent(observation->last_similarity)
-                     << "\r\nLast scan: " << age_text(observation->last_scanned_at, now, false);
-            }
+            text << "\r\nResolution: " << status.tracked_monitor->geometry.width << " x "
+                 << status.tracked_monitor->geometry.height
+                 << "\r\nDesktop position: (" << status.tracked_monitor->geometry.x << ", "
+                 << status.tracked_monitor->geometry.y << ')';
         }
         text << "\r\nLast full scan: " << age_text(status.last_full_scan, now, false);
         result.display_tooltip = text.str();
@@ -228,13 +205,13 @@ DashboardPresentation build_dashboard_presentation(const AppStatus& status, cons
         text << "Status: " << result.run_label << "\r\n"
              << "Mode: " << result.mode_label << "\r\n"
              << "Reference: " << result.reference_label << "    Similarity: " << percent(status.detection.similarity)
-             << "    Threshold: " << percent(config.detector.threshold) << "\r\n"
+             << "    Threshold: " << percent(config.similarity_threshold) << "\r\n"
              << "Confirmations: " << status.detection.consecutive_matches << " matching / "
              << status.detection.consecutive_mismatches << " mismatching\r\n"
              << "Tracked display: " << result.display_label;
         if (status.tracked_monitor)
-            text << " — " << status.tracked_monitor->resolution.width << " x "
-                 << status.tracked_monitor->resolution.height;
+            text << " — " << status.tracked_monitor->geometry.width << " x "
+                 << status.tracked_monitor->geometry.height;
         text << "\r\nSelected video source: " << video_name(video)
              << "\r\nAutomatic target: " << source_name(status.automatic_target, video, status.tracked_monitor)
              << "    Actual output: " << result.output_name << "\r\n"

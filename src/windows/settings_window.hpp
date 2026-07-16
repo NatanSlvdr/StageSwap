@@ -53,7 +53,6 @@ private:
     std::vector<VideoDevice> devices_;
     std::vector<std::string> video_option_ids_;
     std::vector<MonitorDevice> monitors_;
-    std::vector<MonitorObservation> monitor_observations_;
     std::unique_ptr<PreviewWindow> previews_;
     std::unique_ptr<UiFonts> fonts_;
     TooltipHost tooltips_;

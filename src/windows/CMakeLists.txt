@@ -20,6 +20,12 @@ set(ASC_WINDOWS_APP_SOURCES
 
 add_subdirectory(media_source)
 
+if(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
+    set(ASC_NATIVE_ARCH "arm64")
+else()
+    set(ASC_NATIVE_ARCH "x64")
+endif()
+
 function(asc_configure_windows_app target output_name version_resource)
     add_executable(${target} WIN32 ${ASC_WINDOWS_APP_SOURCES} ${version_resource})
     target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/include)
@@ -32,21 +38,13 @@ function(asc_configure_windows_app target output_name version_resource)
     target_link_options(${target} PRIVATE /MANIFEST:NO $<$<CONFIG:Release>:/DEBUG:FULL>)
     target_link_libraries(${target} PRIVATE
         asc_core
-        d3d11 dxgi d3dcompiler
+        d3d11 dxgi
         mf mfplat mfreadwrite mfuuid mfsensorgroup
-        windowsapp runtimeobject shcore setupapi cfgmgr32 bcrypt
-        comctl32 comdlg32 shell32 ole32 user32 gdi32 advapi32 windowscodecs wtsapi32
+        windowsapp runtimeobject shcore bcrypt
+        comctl32 comdlg32 shell32 ole32 user32 gdi32 advapi32 windowscodecs
     )
     set_target_properties(${target} PROPERTIES OUTPUT_NAME "${output_name}")
 endfunction()
-
-set(ASC_VERSION_FILE_TYPE VFT_APP)
-set(ASC_VERSION_DESCRIPTION "Automatic Screen Camera")
-set(ASC_VERSION_INTERNAL_NAME "AutomaticScreenCamera")
-set(ASC_VERSION_ORIGINAL_FILENAME "AutomaticScreenCamera.exe")
-set(app_version_resource "${CMAKE_CURRENT_BINARY_DIR}/AutomaticScreenCamera.version.rc")
-configure_file("${PROJECT_SOURCE_DIR}/cmake/version.rc.in" "${app_version_resource}" @ONLY)
-asc_configure_windows_app(AutomaticScreenCamera AutomaticScreenCamera "${app_version_resource}")
 
 set(portable_resource "${CMAKE_CURRENT_BINARY_DIR}/AutomaticScreenCameraPortable.payload.rc")
 set(portable_header "${CMAKE_CURRENT_BINARY_DIR}/portable_payload.hpp")
@@ -60,6 +58,7 @@ add_custom_command(
         "-DREVISION=${ASC_SOURCE_REVISION}"
         "-DCONFIGURATION=$<CONFIG>"
         "-DWINDOWS_SDK=${CMAKE_SYSTEM_VERSION}"
+        "-DARCHITECTURE=${ASC_NATIVE_ARCH}"
         -P "${PROJECT_SOURCE_DIR}/cmake/GeneratePortableResource.cmake"
     DEPENDS AutomaticScreenCameraSource "${PROJECT_SOURCE_DIR}/cmake/GeneratePortableResource.cmake"
     VERBATIM
@@ -68,10 +67,10 @@ set_source_files_properties("${portable_resource}" "${portable_header}" PROPERTI
 
 set(ASC_VERSION_DESCRIPTION "Automatic Screen Camera Portable")
 set(ASC_VERSION_INTERNAL_NAME "AutomaticScreenCameraPortable")
-set(ASC_VERSION_ORIGINAL_FILENAME "AutomaticScreenCameraPortable.exe")
+set(ASC_VERSION_ORIGINAL_FILENAME "windows-${ASC_NATIVE_ARCH}-portable.exe")
 set(portable_version_resource "${CMAKE_CURRENT_BINARY_DIR}/AutomaticScreenCameraPortable.version.rc")
 configure_file("${PROJECT_SOURCE_DIR}/cmake/version.rc.in" "${portable_version_resource}" @ONLY)
-asc_configure_windows_app(AutomaticScreenCameraPortable AutomaticScreenCameraPortable "${portable_version_resource}")
+asc_configure_windows_app(AutomaticScreenCameraPortable "windows-${ASC_NATIVE_ARCH}-portable" "${portable_version_resource}")
 target_sources(AutomaticScreenCameraPortable PRIVATE "${portable_resource}" "${portable_header}")
 target_include_directories(AutomaticScreenCameraPortable PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_definitions(AutomaticScreenCameraPortable PRIVATE ASC_PORTABLE_BUILD)

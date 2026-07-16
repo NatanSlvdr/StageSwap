@@ -1,10 +1,8 @@
 #pragma once
 
-#include "d3d_device.hpp"
 #include "video_frame.hpp"
 
 #include <condition_variable>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -42,39 +40,22 @@ struct CpuSharedFrame {
 
 class SharedFramePublisher {
 public:
-    SharedFramePublisher(D3DDevice& d3d, Size maximum_size, std::wstring pipe_name);
+    SharedFramePublisher(Size maximum_size, std::wstring pipe_name);
     ~SharedFramePublisher();
     SharedFramePublisher(const SharedFramePublisher&) = delete;
     SharedFramePublisher& operator=(const SharedFramePublisher&) = delete;
     void publish(const VideoFrame& frame);
     void invalidate();
-    void reset_device();
     [[nodiscard]] const std::wstring& pipe_name() const noexcept { return pipe_name_; }
 
 private:
-    struct ReadbackSlot {
-        ComPtr<ID3D11Texture2D> texture;
-        ComPtr<ID3D11Query> ready;
-        Size size{};
-        std::int64_t timestamp_100ns{0};
-        std::uint64_t submission{0};
-        bool pending{false};
-    };
-    [[nodiscard]] bool collect_oldest_readback();
-    void prepare_readback(ReadbackSlot& slot, ID3D11Texture2D* source, Size size);
     void server_loop(std::stop_token stop);
-    D3DDevice& d3d_;
     std::size_t slot_capacity_;
     std::wstring pipe_name_;
-    std::array<ReadbackSlot, 3> readbacks_;
-    std::uint64_t next_submission_{1};
-    std::size_t next_readback_{0};
-    std::mutex readback_mutex_;
     std::mutex frame_mutex_;
     std::condition_variable_any frame_ready_;
     SharedFramePacket latest_packet_;
     std::vector<std::uint8_t> latest_pixels_;
-    std::vector<std::uint8_t> staging_pixels_;
     std::jthread server_thread_;
 };
 
