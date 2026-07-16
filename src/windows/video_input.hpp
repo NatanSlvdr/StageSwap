@@ -3,6 +3,7 @@
 #include "common.hpp"
 #include "video_frame.hpp"
 
+#include <mfidl.h>
 #include <mfreadwrite.h>
 #include <atomic>
 #include <condition_variable>
