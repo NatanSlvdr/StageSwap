@@ -4,8 +4,8 @@ Automatic Screen Camera is a local-only Windows 11 application that publishes a 
 
 Download the executable matching the computer's native architecture:
 
-- `windows-x64-portable.exe`
-- `windows-arm64-portable.exe`
+- [windows-x64-portable.exe](https://github.com/NatanSlvdr/WebcamSwitcher/releases/latest/download/windows-x64-portable.exe)
+- [windows-arm64-portable.exe](https://github.com/NatanSlvdr/WebcamSwitcher/releases/latest/download/windows-arm64-portable.exe)
 
 Each is a self-deploying portable executable. First launch requests administrator permission to extract and register its matching Media Foundation source DLL. Later launches do not require elevation. Cross-architecture deployment is rejected; x64 on ARM64 emulation is not supported.
 
