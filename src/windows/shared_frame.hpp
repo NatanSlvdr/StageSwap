@@ -74,7 +74,7 @@ private:
     mutable std::mutex mutex_;
     CpuSharedFrame latest_;
     std::vector<std::uint8_t> receive_buffer_;
-    ULONGLONG received_tick_{0};
+    std::uint64_t received_tick_{0};
     std::jthread reader_thread_;
 };
 

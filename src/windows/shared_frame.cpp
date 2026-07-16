@@ -1,6 +1,7 @@
 #include "shared_frame.hpp"
 #include "asc/core/shared_frame_validation.hpp"
 
+#include <windows.h>
 #include <sddl.h>
 #include <algorithm>
 #include <cstring>
