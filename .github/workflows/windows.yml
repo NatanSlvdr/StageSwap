@@ -12,6 +12,7 @@ concurrency:
 
 permissions:
   contents: read
+  checks: write
 
 jobs:
   portable-checks:
@@ -31,6 +32,9 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # quick-xml is used only by Wayland's build-time protocol scanner;
+          # the application never parses untrusted XML at runtime.
+          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
 
   windows:
     name: Windows ${{ matrix.architecture }} ${{ matrix.profile }}
