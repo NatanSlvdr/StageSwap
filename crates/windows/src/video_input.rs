@@ -43,6 +43,14 @@ pub fn enumerate_video_devices() -> Result<Vec<InputDevice>, String> {
     unsafe { MFEnumDeviceSources(&attributes, &mut raw, &mut count) }
         .map_err(|error| format!("could not enumerate video devices: {error}"))?;
     let mut result = Vec::with_capacity(count as usize);
+    if count == 0 {
+        // Media Foundation may represent an empty array with a null pointer.
+        unsafe { CoTaskMemFree((!raw.is_null()).then_some(raw.cast())) };
+        return Ok(result);
+    }
+    if raw.is_null() {
+        return Err("video device enumeration returned an empty array pointer".into());
+    }
     // SAFETY: MFEnumDeviceSources returned an array of count COM interface slots.
     let activations = unsafe { core::slice::from_raw_parts_mut(raw, count as usize) };
     for activation in activations {
@@ -75,6 +83,13 @@ fn allocated_string(activation: &IMFActivate, key: &windows_core::GUID) -> Optio
     let mut length = 0;
     // SAFETY: both output pointers are writable and value is freed below.
     if unsafe { activation.GetAllocatedString(key, &mut value, &mut length) }.is_err() {
+        return None;
+    }
+    if length == 0 {
+        unsafe { CoTaskMemFree((!value.is_null()).then_some(value.0.cast())) };
+        return Some(String::new());
+    }
+    if value.is_null() {
         return None;
     }
     // SAFETY: GetAllocatedString returned `length` UTF-16 code units.
