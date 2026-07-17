@@ -4,19 +4,69 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use windows::Win32::Foundation::{CloseHandle, E_NOTIMPL, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Media::MediaFoundation::{
     IMFAsyncCallback, IMFAsyncCallback_Impl, IMFAsyncResult, IMFMediaEvent, IMFVirtualCamera,
-    MEError, MF_VERSION, MFCreateVirtualCamera, MFSTARTUP_FULL, MFShutdown, MFStartup,
-    MFVirtualCameraAccess_CurrentUser, MFVirtualCameraLifetime_System,
-    MFVirtualCameraType_SoftwareCameraSource,
+    MEError, MF_VERSION, MFSTARTUP_FULL, MFShutdown, MFStartup, MFVirtualCameraAccess,
+    MFVirtualCameraAccess_CurrentUser, MFVirtualCameraLifetime, MFVirtualCameraLifetime_System,
+    MFVirtualCameraType, MFVirtualCameraType_SoftwareCameraSource,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use windows_core::{Error, GUID, Interface, PCWSTR, PWSTR, Ref, implement};
+use windows_core::{Error, GUID, HRESULT, Interface, PCSTR, PCWSTR, PWSTR, Ref, implement};
 
 const SOURCE_ID: &str = "{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}";
 const PIPE_ATTRIBUTE: GUID = GUID::from_u128(0x905306dd_b9a3_4385_a273_606e05b3208b);
 const PLACEHOLDER_ATTRIBUTE: GUID = GUID::from_u128(0x05cd1551_bfc8_4276_8e0b_70ba4065822e);
+
+type CreateVirtualCamera = unsafe extern "system" fn(
+    MFVirtualCameraType,
+    MFVirtualCameraLifetime,
+    MFVirtualCameraAccess,
+    PCWSTR,
+    PCWSTR,
+    *const GUID,
+    u32,
+    *mut *mut c_void,
+) -> HRESULT;
+
+fn create_virtual_camera(
+    friendly_name: PCWSTR,
+    source_id: PCWSTR,
+) -> Result<IMFVirtualCamera, String> {
+    let library_name = wide("mfsensorgroup.dll");
+    // Keep the module loaded because the returned COM object owns a vtable from it.
+    let library = unsafe { LoadLibraryW(PCWSTR(library_name.as_ptr())) }
+        .map_err(|error| format!("Windows virtual cameras are unavailable: {error}"))?;
+    // SAFETY: the symbol has the signature published for MFCreateVirtualCamera.
+    let create: CreateVirtualCamera = unsafe {
+        std::mem::transmute(
+            GetProcAddress(library, PCSTR(c"MFCreateVirtualCamera".as_ptr().cast()))
+                .ok_or("Windows 11 virtual camera support is not installed")?,
+        )
+    };
+    let mut camera = std::ptr::null_mut();
+    let result = unsafe {
+        create(
+            MFVirtualCameraType_SoftwareCameraSource,
+            MFVirtualCameraLifetime_System,
+            MFVirtualCameraAccess_CurrentUser,
+            friendly_name,
+            source_id,
+            std::ptr::null(),
+            0,
+            &mut camera,
+        )
+    };
+    result
+        .ok()
+        .map_err(|error| format!("could not create virtual camera: {error}"))?;
+    if camera.is_null() {
+        return Err("Windows returned an empty virtual camera controller".into());
+    }
+    // SAFETY: a successful call returned ownership of an IMFVirtualCamera pointer.
+    Ok(unsafe { IMFVirtualCamera::from_raw(camera) })
+}
 
 struct OwnedHandle(HANDLE);
 
@@ -148,18 +198,7 @@ impl VirtualCameraController {
     fn open(&mut self) -> Result<(), String> {
         let friendly = wide("Automatic Screen Camera");
         let source = wide(SOURCE_ID);
-        // SAFETY: both strings are terminated and remain live through the call.
-        let camera = unsafe {
-            MFCreateVirtualCamera(
-                MFVirtualCameraType_SoftwareCameraSource,
-                MFVirtualCameraLifetime_System,
-                MFVirtualCameraAccess_CurrentUser,
-                PCWSTR(friendly.as_ptr()),
-                PCWSTR(source.as_ptr()),
-                None,
-            )
-        }
-        .map_err(|error| format!("could not create virtual camera: {error}"))?;
+        let camera = create_virtual_camera(PCWSTR(friendly.as_ptr()), PCWSTR(source.as_ptr()))?;
         let pipe = wide(&self.pipe_name);
         // SAFETY: attributes and terminated string are valid for each call.
         (|| -> windows_core::Result<()> {
@@ -241,17 +280,8 @@ pub fn remove_virtual_camera() -> Result<(), String> {
     let result = (|| {
         let friendly = wide("Automatic Screen Camera");
         let source = wide(SOURCE_ID);
-        let camera = unsafe {
-            MFCreateVirtualCamera(
-                MFVirtualCameraType_SoftwareCameraSource,
-                MFVirtualCameraLifetime_System,
-                MFVirtualCameraAccess_CurrentUser,
-                PCWSTR(friendly.as_ptr()),
-                PCWSTR(source.as_ptr()),
-                None,
-            )
-        }
-        .map_err(|error| format!("could not open virtual camera registration: {error}"))?;
+        let camera = create_virtual_camera(PCWSTR(friendly.as_ptr()), PCWSTR(source.as_ptr()))
+            .map_err(|error| format!("could not open virtual camera registration: {error}"))?;
         (|| -> windows_core::Result<()> {
             // SAFETY: camera is a live controller created on this thread.
             unsafe {
