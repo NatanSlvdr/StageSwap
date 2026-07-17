@@ -12,9 +12,12 @@ foreach ($architecture in @('x64', 'arm64')) {
     Add-Gate "$architecture Debug build and tests" ([bool]$entry.debug_tests_passed) "passed=$($entry.debug_tests_passed)"
     Add-Gate "$architecture Release build and tests" ([bool]$entry.release_tests_passed) "passed=$($entry.release_tests_passed)"
     Add-Gate "$architecture package validation" ([bool]$entry.package_validation_passed) "passed=$($entry.package_validation_passed)"
+    Add-Gate "$architecture interactive Windows tests" ([bool]$entry.interactive_windows_tests_passed) "passed=$($entry.interactive_windows_tests_passed)"
     Add-Gate "$architecture Windows 11 VM acceptance" ([bool]$entry.vm_acceptance_passed) "passed=$($entry.vm_acceptance_passed)"
     Add-Gate "$architecture physical smoke test" ([bool]$entry.physical_smoke_passed) "passed=$($entry.physical_smoke_passed)"
 }
+Add-Gate 'C++ reference screenshots at 100% and 150% DPI captured' ([bool]$manifest.reference_screenshots_100_150_captured) "passed=$($manifest.reference_screenshots_100_150_captured)"
+Add-Gate 'Rust UI visual comparison at 100% and 150% DPI' ([bool]$manifest.ui_visual_comparison_passed) "passed=$($manifest.ui_visual_comparison_passed)"
 Add-Gate 'Windows Camera negotiation' ([bool]$manifest.windows_camera_formats_passed) "passed=$($manifest.windows_camera_formats_passed)"
 Add-Gate 'Zoom negotiation' ([bool]$manifest.zoom_formats_passed) "passed=$($manifest.zoom_formats_passed)"
 Add-Gate 'No unresolved retained-workflow failures' (@($manifest.unresolved_product_failures).Count -eq 0) "$(@($manifest.unresolved_product_failures).Count) unresolved"

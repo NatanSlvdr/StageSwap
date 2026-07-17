@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/app",
+    "crates/core",
+    "crates/media-source",
+    "crates/windows",
+    "xtask",
+]
+default-members = ["crates/core", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0"
+eframe = { version = "0.35", default-features = false, features = ["wgpu"] }
+image = { version = "0.25.10", default-features = false, features = ["bmp", "jpeg", "png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.150"
+tray-icon = "0.24"
+windows = "0.62.2"
+windows-core = "0.62.2"
+
+[profile.release]
+panic = "abort"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

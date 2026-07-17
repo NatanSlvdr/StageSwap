@@ -1,13 +1,18 @@
 # Requirements traceability
 
-| Contract | Implementation | Verification |
+| Contract | Rust implementation | Verification |
 |---|---|---|
-| CPU BGRA frame, fixed 720p30 | `asc/core/frame.*`, `video_input`, `screen_capture` | frame, stale-frame, and Windows capture tests |
-| CPU fit, letterbox, placeholder, blend | `asc/core/frame.cpp`, `compositor.cpp` | portable unit tests |
-| Fixed detector debounce | `detector`, `App::detector_loop` | five-match/three-mismatch unit test |
-| Two-scan runtime monitor selection | `RuntimeMonitorDescriptor`, `MonitorTracker`, `full_monitor_scan` | monitor unit and VM acceptance |
-| Missing/unavailable fallbacks | `DecisionEngine`, CPU compositor | decision and placeholder unit tests |
-| Schema v2 migration | `ConfigStore` | v1 import and removed-field serialization tests |
-| Manual lifecycle only | tray/settings commands, no recovery worker | code review and acceptance |
-| Portable native x64/ARM64 | deployment validation, CMake presets, `package.ps1` | PE validation and first-run/cleanup acceptance |
-| Consumer 720p/1080p RGB32/NV12 | media-source stream | Windows Camera and Zoom probes |
+| Immutable BGRA frame, fixed 720p30 | `asc-core::Frame`, app compositor | invalid-frame, fit, blend tests |
+| Saved-then-unique webcam, no rediscovery loop | `MediaFoundationVideoInput`, `choose_video_device` | selection test and Windows acceptance |
+| Windows Graphics Capture and cursor option | `WindowsGraphicsScreenInput` | x64/ARM64 builds and Windows capture acceptance |
+| Reference detection 250 ms, 5/3 debounce | runtime detector, `DebouncedDetector` | debounce test and switching acceptance |
+| Two-scan monitor selection | `MonitorTracker`, runtime 30-second scanner | monitor test and multi-monitor acceptance |
+| Fallbacks and reversible fade | `decide`, `TransitionController`, `Frame::blend` | decision and reversal tests |
+| Isolated schema 1, backup, atomic Windows save | `ConfigStore`, `save_config_atomic` | round-trip/corruption tests |
+| Strict 40-byte bounded IPC and two-second expiry | `FrameHeader`, `SharedFrameCache`, `FramePublisher` | IPC tests |
+| Rust COM source and required interfaces | `asc-media-source::com_server` | Windows COM/source-state tests |
+| RGB32 1280×720@30 only | `MediaStream` media type | MF probe, Windows Camera, Zoom |
+| Native portable x64/ARM64 | deployment module, embedded manifest/version, and `xtask portable` | PE/payload validation, first-run and cleanup |
+| UI, tray, previews, notifications, logs, four restarts | `automatic-screen-camera` | headless 100%/150% render tests, native ignored tests, screenshot comparison, and acceptance checklist |
+
+Interactive Windows hardware tests for 300-frame cursor-on/off capture, repeated webcam start/stop with stale-frame clearing, and virtual-camera restart are present as ignored tests. Run them explicitly on the release machines described in `ACCEPTANCE_TESTS.md`; CI cross-compilation verifies them on both Windows targets without treating hosted runners as camera/display hardware.

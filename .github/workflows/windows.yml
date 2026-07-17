@@ -1,9 +1,8 @@
-name: Build, test, and package
+name: Rust build, test, and package
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -15,175 +14,115 @@ permissions:
   contents: read
 
 jobs:
-  release-metadata:
-    name: Resolve release version
+  portable-checks:
+    name: Portable Rust checks
     runs-on: ubuntu-24.04
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
-      publish: ${{ steps.version.outputs.publish }}
     steps:
       - uses: actions/checkout@v6
+      - name: Install pinned Rust
+        run: rustup show
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Unit tests
+        run: cargo test --workspace --all-targets
+      - name: Dependency audit
+        uses: rustsec/audit-check@v2
         with:
-          fetch-depth: 0
-      - name: Calculate next patch version
-        id: version
-        shell: bash
-        run: |
-          latest_tag="$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)"
-          if [[ -z "$latest_tag" ]]; then
-            version="0.1.0"
-          else
-            IFS='.' read -r major minor patch <<< "${latest_tag#v}"
-            version="$major.$minor.$((patch + 1))"
-          fi
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-          publish=false
-          if [[ "$GITHUB_REF" == "refs/heads/main" && \
-                ( "$GITHUB_EVENT_NAME" == "push" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ) ]]; then
-            publish=true
-          fi
-
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          echo "publish=$publish" >> "$GITHUB_OUTPUT"
-
-  windows-build:
-    name: Windows ${{ matrix.architecture }} ${{ matrix.configuration }}
-    needs: release-metadata
+  windows:
+    name: Windows ${{ matrix.architecture }} ${{ matrix.profile }}
     runs-on: windows-2022
-    env:
-      RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
         architecture: [x64, arm64]
-        configuration: [debug, release]
+        profile: [debug, release]
+        include:
+          - architecture: x64
+            target: x86_64-pc-windows-msvc
+            msvc-arch: amd64
+          - architecture: arm64
+            target: aarch64-pc-windows-msvc
+            msvc-arch: amd64_arm64
     steps:
       - uses: actions/checkout@v6
-      - name: Configure
+      - name: Select Windows SDK 10.0.22621.0
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc-arch }}
+          sdk: 10.0.22621.0
+      - name: Install native Rust target
         shell: pwsh
-        run: cmake --preset windows-${{ matrix.architecture }}-${{ matrix.configuration }} -DASC_PACKAGE_VERSION="$env:RELEASE_VERSION" -DASC_SOURCE_REVISION="${{ github.sha }}"
+        run: rustup target add ${{ matrix.target }}
+      - name: Clippy
+        if: matrix.profile == 'debug'
+        run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
       - name: Build
-        run: cmake --build --preset windows-${{ matrix.architecture }}-${{ matrix.configuration }} --parallel
-      - name: Test
+        shell: pwsh
+        run: |
+          if ('${{ matrix.profile }}' -eq 'release') {
+            cargo build --workspace --target ${{ matrix.target }} --release
+          } else {
+            cargo build --workspace --target ${{ matrix.target }}
+          }
+      - name: Run Windows x64 tests
         if: matrix.architecture == 'x64'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path out/test-results | Out-Null
-          ctest --preset windows-${{ matrix.architecture }}-${{ matrix.configuration }} --output-junit "${{ github.workspace }}/out/test-results/windows-${{ matrix.architecture }}-${{ matrix.configuration }}.xml"
-      - name: Package unsigned native portable release
-        if: matrix.configuration == 'release'
-        shell: pwsh
-        run: ./scripts/package.ps1 -Architecture ${{ matrix.architecture }} -Version $env:RELEASE_VERSION -SourceRevision "${{ github.sha }}"
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: windows-${{ matrix.architecture }}-${{ matrix.configuration }}-test-results
-          path: out/test-results
-          if-no-files-found: warn
-      - name: Upload unsigned release executables
-        if: matrix.configuration == 'release'
+          if ('${{ matrix.profile }}' -eq 'release') {
+            cargo test --workspace --all-targets --target ${{ matrix.target }} --release
+          } else {
+            cargo test --workspace --all-targets --target ${{ matrix.target }}
+          }
+      - name: Package portable executable
+        if: matrix.profile == 'release'
+        run: cargo run -p xtask -- portable ${{ matrix.architecture }} dist
+      - name: Upload unsigned portable artifact
+        if: matrix.profile == 'release'
         uses: actions/upload-artifact@v7
         with:
           name: AutomaticScreenCamera-windows-${{ matrix.architecture }}-unsigned
           path: |
-            out/package/*.exe
-            out/package/*.sha256
+            dist/*.exe
+            dist/*.sha256
           if-no-files-found: error
-      - name: Upload Windows application symbols
-        if: matrix.configuration == 'release'
-        uses: actions/upload-artifact@v7
-        with:
-          name: AutomaticScreenCamera-windows-${{ matrix.architecture }}-symbols
-          path: |
-            out/build/windows-${{ matrix.architecture }}-release/src/windows/Release/*.pdb
-            out/build/windows-${{ matrix.architecture }}-release/src/windows/media_source/Release/*.pdb
-          if-no-files-found: error
-      - name: Upload Windows verification tools
-        if: matrix.configuration == 'release' && matrix.architecture == 'x64'
-        uses: actions/upload-artifact@v7
-        with:
-          name: AutomaticScreenCamera-windows-x64-verification-tools
-          path: |
-            out/build/windows-x64-release/tests/windows/Release/*.exe
-            out/build/windows-x64-release/tests/windows/Release/*.pdb
-            scripts/collect-release-environment.ps1
-            scripts/evaluate-release-gates.ps1
-            docs/release-evidence.example.json
-          if-no-files-found: error
-
-  portable-sanitizers:
-    name: Portable core tests (ASan/UBSan)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-      - name: Configure
-        run: cmake --preset portable-asan
-      - name: Build
-        run: cmake --build --preset portable-asan --parallel
-      - name: Test
-        env:
-          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: |
-          mkdir -p out/test-results
-          ctest --preset portable-asan --output-junit "${{ github.workspace }}/out/test-results/portable-asan.xml"
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: portable-asan-test-results
-          path: out/test-results
-          if-no-files-found: warn
-
-  portable-thread-sanitizer:
-    name: Portable concurrency tests (TSan)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-      - name: Configure
-        run: cmake --preset portable-tsan
-      - name: Build
-        run: cmake --build --preset portable-tsan --parallel
-      - name: Test
-        env:
-          TSAN_OPTIONS: halt_on_error=1
-        run: |
-          mkdir -p out/test-results
-          ctest --preset portable-tsan --output-junit "${{ github.workspace }}/out/test-results/portable-tsan.xml"
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: portable-tsan-test-results
-          path: out/test-results
-          if-no-files-found: warn
 
   publish-release:
-    name: Publish GitHub release
-    if: needs.release-metadata.outputs.publish == 'true'
-    needs:
-      - release-metadata
-      - windows-build
-      - portable-sanitizers
-      - portable-thread-sanitizer
+    name: Publish unsigned release
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [portable-checks, windows]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - name: Download Windows release packages
+      - name: Download portable artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: AutomaticScreenCamera-windows-*-unsigned
           merge-multiple: true
           path: release-assets
-      - name: Publish release and assets
+      - name: Resolve next patch tag
+        id: tag
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.release-metadata.outputs.tag }}
+        run: |
+          latest="$(gh release list --limit 100 --json tagName --jq '.[].tagName' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          if [[ -z "$latest" ]]; then
+            next="v0.1.0"
+          else
+            IFS='.' read -r major minor patch <<< "${latest#v}"
+            next="v${major}.${minor}.$((patch + 1))"
+          fi
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+      - name: Publish release and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
         run: |
           gh release create "$RELEASE_TAG" \
             release-assets/*.exe \

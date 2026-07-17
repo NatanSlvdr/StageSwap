@@ -5,6 +5,7 @@
       "debug_tests_passed": false,
       "release_tests_passed": false,
       "package_validation_passed": false,
+      "interactive_windows_tests_passed": false,
       "vm_acceptance_passed": false,
       "physical_smoke_passed": false
     },
@@ -12,10 +13,13 @@
       "debug_tests_passed": false,
       "release_tests_passed": false,
       "package_validation_passed": false,
+      "interactive_windows_tests_passed": false,
       "vm_acceptance_passed": false,
       "physical_smoke_passed": false
     }
   },
+  "reference_screenshots_100_150_captured": false,
+  "ui_visual_comparison_passed": false,
   "windows_camera_formats_passed": false,
   "zoom_formats_passed": false,
   "unresolved_product_failures": []

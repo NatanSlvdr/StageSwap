@@ -1,52 +1,46 @@
 # Automatic Screen Camera
 
-Automatic Screen Camera is a local-only Windows 11 application that publishes a virtual camera. In Automatic mode it shows a selected webcam while a saved visual reference is detected on the selected monitor, and otherwise shows that monitor. Force Webcam and Force Screen provide manual overrides. Changes use a reversible 500 ms fade.
+Automatic Screen Camera is a local-only Windows 11 virtual camera written in Rust. Automatic mode shows the webcam while a saved visual reference matches a monitor and otherwise shows that monitor. Force Webcam and Force Screen are manual overrides; changes use a reversible 500 ms fade.
 
 Download the executable matching the computer's native architecture:
 
-- [windows-x64-portable.exe](https://github.com/NatanSlvdr/WebcamSwitcher/releases/latest/download/windows-x64-portable.exe)
-- [windows-arm64-portable.exe](https://github.com/NatanSlvdr/WebcamSwitcher/releases/latest/download/windows-arm64-portable.exe)
+- `windows-x64-portable.exe`
+- `windows-arm64-portable.exe`
 
-Each is a self-deploying portable executable. First launch requests administrator permission to extract and register its matching Media Foundation source DLL. Later launches do not require elevation. Cross-architecture deployment is rejected; x64 on ARM64 emulation is not supported.
-
-Before deleting the executable, exit the tray application and clean up its registered payload:
+Each EXE embeds its same-architecture Rust Media Foundation DLL. First launch requests elevation only to extract and register the DLL under `%ProgramFiles%\Automatic Screen Camera Rust Portable`; later launches run unelevated. Before deleting the EXE, exit the tray application and run:
 
 ```powershell
 .\windows-x64-portable.exe --cleanup-portable
 ```
 
-Use `windows-arm64-portable.exe` in that command on ARM64 Windows.
+Use the ARM64 artifact on ARM64 Windows. The old product is a separate installation: if it remains installed, run that old executable's `--cleanup-portable`; this version never imports or removes old data.
 
-## Retained contract
+## Product contract
 
-- Windows 11 build 22000 or later.
-- CPU BGRA pipeline fixed at 1280×720 and 30 fps after Windows Graphics Capture reads each transient D3D texture into memory.
-- Webcam requested through Media Foundation as RGB32 1280×720 at 30 fps.
-- CPU grayscale reference detection every 250 ms, with five matches and three mismatches.
-- All monitors scanned at startup, every 30 seconds, and on Rescan. The highest score above the threshold must win two consecutive scans.
-- CPU aspect-fit scaling, black letterboxing, placeholder fallback, and a reversible 500 ms blend.
-- Virtual-camera consumers may negotiate RGB32 or NV12 at 720p or 1080p; the media source retains output scaling and placeholder generation.
-- Manual webcam, screen-capture, virtual-camera, and all-component restarts. A removed D3D device requires relaunching the application.
+- Windows 11, native x64 or ARM64.
+- Immutable CPU BGRA frames and output fixed at 1280×720, 30 fps.
+- Media Foundation webcam input, Windows Graphics Capture screen input, synchronous bounded channels, and no Tokio.
+- Reference detection every 250 ms with 5-match/3-mismatch debounce; monitor discovery at startup, every 30 seconds, and on Rescan requires the same winner twice.
+- CPU aspect-fit, black letterboxing, placeholder fallback, and reversible 500 ms blend.
+- The virtual camera advertises only RGB32 1280×720 at 30 fps. NV12 720p is added only if Windows Camera or Zoom proves it necessary; 1080p is excluded.
+- Dashboard, five settings tabs, four previews, tray/close-to-tray, warning notifications, exit confirmation, 14-day JSONL logs, and webcam/screen/virtual/all restarts.
+- No hot-plug manager, sleep/resume recovery, docking recovery, dynamic formats, OBS integration, or kernel driver.
 
-Configuration, references, and 14 days of logs are stored beneath `%LocalAppData%\AutomaticScreenCamera`. Frames are not recorded or uploaded. Configuration schema v2 imports retained v1 values and drops removed settings on the next save.
+Configuration schema 1, references, and logs live under `%LocalAppData%\AutomaticScreenCameraRust`. Frames are not recorded or uploaded.
 
-## Build and package
+## Build, test, and package
 
-Install Visual Studio 2022 with Desktop development with C++ and Windows SDK 10.0.22621.0.
+Install Rust 1.97.1 and Visual Studio 2022 Build Tools with Windows SDK 10.0.22621.0. The pinned toolchain file selects the Rust version. Run packaging from a Developer PowerShell where `WindowsSDKVersion` is `10.0.22621.0\\`; `xtask` rejects any missing or different SDK instead of writing misleading artifact metadata.
 
 ```powershell
-cmake --preset windows-x64-release
-cmake --build --preset windows-x64-release --parallel
-ctest --preset windows-x64-release
-
-cmake --preset windows-arm64-release
-cmake --build --preset windows-arm64-release --parallel
-ctest --preset windows-arm64-release
-
-.\scripts\package.ps1 -Architecture x64 -Version 0.1.0
-.\scripts\package.ps1 -Architecture arm64 -Version 0.1.0
+rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+cargo test --workspace --all-targets --target x86_64-pc-windows-msvc
+cargo run -p xtask -- portable x64 dist
+cargo run -p xtask -- portable arm64 dist
 ```
 
-Packaging validates the PE machine type of both the executable and embedded camera-source DLL before producing the two portable artifacts and SHA-256 sidecars.
+`xtask` builds and validates the DLL first, embeds it into the matching EXE, validates both PE machine types and the embedded payload, and emits each EXE with a SHA-256 sidecar. Windows builds also embed an `asInvoker`, Per-Monitor-V2 manifest and executable version metadata.
 
-See [architecture](docs/ARCHITECTURE.md), [acceptance tests](docs/ACCEPTANCE_TESTS.md), and [release gates](docs/RELEASE_GATES.md).
+See [architecture](docs/ARCHITECTURE.md), [acceptance tests](docs/ACCEPTANCE_TESTS.md), [release gates](docs/RELEASE_GATES.md), and [rewrite scope](docs/RUST_REWRITE_SCOPE.md).

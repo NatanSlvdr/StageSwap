@@ -1,7 +1,0 @@
-LIBRARY "AutomaticScreenCameraSource"
-
-EXPORTS
-    DllCanUnloadNow
-    DllGetClassObject
-    DllRegisterServer
-    DllUnregisterServer
