@@ -293,4 +293,36 @@ mod tests {
         assert_eq!(DllCanUnloadNow(), S_OK);
         Ok(())
     }
+
+    #[test]
+    fn releasing_activation_does_not_shutdown_activated_source() -> windows_core::Result<()> {
+        let _test_lock = TEST_LOCK.lock().expect("media-source test lock poisoned");
+        // SAFETY: initializes Media Foundation for the activation test.
+        unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
+        let _foundation = MediaFoundation;
+        let mut raw = core::ptr::null_mut();
+        // SAFETY: all GUID inputs and the output slot remain valid for the call.
+        unsafe { DllGetClassObject(&SOURCE_CLSID, &IClassFactory::IID, &mut raw) }.ok()?;
+        // SAFETY: DllGetClassObject returned an owned IClassFactory pointer.
+        let factory = unsafe { IClassFactory::from_raw(raw) };
+        // SAFETY: the factory creates a non-aggregated owned activation object.
+        let activation: IMFActivate = unsafe { factory.CreateInstance(None::<&IUnknown>)? };
+        // SAFETY: ActivateObject returns an owned interface implemented by MediaSource.
+        let source: IMFMediaSourceEx = unsafe { activation.ActivateObject()? };
+
+        // Windows can release IMFActivate while IMFVirtualCamera::Start continues
+        // using the activated source. The source must remain usable in that case.
+        drop(activation);
+        assert_eq!(
+            unsafe { source.GetCharacteristics()? },
+            MFMEDIASOURCE_IS_LIVE.0 as u32
+        );
+
+        // SAFETY: source is live and shutdown breaks its source/stream ownership cycle.
+        unsafe { source.Shutdown()? };
+        drop(source);
+        drop(factory);
+        assert_eq!(DllCanUnloadNow(), S_OK);
+        Ok(())
+    }
 }

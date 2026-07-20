@@ -109,7 +109,7 @@ checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 
 [[package]]
 name = "asc-core"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "asc-media-source"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "asc-core",
  "windows",
@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "asc-windows"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "asc-core",
  "windows",
@@ -181,7 +181,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "automatic-screen-camera"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "asc-core",
  "asc-windows",
@@ -4237,7 +4237,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "tempfile",

@@ -33,12 +33,11 @@ impl Activation {
 
 impl Drop for Activation {
     fn drop(&mut self) {
-        if let Ok(active) = self.active_source.get_mut()
-            && let Some(source) = active.take()
-        {
-            // SAFETY: best-effort cycle breaking during final COM release.
-            let _ = unsafe { source.Shutdown() };
-        }
+        // Releasing an activation object must not shut down a media source that
+        // the Frame Server still owns. In particular, Windows may release the
+        // activation object while IMFVirtualCamera::Start is still initializing
+        // that source; calling Shutdown here makes Start fail with MF_E_SHUTDOWN.
+        // The source's IMFMediaSource::Shutdown implementation owns its lifecycle.
         OBJECTS.fetch_sub(1, Ordering::Release);
     }
 }
