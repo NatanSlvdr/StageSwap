@@ -1,10 +1,12 @@
 use core::ffi::c_void;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use windows::Win32::Foundation::{CloseHandle, E_NOTIMPL, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Media::MediaFoundation::{
     IMFAsyncCallback, IMFAsyncCallback_Impl, IMFAsyncResult, IMFMediaEvent, IMFVirtualCamera,
-    MEError, MF_VERSION, MFSTARTUP_FULL, MFShutdown, MFStartup, MFVirtualCameraAccess,
+    MEError, MEExtendedType, MF_FRAMESERVER_VCAMEVENT_EXTENDED_PIPELINE_SHUTDOWN, MF_VERSION,
+    MFSTARTUP_FULL, MFShutdown, MFStartup, MFVirtualCameraAccess,
     MFVirtualCameraAccess_CurrentUser, MFVirtualCameraLifetime, MFVirtualCameraLifetime_System,
     MFVirtualCameraType, MFVirtualCameraType_SoftwareCameraSource,
 };
@@ -30,21 +32,34 @@ type CreateVirtualCamera = unsafe extern "system" fn(
     *mut *mut c_void,
 ) -> HRESULT;
 
+fn virtual_camera_factory() -> Result<CreateVirtualCamera, String> {
+    static FACTORY: OnceLock<Result<CreateVirtualCamera, String>> = OnceLock::new();
+    FACTORY
+        .get_or_init(|| {
+            let library_name = wide("mfsensorgroup.dll");
+            // The module is intentionally retained for the process lifetime because
+            // returned camera objects own vtables from it. OnceLock limits this to
+            // one LoadLibrary reference instead of leaking one on every restart.
+            let library = unsafe { LoadLibraryW(PCWSTR(library_name.as_ptr())) }
+                .map_err(|error| format!("Windows virtual cameras are unavailable: {error}"))?;
+            // SAFETY: the symbol has the signature published for MFCreateVirtualCamera.
+            Ok(unsafe {
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, CreateVirtualCamera>(
+                    GetProcAddress(library, PCSTR(c"MFCreateVirtualCamera".as_ptr().cast()))
+                        .ok_or("Windows 11 virtual camera support is not installed")?,
+                )
+            })
+        })
+        .as_ref()
+        .copied()
+        .map_err(Clone::clone)
+}
+
 fn create_virtual_camera(
     friendly_name: PCWSTR,
     source_id: PCWSTR,
 ) -> Result<IMFVirtualCamera, String> {
-    let library_name = wide("mfsensorgroup.dll");
-    // Keep the module loaded because the returned COM object owns a vtable from it.
-    let library = unsafe { LoadLibraryW(PCWSTR(library_name.as_ptr())) }
-        .map_err(|error| format!("Windows virtual cameras are unavailable: {error}"))?;
-    // SAFETY: the symbol has the signature published for MFCreateVirtualCamera.
-    let create: CreateVirtualCamera = unsafe {
-        std::mem::transmute(
-            GetProcAddress(library, PCSTR(c"MFCreateVirtualCamera".as_ptr().cast()))
-                .ok_or("Windows 11 virtual camera support is not installed")?,
-        )
-    };
+    let create = virtual_camera_factory()?;
     let mut camera = std::ptr::null_mut();
     let result = unsafe {
         create(
@@ -142,15 +157,26 @@ impl IMFAsyncCallback_Impl for CameraCallback_Impl {
             unsafe { result.GetObject() }
                 .ok()
                 .and_then(|object| object.cast::<IMFMediaEvent>().ok())
-                .is_some_and(|event| unsafe {
-                    event.GetType().is_ok_and(|kind| kind == MEError.0 as u32)
-                        || event.GetStatus().is_ok_and(|status| status.is_err())
-                })
+                .is_some_and(|event| camera_event_failed(&event))
         });
         if failed {
             self.running.store(false, Ordering::Release);
         }
         Ok(())
+    }
+}
+
+fn camera_event_failed(event: &IMFMediaEvent) -> bool {
+    // SAFETY: the event remains live for these read-only queries.
+    unsafe {
+        event.GetType().is_ok_and(|kind| kind == MEError.0 as u32)
+            || event.GetStatus().is_ok_and(|status| status.is_err())
+            || (event
+                .GetType()
+                .is_ok_and(|kind| kind == MEExtendedType.0 as u32)
+                && event.GetExtendedType().is_ok_and(|extended| {
+                    extended == MF_FRAMESERVER_VCAMEVENT_EXTENDED_PIPELINE_SHUTDOWN
+                }))
     }
 }
 
@@ -242,7 +268,7 @@ impl VirtualCameraController {
 
     pub fn update_placeholder(&mut self, placeholder_bgra: u32) -> Result<(), String> {
         let placeholder_bgra = placeholder_bgra | 0xff00_0000;
-        if self.placeholder_bgra == placeholder_bgra {
+        if self.placeholder_bgra == placeholder_bgra && self.is_running() {
             return Ok(());
         }
         self.placeholder_bgra = placeholder_bgra;
@@ -299,4 +325,38 @@ pub fn remove_virtual_camera() -> Result<(), String> {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain([0]).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::S_OK;
+    use windows::Win32::Media::MediaFoundation::MFCreateMediaEvent;
+
+    struct MediaFoundation;
+
+    impl Drop for MediaFoundation {
+        fn drop(&mut self) {
+            // SAFETY: balances the successful MFStartup in this test.
+            let _ = unsafe { MFShutdown() };
+        }
+    }
+
+    #[test]
+    fn pipeline_shutdown_extended_event_marks_camera_failed() -> windows_core::Result<()> {
+        // SAFETY: initializes Media Foundation for event construction.
+        unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
+        let _foundation = MediaFoundation;
+        // SAFETY: the event constructor copies the live extended-type GUID.
+        let event = unsafe {
+            MFCreateMediaEvent(
+                MEExtendedType.0 as u32,
+                &MF_FRAMESERVER_VCAMEVENT_EXTENDED_PIPELINE_SHUTDOWN,
+                S_OK,
+                None,
+            )?
+        };
+        assert!(camera_event_failed(&event));
+        Ok(())
+    }
 }

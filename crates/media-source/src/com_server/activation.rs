@@ -75,15 +75,12 @@ impl IMFActivate_Impl for Activation_Impl {
     }
 
     fn ShutdownObject(&self) -> windows_core::Result<()> {
-        let source = self
-            .active_source
-            .lock()
-            .expect("activation source lock poisoned")
-            .take();
-        if let Some(source) = source {
-            // SAFETY: invokes Shutdown on the owned media source interface.
-            unsafe { source.Shutdown()? };
-        }
+        // The Windows virtual-camera Frame Server may call ShutdownObject while
+        // it still owns and initializes the activated media source. Shutting
+        // the source down here makes the remainder of that registration fail
+        // with MF_E_SHUTDOWN. Microsoft's virtual-camera sample also leaves
+        // this hook as a no-op; the source's IMFMediaSource::Shutdown method
+        // owns its actual shutdown, while DetachObject releases our reference.
         Ok(())
     }
 

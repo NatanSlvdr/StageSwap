@@ -30,6 +30,44 @@ Configuration schema 1, references, and logs live under `%LocalAppData%\Automati
 
 ## Build, test, and package
 
+### Testing from macOS
+
+You do not need a physical Windows PC for routine development. On macOS, run the
+platform-independent checks directly:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+```
+
+Then open the [Windows workflow](https://github.com/NatanSlvdr/WebcamSwitcher/actions/workflows/windows.yml),
+choose **Run workflow**, and download the two unsigned portable artifacts after it
+passes. This uses Windows runners to compile and package native x64 and ARM64 builds
+and to execute the x64 Windows test suite. The same workflow runs automatically for
+pull requests and pushes to `main`.
+
+GitHub-hosted runners cannot validate an interactive desktop, a physical webcam, or
+virtual-camera enumeration. For that final smoke test on an Apple-silicon Mac, create
+a Windows 11 ARM VM and run `windows-arm64-portable.exe`. Microsoft provides an
+[official Windows 11 ARM64 ISO](https://learn.microsoft.com/windows/arm/iso).
+Parallels is the most suitable VM option for this project because it exposes the
+Mac's built-in or external webcam to Windows; its
+[camera setup is documented here](https://docs.parallels.com/landing/pdfm-ug/v20-en-us/parallels-desktop-for-mac-20-users-guide/use-windows-on-your-mac/using-the-built-in-or-external-webcam).
+UTM is a free alternative for screen, tray, deployment, and virtual-camera testing,
+but it cannot pass the built-in Apple webcam through to Windows.
+
+In the VM, use the short smoke pass below:
+
+1. Launch the ARM64 portable executable and approve first-run registration.
+2. Confirm that Windows Camera lists **Automatic Screen Camera**.
+3. Verify screen capture, Force Screen, and the placeholder output.
+4. Verify webcam capture and Force Webcam if the VM exposes a camera.
+5. Verify Automatic mode, tray/close behavior, restart actions, and cleanup.
+
+This gives strong day-to-day coverage, but it does not replace the physical x64 and
+ARM64 release smoke tests listed in [the acceptance tests](docs/ACCEPTANCE_TESTS.md).
+
 Install Rust 1.97.1 and Visual Studio 2022 Build Tools with Windows SDK 10.0.22621.0. The pinned toolchain file selects the Rust version. Run packaging from a Developer PowerShell where `WindowsSDKVersion` is `10.0.22621.0\\`; `xtask` rejects any missing or different SDK instead of writing misleading artifact metadata.
 
 ```powershell

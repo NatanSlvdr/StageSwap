@@ -375,7 +375,7 @@ impl Platform {
                         None
                     }
                 });
-        let camera =
+        let camera = publisher.as_ref().and_then(|_| {
             pipe_name.as_ref().and_then(|pipe_name| {
                 match VirtualCameraController::start(
                     pipe_name.clone(),
@@ -393,7 +393,11 @@ impl Platform {
                         None
                     }
                 }
-            });
+            })
+        });
+        if publisher.is_none() {
+            state.snapshot.virtual_camera_state = DeviceState::Failed;
+        }
         let mut webcam = MediaFoundationVideoInput::default();
         match webcam.enumerate() {
             Ok(devices) => {
@@ -628,6 +632,8 @@ impl Platform {
     fn restart_virtual_camera(&mut self, state: &mut RuntimeState) {
         let result = if let Some(camera) = &mut self.camera {
             camera.restart()
+        } else if self.publisher.is_none() {
+            Err("virtual camera frame publisher is unavailable".into())
         } else if let Some(pipe_name) = &self.pipe_name {
             VirtualCameraController::start(pipe_name.clone(), state.config.placeholder_color_bgra)
                 .map(|camera| self.camera = Some(camera))

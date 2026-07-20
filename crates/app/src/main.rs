@@ -24,7 +24,7 @@ fn main() -> eframe::Result {
                 "Automatic Screen Camera deployment failed:\n\n{error}"
             ));
             eprintln!("Automatic Screen Camera deployment failed: {error}");
-            return Ok(());
+            std::process::exit(1);
         }
     }
     let store = ConfigStore::new(local_data_directory());

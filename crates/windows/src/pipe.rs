@@ -1,6 +1,7 @@
 use asc_core::{Frame, FrameHeader, MAX_FRAME_BYTES};
 use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation::{
@@ -29,6 +30,7 @@ struct Shared {
     latest: Mutex<Latest>,
     changed: Condvar,
     stop: AtomicBool,
+    failure: Mutex<Option<String>>,
 }
 
 /// Single-client, bounded-memory publisher used by the out-of-process Media
@@ -53,19 +55,39 @@ impl FramePublisher {
             latest: Mutex::new(Latest::default()),
             changed: Condvar::new(),
             stop: AtomicBool::new(false),
+            failure: Mutex::new(None),
         });
         let worker_shared = Arc::clone(&shared);
+        let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
             .name("asc-frame-publisher".into())
-            .spawn(move || server_loop(&path, &worker_shared))
+            .spawn(move || {
+                if let Err(error) = server_loop(&path, &worker_shared, &startup_sender) {
+                    if let Ok(mut failure) = worker_shared.failure.lock() {
+                        *failure = Some(error.clone());
+                    }
+                    let _ = startup_sender.try_send(Err(error));
+                }
+            })
             .map_err(|error| format!("could not start frame publisher: {error}"))?;
-        Ok(Self {
-            shared,
-            worker: Some(worker),
-        })
+        match startup_receiver.recv() {
+            Ok(Ok(())) => Ok(Self {
+                shared,
+                worker: Some(worker),
+            }),
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                Err(error)
+            }
+            Err(_) => {
+                let _ = worker.join();
+                Err("frame publisher stopped before creating its named pipe".into())
+            }
+        }
     }
 
     pub fn publish(&self, frame: &Frame) -> Result<(), String> {
+        self.check_worker()?;
         let frame_bytes =
             u32::try_from(frame.pixels().len()).map_err(|_| "frame exceeds the IPC capacity")?;
         if frame_bytes > MAX_FRAME_BYTES {
@@ -96,6 +118,7 @@ impl FramePublisher {
     }
 
     pub fn invalidate(&self) -> Result<(), String> {
+        self.check_worker()?;
         let mut latest = self
             .shared
             .latest
@@ -109,6 +132,15 @@ impl FramePublisher {
         drop(latest);
         self.shared.changed.notify_all();
         Ok(())
+    }
+
+    fn check_worker(&self) -> Result<(), String> {
+        self.shared
+            .failure
+            .lock()
+            .map_err(|_| "frame publisher failure state is poisoned")?
+            .as_ref()
+            .map_or_else(|| Ok(()), |error| Err(error.clone()))
     }
 }
 
@@ -143,7 +175,11 @@ impl Drop for SecurityDescriptor {
     }
 }
 
-fn server_loop(path: &str, shared: &Shared) {
+fn server_loop(
+    path: &str,
+    shared: &Shared,
+    startup: &mpsc::SyncSender<Result<(), String>>,
+) -> Result<(), String> {
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     // Owner, SYSTEM, and LocalService can connect; remote clients are rejected
     // by the named-pipe mode as an additional boundary.
@@ -152,7 +188,7 @@ fn server_loop(path: &str, shared: &Shared) {
         .chain([0])
         .collect();
     // SAFETY: SDDL is terminated and descriptor is a writable output pointer.
-    if unsafe {
+    unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             PCWSTR(sddl.as_ptr()),
             SDDL_REVISION_1,
@@ -160,10 +196,7 @@ fn server_loop(path: &str, shared: &Shared) {
             None,
         )
     }
-    .is_err()
-    {
-        return;
-    }
+    .map_err(|error| format!("could not create frame-pipe security descriptor: {error}"))?;
     let _descriptor = SecurityDescriptor(descriptor);
     let security = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -171,6 +204,7 @@ fn server_loop(path: &str, shared: &Shared) {
         bInheritHandle: BOOL(0),
     };
     let path: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    let mut startup = Some(startup);
     while !shared.stop.load(Ordering::Acquire) {
         // SAFETY: name and security attributes remain live until the pipe handle
         // is closed, and all sizes fit in u32 by the core IPC limit.
@@ -187,9 +221,16 @@ fn server_loop(path: &str, shared: &Shared) {
             )
         };
         if raw == INVALID_HANDLE_VALUE {
-            return;
+            return Err(format!("could not create frame pipe: {:?}", unsafe {
+                GetLastError()
+            }));
         }
         let pipe = OwnedHandle(raw);
+        if let Some(startup) = startup.take() {
+            startup
+                .send(Ok(()))
+                .map_err(|_| "frame publisher startup receiver was dropped".to_string())?;
+        }
         // SAFETY: pipe is a live server-side named-pipe handle.
         let connected = unsafe { ConnectNamedPipe(pipe.0, None) }.is_ok()
             || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
@@ -200,6 +241,7 @@ fn server_loop(path: &str, shared: &Shared) {
         // SAFETY: pipe remains live through this call.
         let _ = unsafe { DisconnectNamedPipe(pipe.0) };
     }
+    Ok(())
 }
 
 fn send_frames(pipe: HANDLE, shared: &Shared) {
@@ -238,4 +280,21 @@ fn write_all(pipe: HANDLE, mut bytes: &[u8]) -> bool {
         bytes = &bytes[written as usize..];
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_pipe_publisher_is_rejected_during_startup() {
+        let name = format!(
+            r"\\.\pipe\AutomaticScreenCameraRust.PublisherTest.{}",
+            std::process::id()
+        );
+        let first = FramePublisher::start(&name).expect("first publisher should own the pipe");
+        let second = FramePublisher::start(&name);
+        assert!(second.is_err(), "duplicate publisher unexpectedly started");
+        drop(first);
+    }
 }

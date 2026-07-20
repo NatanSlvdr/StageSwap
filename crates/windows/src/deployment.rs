@@ -10,7 +10,8 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
-    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW,
+    REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW,
+    RegOpenKeyExW, RegSetValueExW,
 };
 #[cfg(target_arch = "x86_64")]
 use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_AMD64;
@@ -26,6 +27,8 @@ use windows_core::{HRESULT, PCSTR, PCWSTR};
 
 const SOURCE_FILE: &str = "AutomaticScreenCameraSource.dll";
 const OLD_CLASS_KEY: &str = r"Software\Classes\CLSID\{4B8BA04C-7A67-4DD5-B9F4-C607940A7A64}";
+const SOURCE_INPROC_KEY: &str =
+    r"Software\Classes\CLSID\{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}\InprocServer32";
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "AutomaticScreenCameraRust";
 
@@ -142,13 +145,76 @@ fn ensure_portable_install(payload: &[u8]) -> Result<(), String> {
             "The previous Automatic Screen Camera installation is still registered. Run that version's --cleanup-portable command."
         );
     }
-    if fs::read(source_path()).ok().as_deref() != Some(payload) {
+    if fs::read(source_path()).ok().as_deref() != Some(payload) || !source_registration_matches() {
         run_elevated("--portable-register-elevated")?;
     }
     if fs::read(source_path()).ok().as_deref() != Some(payload) {
         return Err("portable camera source was not installed correctly".into());
     }
+    if !source_registration_matches() {
+        return Err("portable camera source COM registration was not installed correctly".into());
+    }
     Ok(())
+}
+
+fn source_registration_matches() -> bool {
+    let Some(registered) = registry_string(SOURCE_INPROC_KEY, None) else {
+        return false;
+    };
+    let Some(threading_model) = registry_string(SOURCE_INPROC_KEY, Some("ThreadingModel")) else {
+        return false;
+    };
+    PathBuf::from(registered)
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&source_path().to_string_lossy())
+        && threading_model
+            .to_string_lossy()
+            .eq_ignore_ascii_case("Both")
+}
+
+fn registry_string(key: &str, value_name: Option<&str>) -> Option<std::ffi::OsString> {
+    let key: Vec<u16> = key.encode_utf16().chain([0]).collect();
+    let value_name = value_name.map(|value| value.encode_utf16().chain([0]).collect::<Vec<_>>());
+    let value_name = value_name
+        .as_ref()
+        .map_or(PCWSTR::null(), |value| PCWSTR(value.as_ptr()));
+    let mut bytes = 0;
+    // SAFETY: the key is terminated and the first call only requests the value size.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(key.as_ptr()),
+            value_name,
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut bytes),
+        )
+    };
+    if status.is_err() || bytes < 2 {
+        return None;
+    }
+    let mut value = vec![0_u16; (bytes as usize).div_ceil(size_of::<u16>())];
+    // SAFETY: value has the byte capacity reported by RegGetValueW.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(key.as_ptr()),
+            value_name,
+            RRF_RT_REG_SZ,
+            None,
+            Some(value.as_mut_ptr().cast()),
+            Some(&mut bytes),
+        )
+    };
+    if status.is_err() {
+        return None;
+    }
+    let length = value
+        .iter()
+        .position(|word| *word == 0)
+        .unwrap_or(value.len());
+    Some(std::ffi::OsString::from_wide(&value[..length]))
 }
 
 fn validate_embedded_source(payload: &[u8]) -> Result<(), String> {
@@ -356,4 +422,4 @@ fn run_elevated(argument: &str) -> Result<(), String> {
     Ok(())
 }
 
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};

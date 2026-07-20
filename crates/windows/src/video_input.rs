@@ -105,6 +105,7 @@ struct CaptureState {
     reader: Mutex<Option<IMFSourceReader>>,
     latest: Mutex<Option<Arc<Frame>>>,
     running: AtomicBool,
+    generation: AtomicU64,
     sequence: AtomicU64,
 }
 
@@ -115,8 +116,13 @@ unsafe impl Send for CaptureState {}
 unsafe impl Sync for CaptureState {}
 
 impl CaptureState {
-    fn request_next(&self) {
-        if !self.running.load(Ordering::Acquire) {
+    fn is_current(&self, expected_generation: u64) -> bool {
+        self.running.load(Ordering::Acquire)
+            && self.generation.load(Ordering::Acquire) == expected_generation
+    }
+
+    fn request_next(&self, expected_generation: u64) {
+        if !self.is_current(expected_generation) {
             return;
         }
         let reader = self.reader.lock().ok().and_then(|reader| reader.clone());
@@ -130,6 +136,7 @@ impl CaptureState {
 #[implement(IMFSourceReaderCallback)]
 struct ReaderCallback {
     state: Arc<CaptureState>,
+    expected_generation: u64,
 }
 
 impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
@@ -141,7 +148,7 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
         timestamp: i64,
         sample: Ref<IMFSample>,
     ) -> windows_core::Result<()> {
-        if !self.state.running.load(Ordering::Acquire) {
+        if !self.state.is_current(self.expected_generation) {
             return Ok(());
         }
         if status.is_ok()
@@ -166,7 +173,9 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
                             sequence,
                             timestamp,
                             Instant::now(),
-                        ) && let Ok(mut latest) = self.state.latest.lock()
+                        ) && self.state.generation.load(Ordering::Acquire)
+                            == self.expected_generation
+                            && let Ok(mut latest) = self.state.latest.lock()
                         {
                             *latest = Some(Arc::new(frame));
                         }
@@ -176,7 +185,7 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
                 }
             }
         }
-        self.state.request_next();
+        self.state.request_next(self.expected_generation);
         Ok(())
     }
 
@@ -276,8 +285,10 @@ impl VideoInput for MediaFoundationVideoInput {
         .map_err(|error| format!("could not configure video source: {error}"))?;
         let source = unsafe { MFCreateDeviceSource(&source_attributes) }
             .map_err(|error| format!("could not open video source: {error}"))?;
+        let expected_generation = self.state.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let callback: IMFSourceReaderCallback = ReaderCallback {
             state: Arc::clone(&self.state),
+            expected_generation,
         }
         .into();
         (|| -> windows_core::Result<()> {
@@ -317,11 +328,12 @@ impl VideoInput for MediaFoundationVideoInput {
             .map_err(|_| "video reader state is poisoned")? = Some(reader);
         self.state.running.store(true, Ordering::Release);
         self.callback = Some(callback);
-        self.state.request_next();
+        self.state.request_next(expected_generation);
         Ok(())
     }
 
     fn stop(&mut self) {
+        self.state.generation.fetch_add(1, Ordering::AcqRel);
         self.state.running.store(false, Ordering::Release);
         if let Ok(mut reader) = self.state.reader.lock()
             && let Some(reader) = reader.take()
@@ -355,5 +367,20 @@ impl Drop for MediaFoundationVideoInput {
             // SAFETY: balances this adapter's successful CoInitializeEx.
             unsafe { CoUninitialize() };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_generation_rejects_callbacks_from_stopped_reader() {
+        let state = CaptureState::default();
+        let generation = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        state.running.store(true, Ordering::Release);
+        assert!(state.is_current(generation));
+        state.generation.fetch_add(1, Ordering::AcqRel);
+        assert!(!state.is_current(generation));
     }
 }

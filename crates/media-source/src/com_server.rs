@@ -245,8 +245,8 @@ mod tests {
     use super::*;
     use windows::Win32::Media::KernelStreaming::IKsControl;
     use windows::Win32::Media::MediaFoundation::{
-        IMFActivate, IMFGetService, IMFMediaSourceEx, MF_VERSION, MFSTARTUP_FULL, MFShutdown,
-        MFStartup,
+        IMFActivate, IMFGetService, IMFMediaSourceEx, MF_VERSION, MFMEDIASOURCE_IS_LIVE,
+        MFSTARTUP_FULL, MFShutdown, MFStartup,
     };
 
     struct MediaFoundation;
@@ -276,11 +276,18 @@ mod tests {
         let source: IMFMediaSourceEx = unsafe { activation.ActivateObject()? };
         let _: IMFGetService = source.cast()?;
         let _: IKsControl = source.cast()?;
+        // The virtual-camera Frame Server can invoke this during registration.
+        // It must not invalidate an interface the Frame Server still owns.
+        unsafe { activation.ShutdownObject()? };
+        assert_eq!(
+            unsafe { source.GetCharacteristics()? },
+            MFMEDIASOURCE_IS_LIVE.0 as u32
+        );
         // SAFETY: source is live and shutdown is part of its public state contract.
         unsafe { source.Shutdown()? };
         drop(source);
-        // SAFETY: releases any activation-held source reference.
-        unsafe { activation.ShutdownObject()? };
+        // SAFETY: releases the activation object's retained source reference.
+        unsafe { activation.DetachObject()? };
         drop(activation);
         drop(factory);
         assert_eq!(DllCanUnloadNow(), S_OK);
