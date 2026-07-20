@@ -47,6 +47,10 @@ passes. This uses Windows runners to compile and package native x64 and ARM64 bu
 and to execute the x64 Windows test suite. The same workflow runs automatically for
 pull requests and pushes to `main`.
 
+Publishing is intentionally separate from routine CI. After updating the Cargo
+package version, push the matching semantic-version tag (for example `v0.2.0`) to
+run the release workflow and publish both unsigned executables with their checksums.
+
 GitHub-hosted runners cannot validate an interactive desktop, a physical webcam, or
 virtual-camera enumeration. For that final smoke test on an Apple-silicon Mac, create
 a Windows 11 ARM VM and run `windows-arm64-portable.exe`. Microsoft provides an

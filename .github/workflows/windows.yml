@@ -1,4 +1,4 @@
-name: Rust build, test, and package
+name: Rust checks and packages
 
 on:
   push:
@@ -37,13 +37,12 @@ jobs:
           ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
 
   windows:
-    name: Windows ${{ matrix.architecture }} ${{ matrix.profile }}
+    name: Windows ${{ matrix.architecture }}
     runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
         architecture: [x64, arm64]
-        profile: [debug, release]
         include:
           - architecture: x64
             target: x86_64-pc-windows-msvc
@@ -58,34 +57,14 @@ jobs:
         with:
           arch: ${{ matrix.msvc-arch }}
           sdk: 10.0.22621.0
-      - name: Install native Rust target
-        shell: pwsh
-        run: rustup target add ${{ matrix.target }}
       - name: Clippy
-        if: matrix.profile == 'debug'
         run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
-      - name: Build
-        shell: pwsh
-        run: |
-          if ('${{ matrix.profile }}' -eq 'release') {
-            cargo build --workspace --target ${{ matrix.target }} --release
-          } else {
-            cargo build --workspace --target ${{ matrix.target }}
-          }
       - name: Run Windows x64 tests
         if: matrix.architecture == 'x64'
-        shell: pwsh
-        run: |
-          if ('${{ matrix.profile }}' -eq 'release') {
-            cargo test --workspace --all-targets --target ${{ matrix.target }} --release
-          } else {
-            cargo test --workspace --all-targets --target ${{ matrix.target }}
-          }
+        run: cargo test --workspace --all-targets --target ${{ matrix.target }}
       - name: Package portable executable
-        if: matrix.profile == 'release'
         run: cargo run -p xtask -- portable ${{ matrix.architecture }} dist
       - name: Upload unsigned portable artifact
-        if: matrix.profile == 'release'
         uses: actions/upload-artifact@v7
         with:
           name: AutomaticScreenCamera-windows-${{ matrix.architecture }}-unsigned
@@ -93,44 +72,3 @@ jobs:
             dist/*.exe
             dist/*.sha256
           if-no-files-found: error
-
-  publish-release:
-    name: Publish unsigned release
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    needs: [portable-checks, windows]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - name: Download portable artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: AutomaticScreenCamera-windows-*-unsigned
-          merge-multiple: true
-          path: release-assets
-      - name: Resolve next patch tag
-        id: tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          latest="$(gh release list --limit 100 --json tagName --jq '.[].tagName' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
-          if [[ -z "$latest" ]]; then
-            next="v0.1.0"
-          else
-            IFS='.' read -r major minor patch <<< "${latest#v}"
-            next="v${major}.${minor}.$((patch + 1))"
-          fi
-          echo "tag=$next" >> "$GITHUB_OUTPUT"
-      - name: Publish release and checksums
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          gh release create "$RELEASE_TAG" \
-            release-assets/*.exe \
-            release-assets/*.sha256 \
-            --target "$GITHUB_SHA" \
-            --generate-notes \
-            --fail-on-no-commits
