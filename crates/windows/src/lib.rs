@@ -18,7 +18,7 @@ pub use video_input::{MediaFoundationVideoInput, enumerate_video_devices};
 #[cfg(windows)]
 mod deployment;
 #[cfg(windows)]
-pub use deployment::{configure_startup, portable_startup, previous_install_present};
+pub use deployment::{configure_startup, portable_startup};
 #[cfg(windows)]
 mod notification;
 #[cfg(windows)]

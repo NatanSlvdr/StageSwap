@@ -10,7 +10,7 @@ The application pipeline is fixed at 1280×720 BGRA and 30 fps:
 4. The CPU frame is written directly to the per-user named pipe.
 5. The Media Foundation source reads the pipe and exposes RGB32 1280×720 at 30 fps with placeholder output. NV12 720p is a compatibility fallback only if Windows Camera or Zoom rejects RGB32; 1080p is excluded without evidence.
 
-The executable also embeds an `asInvoker`, Per-Monitor-V2 Windows manifest and version resource. First launch and `--startup` verify the native architecture and installed payload; only the registration or cleanup child process elevates. Cleanup removes the virtual camera, COM DLL, and Windows startup entry while leaving configuration, references, and logs intact.
+The executable also embeds an `asInvoker`, Per-Monitor-V2 Windows manifest and version resource. First launch and `--startup` verify the native architecture and installed payload. Every launch first checks for and removes the legacy portable virtual camera, COM registration, deployment marker, payload directory, and startup entry; elevation is requested only when machine-wide legacy state or current payload registration needs changing. Cleanup leaves configuration, references, and logs intact.
 
 The webcam selection model is deliberately small. Configuration stores one Media Foundation symbolic link. The current implementation opens that exact identifier at startup and when settings change; it does not poll for webcams or replace a disconnected device automatically. A relaunch or an explicit selection/restart is the supported recovery path.
 

@@ -13,7 +13,7 @@ Each EXE embeds its same-architecture Rust Media Foundation DLL. First launch re
 .\windows-x64-portable.exe --cleanup-portable
 ```
 
-Use the ARM64 artifact on ARM64 Windows. The old product is a separate installation: if it remains installed, run that old executable's `--cleanup-portable`; this version never imports or removes old data.
+Use the ARM64 artifact on ARM64 Windows. On every launch, the app removes any legacy portable registration and files before verifying the current embedded camera source. User configuration, references, and logs are left intact.
 
 ## Product contract
 

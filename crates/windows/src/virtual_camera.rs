@@ -18,6 +18,7 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_core::{Error, GUID, HRESULT, Interface, PCSTR, PCWSTR, PWSTR, Ref, implement};
 
 const SOURCE_ID: &str = "{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}";
+pub(crate) const LEGACY_SOURCE_ID: &str = "{4B8BA04C-7A67-4DD5-B9F4-C607940A7A64}";
 const PIPE_ATTRIBUTE: GUID = GUID::from_u128(0x905306dd_b9a3_4385_a273_606e05b3208b);
 const PLACEHOLDER_ATTRIBUTE: GUID = GUID::from_u128(0x05cd1551_bfc8_4276_8e0b_70ba4065822e);
 
@@ -294,6 +295,10 @@ impl Drop for VirtualCameraController {
 }
 
 pub fn remove_virtual_camera() -> Result<(), String> {
+    remove_virtual_camera_for_source(SOURCE_ID)
+}
+
+pub(crate) fn remove_virtual_camera_for_source(source_id: &str) -> Result<(), String> {
     // This cleanup entry point is expected to run in its own short-lived process.
     // SAFETY: all initialization and shutdown calls are balanced on this thread.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
@@ -305,7 +310,7 @@ pub fn remove_virtual_camera() -> Result<(), String> {
     }
     let result = (|| {
         let friendly = wide("Automatic Screen Camera");
-        let source = wide(SOURCE_ID);
+        let source = wide(source_id);
         let camera = create_virtual_camera(PCWSTR(friendly.as_ptr()), PCWSTR(source.as_ptr()))
             .map_err(|error| format!("could not open virtual camera registration: {error}"))?;
         (|| -> windows_core::Result<()> {

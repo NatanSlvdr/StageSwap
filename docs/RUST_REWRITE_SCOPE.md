@@ -12,7 +12,7 @@ This scope replaced the former production application directly. The repository n
 - Virtual-camera output initially limited to RGB32 1280×720 at 30 fps. Add only NV12 720p if Windows Camera or Zoom rejects RGB32; do not restore 1080p without evidence.
 - Local configuration, reference image, previews, tray/main UI, startup preference, and bounded diagnostic logs.
 
-This is a new installation with source CLSID `{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}`, pipe attribute `{905306DD-B9A3-4385-A273-606E05B3208B}`, placeholder attribute `{05CD1551-BFC8-4276-8E0B-70BA4065822E}`, and storage under `%LocalAppData%\AutomaticScreenCameraRust`. It neither imports nor deletes the old schema-v2 installation.
+This is a new installation with source CLSID `{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}`, pipe attribute `{905306DD-B9A3-4385-A273-606E05B3208B}`, placeholder attribute `{05CD1551-BFC8-4276-8E0B-70BA4065822E}`, and storage under `%LocalAppData%\AutomaticScreenCameraRust`. It does not import the old schema-v2 data, but startup removes the legacy portable deployment artifacts while preserving user configuration, references, and logs.
 
 ## Deliberate non-goals
 

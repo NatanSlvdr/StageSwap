@@ -29,14 +29,6 @@ fn main() -> eframe::Result {
     }
     let store = ConfigStore::new(local_data_directory());
     let loaded = store.load();
-    #[cfg(windows)]
-    let mut loaded = loaded;
-    #[cfg(windows)]
-    if asc_windows::previous_install_present() {
-        loaded.warnings.push(
-            "A previous Automatic Screen Camera COM registration is still present. Open that version once with --cleanup-portable before relying on the Rust camera.".into(),
-        );
-    }
     let start_visible = !loaded.config.start_minimized;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

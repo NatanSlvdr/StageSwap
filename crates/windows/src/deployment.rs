@@ -1,17 +1,20 @@
 use crate::remove_virtual_camera;
+use crate::virtual_camera::{LEGACY_SOURCE_ID, remove_virtual_camera_for_source};
 use asc_core::{AppConfig, ConfigStore};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use windows::Win32::Foundation::{CloseHandle, FreeLibrary};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, FreeLibrary,
+};
 use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
-    REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW,
-    RegOpenKeyExW, RegSetValueExW,
+    REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW,
+    RegGetValueW, RegOpenKeyExW, RegSetValueExW,
 };
 #[cfg(target_arch = "x86_64")]
 use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_AMD64;
@@ -27,10 +30,13 @@ use windows_core::{HRESULT, PCSTR, PCWSTR};
 
 const SOURCE_FILE: &str = "AutomaticScreenCameraSource.dll";
 const OLD_CLASS_KEY: &str = r"Software\Classes\CLSID\{4B8BA04C-7A67-4DD5-B9F4-C607940A7A64}";
+const OLD_DEPLOYMENT_KEY: &str = r"SOFTWARE\AutomaticScreenCamera\Deployment";
+const OLD_PORTABLE_DIRECTORY: &str = "Automatic Screen Camera Portable";
 const SOURCE_INPROC_KEY: &str =
     r"Software\Classes\CLSID\{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}\InprocServer32";
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "AutomaticScreenCameraRust";
+const OLD_RUN_VALUE: &str = "AutomaticScreenCamera";
 
 pub fn configure_startup(enabled: bool) -> Result<(), String> {
     let path: Vec<u16> = RUN_KEY.encode_utf16().chain([0]).collect();
@@ -113,6 +119,10 @@ pub fn portable_startup(payload: &[u8]) -> Result<bool, String> {
             install(payload)?;
             Ok(true)
         }
+        Some("--cleanup-legacy-elevated") => {
+            cleanup_legacy_machine_install()?;
+            Ok(true)
+        }
         Some("--cleanup-portable-elevated") => {
             cleanup()?;
             Ok(true)
@@ -140,11 +150,7 @@ fn ensure_portable_install(payload: &[u8]) -> Result<(), String> {
     }
     validate_native_architecture()?;
     validate_embedded_source(payload)?;
-    if previous_install_present() {
-        eprintln!(
-            "The previous Automatic Screen Camera installation is still registered. Run that version's --cleanup-portable command."
-        );
-    }
+    cleanup_legacy_install()?;
     if fs::read(source_path()).ok().as_deref() != Some(payload) || !source_registration_matches() {
         run_elevated("--portable-register-elevated")?;
     }
@@ -271,24 +277,106 @@ fn validate_native_architecture() -> Result<(), String> {
     Ok(())
 }
 
-pub fn previous_install_present() -> bool {
-    let path: Vec<u16> = OLD_CLASS_KEY.encode_utf16().chain([0]).collect();
-    let mut key = HKEY::default();
+fn previous_install_present() -> bool {
+    registry_key_present(HKEY_LOCAL_MACHINE, OLD_CLASS_KEY)
+        || registry_key_present(HKEY_LOCAL_MACHINE, OLD_DEPLOYMENT_KEY)
+        || old_source_path().is_file()
+}
+
+fn registry_key_present(root: HKEY, key: &str) -> bool {
+    let path: Vec<u16> = key.encode_utf16().chain([0]).collect();
+    let mut opened_key = HKEY::default();
     // SAFETY: path is terminated and key is writable.
     let opened = unsafe {
         RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
+            root,
             PCWSTR(path.as_ptr()),
             Some(0),
             KEY_READ,
-            &mut key,
+            &mut opened_key,
         )
     }
     .is_ok();
     if opened {
-        let _ = unsafe { RegCloseKey(key) };
+        let _ = unsafe { RegCloseKey(opened_key) };
     }
     opened
+}
+
+fn cleanup_legacy_install() -> Result<(), String> {
+    remove_startup_value(OLD_RUN_VALUE)?;
+    // Opening and removing this source identity is idempotent and also clears a
+    // virtual-camera registration left behind after its COM key was removed.
+    remove_virtual_camera_for_source(LEGACY_SOURCE_ID)
+        .map_err(|error| format!("could not remove legacy virtual camera: {error}"))?;
+    if !previous_install_present() {
+        return Ok(());
+    }
+    run_elevated("--cleanup-legacy-elevated")?;
+    if previous_install_present() {
+        return Err("legacy Automatic Screen Camera installation was not removed correctly".into());
+    }
+    Ok(())
+}
+
+fn cleanup_legacy_machine_install() -> Result<(), String> {
+    let source = old_source_path();
+    if source.is_file() {
+        // The direct registry removal below is the fallback for damaged DLLs.
+        let _ = invoke_registration(&source, b"DllUnregisterServer\0");
+    }
+    delete_registry_tree(HKEY_LOCAL_MACHINE, OLD_CLASS_KEY)?;
+    delete_registry_tree(HKEY_LOCAL_MACHINE, OLD_DEPLOYMENT_KEY)?;
+    if let Some(directory) = source.parent()
+        && directory.exists()
+    {
+        fs::remove_dir_all(directory)
+            .map_err(|error| format!("could not remove {}: {error}", directory.display()))?;
+    }
+    Ok(())
+}
+
+fn delete_registry_tree(root: HKEY, key: &str) -> Result<(), String> {
+    let key: Vec<u16> = key.encode_utf16().chain([0]).collect();
+    // SAFETY: the registry path is terminated for the duration of the call.
+    let status = unsafe { RegDeleteTreeW(root, PCWSTR(key.as_ptr())) };
+    if status.is_ok() || status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND {
+        Ok(())
+    } else {
+        Err(format!("could not remove legacy registry key: {status:?}"))
+    }
+}
+
+fn remove_startup_value(value: &str) -> Result<(), String> {
+    let path: Vec<u16> = RUN_KEY.encode_utf16().chain([0]).collect();
+    let value: Vec<u16> = value.encode_utf16().chain([0]).collect();
+    let mut key = HKEY::default();
+    // SAFETY: the path is terminated and key is writable.
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(path.as_ptr()),
+            Some(0),
+            KEY_WRITE,
+            &mut key,
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND {
+        return Ok(());
+    }
+    if status.is_err() {
+        return Err(format!("could not open Windows startup key: {status:?}"));
+    }
+    // SAFETY: the key and terminated value name remain live for the call.
+    let result = unsafe { RegDeleteValueW(key, PCWSTR(value.as_ptr())) };
+    let _ = unsafe { RegCloseKey(key) };
+    if result.is_ok() || result == ERROR_FILE_NOT_FOUND {
+        Ok(())
+    } else {
+        Err(format!(
+            "could not remove legacy Windows startup entry: {result:?}"
+        ))
+    }
 }
 
 fn portable_directory() -> Result<PathBuf, String> {
@@ -303,6 +391,14 @@ fn source_path() -> PathBuf {
         .unwrap_or_else(|_| {
             PathBuf::from(r"C:\Program Files\Automatic Screen Camera Rust Portable")
         })
+        .join(SOURCE_FILE)
+}
+
+fn old_source_path() -> PathBuf {
+    env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
+        .join(OLD_PORTABLE_DIRECTORY)
         .join(SOURCE_FILE)
 }
 
