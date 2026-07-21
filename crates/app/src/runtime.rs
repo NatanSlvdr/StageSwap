@@ -86,18 +86,23 @@ struct RuntimeState {
 impl RuntimeState {
     fn new(config: AppConfig) -> Self {
         let mode = config.output_mode;
-        let reference = load_reference(&config.reference_image_path);
+        let (reference, reference_preview) = load_reference(&config.reference_image_path)
+            .map_or((None, None), |(reference, preview)| {
+                (Some(reference), Some(preview))
+            });
         let detector = DebouncedDetector::new(DetectorSettings {
             threshold: config.similarity_threshold,
             ..DetectorSettings::default()
         });
         let now = Instant::now();
-        let mut state = Self {
-            snapshot: AppSnapshot {
-                mode,
-                selected_video_device_id: config.selected_video_device_id.clone(),
-                ..AppSnapshot::default()
-            },
+        let mut snapshot = AppSnapshot {
+            mode,
+            selected_video_device_id: config.selected_video_device_id.clone(),
+            ..AppSnapshot::default()
+        };
+        snapshot.previews.reference = reference_preview;
+        Self {
+            snapshot,
             config,
             transition: TransitionController::default(),
             activity: VecDeque::with_capacity(ACTIVITY_LIMIT),
@@ -106,9 +111,7 @@ impl RuntimeState {
             reference,
             detector,
             last_detection: now - Duration::from_millis(250),
-        };
-        state.refresh_reference_preview(now);
-        state
+        }
     }
 
     fn record(&mut self, message: impl Into<String>) {
@@ -139,8 +142,12 @@ impl RuntimeState {
                 self.snapshot.mode = self.config.output_mode;
                 self.snapshot.selected_video_device_id =
                     self.config.selected_video_device_id.clone();
-                self.reference = load_reference(&self.config.reference_image_path);
-                self.refresh_reference_preview(Instant::now());
+                let (reference, preview) = load_reference(&self.config.reference_image_path)
+                    .map_or((None, None), |(reference, preview)| {
+                        (Some(reference), Some(preview))
+                    });
+                self.reference = reference;
+                self.snapshot.previews.reference = preview;
                 self.detector = DebouncedDetector::new(DetectorSettings {
                     threshold: self.config.similarity_threshold,
                     ..DetectorSettings::default()
@@ -197,24 +204,23 @@ impl RuntimeState {
         self.snapshot.previews.final_output = Some(Arc::new(output));
     }
 
-    fn refresh_reference_preview(&mut self, now: Instant) {
+    #[cfg(windows)]
+    fn install_reference(&mut self, reference: GrayImage, preview: &Frame, now: Instant) {
         self.sequence = self.sequence.wrapping_add(1).max(1);
-        self.snapshot.previews.reference = self.reference.as_ref().and_then(|reference| {
-            let mut pixels = Vec::with_capacity(reference.pixels.len() * 4);
-            for gray in &reference.pixels {
-                pixels.extend_from_slice(&[*gray, *gray, *gray, 255]);
-            }
-            Frame::new(
-                pixels.into(),
-                reference.size,
-                reference.size.width * 4,
-                self.sequence,
-                0,
-                now,
-            )
-            .ok()
-            .map(Arc::new)
-        });
+        self.reference = Some(reference);
+        self.snapshot.previews.reference = Frame::new(
+            preview.pixels_arc(),
+            preview.size,
+            preview.stride,
+            self.sequence,
+            preview.timestamp_100ns,
+            now,
+        )
+        .ok()
+        .map(Arc::new);
+        self.detector.reset();
+        self.snapshot.detection = asc_core::DetectionState::Unknown;
+        self.last_detection = now - Duration::from_millis(250);
     }
 
     fn detect(&mut self, now: Instant) {
@@ -224,9 +230,10 @@ impl RuntimeState {
         self.last_detection = now;
         let candidate = self
             .snapshot
-            .previews
-            .screen
-            .as_deref()
+            .availability
+            .screen_ready
+            .then(|| self.snapshot.previews.screen.as_deref())
+            .flatten()
             .and_then(gray_thumbnail);
         let (similarity, valid) = match (&self.reference, candidate) {
             (Some(reference), Some(candidate)) => (image_similarity(reference, &candidate), true),
@@ -242,7 +249,7 @@ fn gray_thumbnail(frame: &Frame) -> Option<GrayImage> {
         .and_then(|image| resize_bilinear(&image, Size::new(160, 90)).ok())
 }
 
-fn load_reference(path: &str) -> Option<GrayImage> {
+fn load_reference(path: &str) -> Option<(GrayImage, Arc<Frame>)> {
     if path.is_empty() {
         return None;
     }
@@ -252,9 +259,12 @@ fn load_reference(path: &str) -> Option<GrayImage> {
     for pixel in bgra.chunks_exact_mut(4) {
         pixel.swap(0, 2);
     }
-    bgra_to_gray(&bgra, size, size.width as usize * 4)
+    let pixels: Arc<[u8]> = bgra.into();
+    let reference = bgra_to_gray(&pixels, size, size.width as usize * 4)
         .ok()
-        .and_then(|image| resize_bilinear(&image, Size::new(160, 90)).ok())
+        .and_then(|image| resize_bilinear(&image, Size::new(160, 90)).ok())?;
+    let preview = Frame::new(pixels, size, size.width * 4, 0, 0, Instant::now()).ok()?;
+    Some((reference, Arc::new(preview)))
 }
 
 #[cfg(windows)]
@@ -281,7 +291,10 @@ fn save_reference(frame: &Frame, path: &str) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn import_reference(source: &std::path::Path, destination: &str) -> Result<GrayImage, String> {
+fn import_reference(
+    source: &std::path::Path,
+    destination: &str,
+) -> Result<(GrayImage, Arc<Frame>), String> {
     if destination.is_empty() {
         return Err("reference image path is empty".into());
     }
@@ -536,14 +549,16 @@ impl Platform {
             }
             Command::CaptureReference => {
                 if let Some(frame) = self.screen.latest_frame() {
-                    match save_reference(&frame, &state.config.reference_image_path) {
-                        Ok(()) => {
-                            state.reference = gray_thumbnail(&frame);
-                            state.refresh_reference_preview(Instant::now());
-                            state.detector.reset();
-                            state.record("Reference captured");
+                    if let Some(reference) = gray_thumbnail(&frame) {
+                        state.install_reference(reference, &frame, Instant::now());
+                        match save_reference(&frame, &state.config.reference_image_path) {
+                            Ok(()) => state.record("Reference captured"),
+                            Err(error) => state.record(format!(
+                                "Reference captured for this session but could not be saved: {error}"
+                            )),
                         }
-                        Err(error) => state.record(format!("Reference capture failed: {error}")),
+                    } else {
+                        state.record("Reference capture failed: invalid screen frame");
                     }
                 } else {
                     state.record("Reference capture failed: no screen frame");
@@ -551,10 +566,8 @@ impl Platform {
             }
             Command::ImportReference(path) => {
                 match import_reference(path, &state.config.reference_image_path) {
-                    Ok(reference) => {
-                        state.reference = Some(reference);
-                        state.refresh_reference_preview(Instant::now());
-                        state.detector.reset();
+                    Ok((reference, preview)) => {
+                        state.install_reference(reference, &preview, Instant::now());
                         state.record("Reference imported into local storage");
                         self.rescan_monitors(state);
                     }
@@ -659,18 +672,25 @@ impl Platform {
         if now.duration_since(self.last_monitor_scan) >= Duration::from_secs(30) {
             self.rescan_monitors(state);
         }
-        let webcam = self
-            .webcam
-            .latest_frame()
-            .filter(|frame| frame.is_fresh_at(now, asc_core::FRAME_STALE_AFTER));
+        let webcam = self.webcam.latest_frame();
         state.snapshot.availability.camera_ready = webcam.is_some();
-        state.snapshot.previews.webcam = webcam;
-        let screen = self
-            .screen
-            .latest_frame()
-            .filter(|frame| frame.is_fresh_at(now, asc_core::FRAME_STALE_AFTER));
+        if let Some(error) = self.webcam.last_error() {
+            if state.snapshot.webcam_state != DeviceState::Failed {
+                state.record(error);
+            }
+            state.snapshot.webcam_state = DeviceState::Failed;
+        } else if webcam.is_some() && state.snapshot.webcam_state == DeviceState::Failed {
+            state.snapshot.webcam_state = DeviceState::Ready;
+            state.record("Webcam capture recovered");
+        }
+        if webcam.is_some() {
+            state.snapshot.previews.webcam = webcam;
+        }
+        let screen = self.screen.latest_frame();
         state.snapshot.availability.screen_ready = screen.is_some();
-        state.snapshot.previews.screen = screen;
+        if screen.is_some() {
+            state.snapshot.previews.screen = screen;
+        }
     }
 
     fn restart_screen(&mut self, state: &mut RuntimeState) {
@@ -800,6 +820,20 @@ impl Platform {
 mod tests {
     use super::*;
     use asc_core::OutputMode;
+
+    #[test]
+    fn reference_detection_is_gray_but_preview_stays_in_color() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reference.png");
+        let image = image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+        image.save(&path).unwrap();
+
+        let (reference, preview) = load_reference(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(reference.size, Size::new(160, 90));
+        assert_eq!(preview.size, Size::new(2, 1));
+        assert_eq!(preview.pixels(), &[0, 0, 255, 255, 255, 0, 0, 255]);
+    }
 
     #[test]
     fn commands_publish_immutable_snapshots() {

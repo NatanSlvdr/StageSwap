@@ -33,9 +33,13 @@ pub use shell_ui::{open_directory, pick_log_export_path, pick_reference_image};
 #[cfg(windows)]
 mod screen_input;
 #[cfg(windows)]
+mod single_instance;
+#[cfg(windows)]
 pub use deployment::save_config_atomic;
 #[cfg(windows)]
 pub use screen_input::WindowsGraphicsScreenInput;
+#[cfg(windows)]
+pub use single_instance::SingleInstance;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InputDevice {

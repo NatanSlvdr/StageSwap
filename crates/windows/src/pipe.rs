@@ -5,8 +5,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
-    LocalFree,
+    CloseHandle, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HLOCAL,
+    INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -221,9 +221,14 @@ fn server_loop(
             )
         };
         if raw == INVALID_HANDLE_VALUE {
-            return Err(format!("could not create frame pipe: {:?}", unsafe {
-                GetLastError()
-            }));
+            let error = unsafe { GetLastError() };
+            if error == ERROR_PIPE_BUSY {
+                return Err(
+                    "another Automatic Screen Camera instance already owns the frame pipe; exit it from the system tray before relaunching"
+                        .into(),
+                );
+            }
+            return Err(format!("could not create frame pipe: {error:?}"));
         }
         let pipe = OwnedHandle(raw);
         if let Some(startup) = startup.take() {

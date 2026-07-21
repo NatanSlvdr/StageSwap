@@ -9,6 +9,9 @@ use eframe::egui::{self, Color32, RichText, Stroke, TextureHandle, TextureOption
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+const WINDOW_ASPECT_RATIO: f32 = 16.0 / 9.0;
+const MIN_WINDOW_HEIGHT: f32 = 600.0;
+
 mod local_log;
 mod portable_payload;
 #[cfg(windows)]
@@ -29,14 +32,28 @@ fn main() -> eframe::Result {
             std::process::exit(1);
         }
     }
+    #[cfg(windows)]
+    let _single_instance = match asc_windows::SingleInstance::acquire() {
+        Ok(Some(instance)) => instance,
+        Ok(None) => {
+            asc_windows::show_error_dialog(
+                "Automatic Screen Camera is already running. Open it from the system tray, or exit the tray application before launching this copy.",
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            asc_windows::show_error_dialog(&error);
+            return Ok(());
+        }
+    };
     let store = ConfigStore::new(local_data_directory());
     let loaded = store.load();
     let start_visible = !loaded.config.start_minimized;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Automatic Screen Camera")
-            .with_inner_size([1120.0, 760.0])
-            .with_min_inner_size([820.0, 600.0])
+            .with_inner_size([1280.0, 720.0])
+            .with_min_inner_size([MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT])
             .with_visible(start_visible),
         ..eframe::NativeOptions::default()
     };
@@ -78,6 +95,20 @@ fn local_data_directory() -> PathBuf {
         .join("AutomaticScreenCameraRust")
 }
 
+fn aspect_locked_window_size(current: Vec2, previous: Option<Vec2>) -> Vec2 {
+    let preserve_width = previous
+        .is_none_or(|previous| (current.x - previous.x).abs() >= (current.y - previous.y).abs());
+    let mut desired = if preserve_width {
+        egui::vec2(current.x, current.x / WINDOW_ASPECT_RATIO)
+    } else {
+        egui::vec2(current.y * WINDOW_ASPECT_RATIO, current.y)
+    };
+    if desired.y < MIN_WINDOW_HEIGHT {
+        desired = egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT);
+    }
+    desired
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SettingsTab {
     General,
@@ -109,6 +140,7 @@ struct SwitcherApp {
     tray: Option<tray::Tray>,
     exit_requested: bool,
     show_exit_confirmation: bool,
+    last_window_size: Option<Vec2>,
 }
 
 impl SwitcherApp {
@@ -137,11 +169,12 @@ impl SwitcherApp {
             tray: tray::Tray::new().ok(),
             exit_requested: false,
             show_exit_confirmation: false,
+            last_window_size: None,
         }
     }
 
     fn send(&self, command: Command) {
-        let _ = self.runtime.try_send(command);
+        let _ = self.runtime.send(command);
     }
 
     fn set_mode(&mut self, mode: OutputMode) {
@@ -235,49 +268,84 @@ impl SwitcherApp {
         }
         ui.add_space(8.0);
         let available_width = ui.available_width();
-        let preview_width = (available_width * 0.64).clamp(470.0, 720.0);
+        let preview_width = available_width * 0.70;
+        let preview_column_height = (ui.available_height() - 170.0).max(160.0);
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
-                egui::vec2(preview_width, 0.0),
+                egui::vec2(preview_width, preview_column_height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
+                    ui.set_width(preview_width);
                     ui.label(RichText::new("SIGNAL FLOW").small().color(Color32::GRAY));
-                    let cell_width = ((ui.available_width() - 10.0) / 2.0).max(180.0);
-                    egui::Grid::new("dashboard-preview-grid")
-                        .num_columns(2)
-                        .spacing([10.0, 10.0])
-                        .show(ui, |ui| {
-                            self.preview_cell(
-                                ui,
-                                "webcam",
-                                "WEBCAM",
-                                snapshot.previews.webcam.as_deref(),
-                                cell_width,
-                            );
-                            self.preview_cell(
-                                ui,
-                                "screen",
-                                "SCREEN",
-                                snapshot.previews.screen.as_deref(),
-                                cell_width,
-                            );
-                            ui.end_row();
-                            self.preview_cell(
-                                ui,
-                                "reference",
-                                "REFERENCE",
-                                snapshot.previews.reference.as_deref(),
-                                cell_width,
-                            );
-                            self.preview_cell(
-                                ui,
-                                "output",
-                                "OUTPUT",
-                                snapshot.previews.final_output.as_deref(),
-                                cell_width,
-                            );
-                            ui.end_row();
-                        });
+                    let spacing = ui.spacing().item_spacing.y;
+                    let cell_height = (ui.available_height() - spacing) / 2.0;
+                    let label_height = ui.text_style_height(&egui::TextStyle::Small);
+                    let cell_width = (ui.available_width() - spacing) / 2.0;
+                    let maximum_preview_height = (cell_height - label_height - spacing).max(24.0);
+                    let rendered_width = cell_width
+                        .min(maximum_preview_height * WINDOW_ASPECT_RATIO)
+                        .max(24.0 * WINDOW_ASPECT_RATIO);
+                    let rendered_height = rendered_width / WINDOW_ASPECT_RATIO;
+                    ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(cell_width, cell_height),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                self.preview_cell(
+                                    ui,
+                                    "webcam",
+                                    "WEBCAM",
+                                    snapshot.previews.webcam.as_deref(),
+                                    rendered_width,
+                                    rendered_height,
+                                );
+                            },
+                        );
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(cell_width, cell_height),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                self.preview_cell(
+                                    ui,
+                                    "screen",
+                                    "SCREEN",
+                                    snapshot.previews.screen.as_deref(),
+                                    rendered_width,
+                                    rendered_height,
+                                );
+                            },
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(cell_width, cell_height),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                self.preview_cell(
+                                    ui,
+                                    "reference",
+                                    "REFERENCE",
+                                    snapshot.previews.reference.as_deref(),
+                                    rendered_width,
+                                    rendered_height,
+                                );
+                            },
+                        );
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(cell_width, cell_height),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                self.preview_cell(
+                                    ui,
+                                    "output",
+                                    "OUTPUT",
+                                    snapshot.previews.final_output.as_deref(),
+                                    rendered_width,
+                                    rendered_height,
+                                );
+                            },
+                        );
+                    });
                 },
             );
 
@@ -625,16 +693,15 @@ impl SwitcherApp {
         title: &str,
         frame: Option<&Frame>,
         width: f32,
+        height: f32,
     ) {
-        ui.vertical(|ui| {
-            ui.label(
-                RichText::new(title)
-                    .small()
-                    .strong()
-                    .color(Color32::LIGHT_GRAY),
-            );
-            self.preview(ui, key, frame, [width, width * 9.0 / 16.0]);
-        });
+        ui.label(
+            RichText::new(title)
+                .small()
+                .strong()
+                .color(Color32::LIGHT_GRAY),
+        );
+        self.preview(ui, key, frame, [width, height]);
     }
 
     fn preview(
@@ -649,33 +716,35 @@ impl SwitcherApp {
             .fill(Color32::from_rgb(12, 14, 18))
             .corner_radius(8)
             .show(ui, |ui| {
-                ui.set_min_size(available);
-                if let Some(frame) = frame {
-                    let texture = self.textures.entry(key).or_insert_with(|| PreviewTexture {
-                        sequence: 0,
-                        texture: ui.ctx().load_texture(
-                            key,
-                            frame_image(frame),
-                            TextureOptions::LINEAR,
-                        ),
-                    });
-                    if texture.sequence != frame.sequence {
-                        texture
-                            .texture
-                            .set(frame_image(frame), TextureOptions::LINEAR);
-                        texture.sequence = frame.sequence;
-                    }
-                    ui.centered_and_justified(|ui| {
-                        ui.add(
-                            egui::Image::new((texture.texture.id(), available))
-                                .maintain_aspect_ratio(true),
-                        );
-                    });
-                } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(RichText::new("No frame").color(Color32::DARK_GRAY));
-                    });
-                }
+                ui.allocate_ui_with_layout(
+                    available,
+                    egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                    |ui| {
+                        if let Some(frame) = frame {
+                            let texture =
+                                self.textures.entry(key).or_insert_with(|| PreviewTexture {
+                                    sequence: 0,
+                                    texture: ui.ctx().load_texture(
+                                        key,
+                                        frame_image(frame),
+                                        TextureOptions::LINEAR,
+                                    ),
+                                });
+                            if texture.sequence != frame.sequence {
+                                texture
+                                    .texture
+                                    .set(frame_image(frame), TextureOptions::LINEAR);
+                                texture.sequence = frame.sequence;
+                            }
+                            ui.add(
+                                egui::Image::new((texture.texture.id(), available))
+                                    .maintain_aspect_ratio(true),
+                            );
+                        } else {
+                            ui.label(RichText::new("No frame").color(Color32::DARK_GRAY));
+                        }
+                    },
+                );
             });
     }
 }
@@ -744,6 +813,29 @@ impl eframe::App for SwitcherApp {
                         context.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 }
+            }
+        }
+        let (window_size, maximized, fullscreen) = context.input(|input| {
+            let viewport = input.viewport();
+            (
+                viewport.inner_rect.map(|rect| rect.size()),
+                viewport.maximized.unwrap_or(false),
+                viewport.fullscreen.unwrap_or(false),
+            )
+        });
+        if let Some(window_size) = window_size {
+            if !maximized && !fullscreen {
+                let desired = aspect_locked_window_size(window_size, self.last_window_size);
+                if (desired.x - window_size.x).abs() > 1.0
+                    || (desired.y - window_size.y).abs() > 1.0
+                {
+                    context.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
+                    self.last_window_size = Some(desired);
+                } else {
+                    self.last_window_size = Some(window_size);
+                }
+            } else {
+                self.last_window_size = Some(window_size);
             }
         }
         let close_requested = context.input(|input| input.viewport().close_requested());
@@ -859,6 +951,18 @@ mod tests {
             bgra_color(0x4433_2211),
             Color32::from_rgba_unmultiplied(0x33, 0x22, 0x11, 0x44)
         );
+    }
+
+    #[test]
+    fn window_resize_stays_at_sixteen_by_nine() {
+        let wider =
+            aspect_locked_window_size(egui::vec2(1440.0, 720.0), Some(egui::vec2(1280.0, 720.0)));
+        assert!((wider.x / wider.y - WINDOW_ASPECT_RATIO).abs() < 0.000_001);
+        let taller =
+            aspect_locked_window_size(egui::vec2(1280.0, 800.0), Some(egui::vec2(1280.0, 720.0)));
+        assert!((taller.x / taller.y - WINDOW_ASPECT_RATIO).abs() < 0.000_001);
+        let minimum = aspect_locked_window_size(egui::vec2(400.0, 300.0), None);
+        assert_eq!(minimum.y, MIN_WINDOW_HEIGHT);
     }
 
     #[test]

@@ -4,13 +4,16 @@ use core::ffi::c_void;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER, S_OK};
-use windows::Win32::Media::KernelStreaming::{IKsControl, IKsControl_Impl, KSIDENTIFIER};
+use windows::Win32::Media::KernelStreaming::{
+    IKsControl, IKsControl_Impl, KSCATEGORY_VIDEO_CAMERA, KSIDENTIFIER,
+};
 use windows::Win32::Media::MediaFoundation::{
     IMFAsyncCallback, IMFAsyncResult, IMFAttributes, IMFGetService, IMFGetService_Impl,
     IMFMediaEvent, IMFMediaEventGenerator_Impl, IMFMediaEventQueue, IMFMediaSource,
     IMFMediaSource_Impl, IMFMediaSourceEx, IMFMediaSourceEx_Impl, IMFMediaStream2,
     IMFPresentationDescriptor, MENewStream, MESourceStarted, MESourceStopped, MEUpdatedStream,
     MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_E_INVALID_STATE_TRANSITION,
     MF_E_INVALIDSTREAMNUMBER, MF_E_SHUTDOWN, MF_E_UNSUPPORTED_SERVICE,
     MF_E_UNSUPPORTED_TIME_FORMAT, MFCreateAttributes, MFCreateEventQueue,
@@ -58,6 +61,10 @@ impl MediaSource {
             attributes.SetGUID(
                 &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
                 &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+            )?;
+            attributes.SetGUID(
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
+                &KSCATEGORY_VIDEO_CAMERA,
             )?;
             attributes.SetString(
                 &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
@@ -181,7 +188,7 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
         time_format: *const GUID,
         start_position: *const PROPVARIANT,
     ) -> windows_core::Result<()> {
-        presentation.ok()?;
+        let presentation = presentation.ok()?;
         if start_position.is_null() {
             return Err(Error::from_hresult(E_INVALIDARG));
         }
@@ -203,6 +210,22 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
             };
             (event_type, self.stream.to_interface::<IMFMediaStream2>())
         };
+        let mut selected = windows_core::BOOL::default();
+        let mut stream_descriptor = None;
+        unsafe {
+            presentation.GetStreamDescriptorByIndex(0, &mut selected, &mut stream_descriptor)?;
+        }
+        if !selected.as_bool() {
+            return Err(Error::from_hresult(MF_E_INVALIDSTREAMNUMBER));
+        }
+        let stream_descriptor =
+            stream_descriptor.ok_or_else(|| Error::from_hresult(MF_E_INVALIDSTREAMNUMBER))?;
+        let selected_type = unsafe {
+            stream_descriptor
+                .GetMediaTypeHandler()?
+                .GetCurrentMediaType()?
+        };
+        self.stream.set_media_type(&selected_type)?;
         self.stream.start()?;
         // SAFETY: interfaces and GUID pointers remain valid for each queue call.
         let queued = unsafe {

@@ -1,5 +1,5 @@
 use crate::{InputDevice, VideoInput};
-use asc_core::{Frame, PIPELINE_SIZE};
+use asc_core::{Frame, PIPELINE_SIZE, Size};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -9,7 +9,7 @@ use windows::Win32::Media::MediaFoundation::{
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_DEFAULT_STRIDE,
     MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-    MF_SOURCE_READER_ASYNC_CALLBACK, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
+    MF_SOURCE_READER_ASYNC_CALLBACK, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
     MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ERROR, MF_VERSION, MFCreateAttributes,
     MFCreateDeviceSource, MFCreateMediaType, MFCreateSourceReaderFromMediaSource,
     MFEnumDeviceSources, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup,
@@ -104,6 +104,8 @@ fn allocated_string(activation: &IMFActivate, key: &windows_core::GUID) -> Optio
 struct CaptureState {
     reader: Mutex<Option<IMFSourceReader>>,
     latest: Mutex<Option<Arc<Frame>>>,
+    format: Mutex<Size>,
+    failure: Mutex<Option<String>>,
     running: AtomicBool,
     generation: AtomicU64,
     sequence: AtomicU64,
@@ -131,6 +133,12 @@ impl CaptureState {
             let _ = unsafe { reader.ReadSample(STREAM, 0, None, None, None, None) };
         }
     }
+
+    fn set_failure(&self, message: impl Into<String>) {
+        if let Ok(mut failure) = self.failure.lock() {
+            *failure = Some(message.into());
+        }
+    }
 }
 
 #[implement(IMFSourceReaderCallback)]
@@ -151,6 +159,15 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
         if !self.state.is_current(self.expected_generation) {
             return Ok(());
         }
+        if status.is_err() {
+            self.state.set_failure(format!(
+                "webcam sample failed: {}",
+                windows_core::Error::from_hresult(status)
+            ));
+        } else if flags & MF_SOURCE_READERF_ERROR.0 as u32 != 0 {
+            self.state
+                .set_failure("webcam source reader reported a capture error");
+        }
         if status.is_ok()
             && flags & MF_SOURCE_READERF_ERROR.0 as u32 == 0
             && let Some(sample) = sample.as_ref()
@@ -161,15 +178,20 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
                 let mut length = 0;
                 // SAFETY: all output pointers are writable; Unlock balances Lock.
                 if unsafe { buffer.Lock(&mut bytes, None, Some(&mut length)) }.is_ok() {
-                    let required = (PIPELINE_SIZE.width * PIPELINE_SIZE.height * 4) as usize;
+                    let size = self
+                        .state
+                        .format
+                        .lock()
+                        .map_or(PIPELINE_SIZE, |format| *format);
+                    let required = (size.width * size.height * 4) as usize;
                     if length as usize >= required {
                         // SAFETY: the locked buffer contains at least `required` bytes.
                         let pixels = unsafe { core::slice::from_raw_parts(bytes, required) };
                         let sequence = self.state.sequence.fetch_add(1, Ordering::Relaxed) + 1;
                         if let Ok(frame) = Frame::new(
                             pixels.to_vec().into(),
-                            PIPELINE_SIZE,
-                            PIPELINE_SIZE.width * 4,
+                            size,
+                            size.width * 4,
                             sequence,
                             timestamp,
                             Instant::now(),
@@ -178,7 +200,15 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
                             && let Ok(mut latest) = self.state.latest.lock()
                         {
                             *latest = Some(Arc::new(frame));
+                            if let Ok(mut failure) = self.state.failure.lock() {
+                                *failure = None;
+                            }
                         }
+                    } else {
+                        self.state.set_failure(format!(
+                            "webcam returned a short frame buffer: {length} bytes for {}×{} RGB32",
+                            size.width, size.height
+                        ));
                     }
                     // SAFETY: this callback successfully locked the buffer.
                     let _ = unsafe { buffer.Unlock() };
@@ -295,7 +325,8 @@ impl VideoInput for MediaFoundationVideoInput {
             // SAFETY: reader attributes and callback remain live.
             unsafe {
                 reader_attributes.SetUnknown(&MF_SOURCE_READER_ASYNC_CALLBACK, &callback)?;
-                reader_attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
+                reader_attributes
+                    .SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
             }
             Ok(())
         })()
@@ -321,6 +352,22 @@ impl VideoInput for MediaFoundationVideoInput {
             Ok(())
         })()
         .map_err(|error| format!("could not negotiate RGB32 1280x720@30 webcam output: {error}"))?;
+        let current = unsafe { reader.GetCurrentMediaType(STREAM) }
+            .map_err(|error| format!("could not read negotiated webcam format: {error}"))?;
+        let frame_size = unsafe { current.GetUINT64(&MF_MT_FRAME_SIZE) }
+            .map_err(|error| format!("negotiated webcam format has no frame size: {error}"))?;
+        let size = Size::new((frame_size >> 32) as u32, frame_size as u32);
+        if size.width == 0 || size.height == 0 {
+            return Err("negotiated webcam format has empty dimensions".into());
+        }
+        *self
+            .state
+            .format
+            .lock()
+            .map_err(|_| "webcam format state is poisoned")? = size;
+        if let Ok(mut failure) = self.state.failure.lock() {
+            *failure = None;
+        }
         *self
             .state
             .reader
@@ -353,6 +400,16 @@ impl VideoInput for MediaFoundationVideoInput {
             .lock()
             .ok()
             .and_then(|frame| frame.clone())
+    }
+}
+
+impl MediaFoundationVideoInput {
+    pub fn last_error(&self) -> Option<String> {
+        self.state
+            .failure
+            .lock()
+            .ok()
+            .and_then(|failure| failure.clone())
     }
 }
 

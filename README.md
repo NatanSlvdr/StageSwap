@@ -4,7 +4,7 @@ Automatic Screen Camera is a local-only Windows 11 virtual camera written in Rus
 
 Download `windows-x64-portable.exe` for an x64 Windows 11 computer.
 
-Each EXE embeds its same-architecture Rust Media Foundation DLL. First launch requests elevation only to extract and register the DLL under `%ProgramFiles%\Automatic Screen Camera Rust Portable`; later launches run unelevated. Before deleting the EXE, exit the tray application and run:
+Each EXE embeds its same-architecture Rust Media Foundation DLL. First launch requests elevation only to extract and register the DLL under `%ProgramFiles%\Automatic Screen Camera Rust Portable`; later launches run unelevated. Payloads use content-versioned filenames, so an upgrade can register its new DLL even while a camera application still has the previous DLL loaded. Locked old copies are scheduled for deletion at reboot. Before deleting the EXE, exit the tray application and run:
 
 ```powershell
 .\windows-x64-portable.exe --cleanup-portable

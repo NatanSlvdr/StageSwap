@@ -3,12 +3,13 @@ use crate::virtual_camera::{LEGACY_SOURCE_ID, remove_virtual_camera_for_source};
 use asc_core::{AppConfig, ConfigStore};
 use std::env;
 use std::fs;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, FreeLibrary,
 };
 use windows::Win32::Storage::FileSystem::{
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    MOVEFILE_DELAY_UNTIL_REBOOT, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Registry::{
@@ -26,9 +27,11 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows_core::{HRESULT, PCSTR, PCWSTR};
 
 const SOURCE_FILE: &str = "AutomaticScreenCameraSource.dll";
+const SOURCE_FILE_PREFIX: &str = "AutomaticScreenCameraSource-";
 const OLD_CLASS_KEY: &str = r"Software\Classes\CLSID\{4B8BA04C-7A67-4DD5-B9F4-C607940A7A64}";
 const OLD_DEPLOYMENT_KEY: &str = r"SOFTWARE\AutomaticScreenCamera\Deployment";
 const OLD_PORTABLE_DIRECTORY: &str = "Automatic Screen Camera Portable";
+const SOURCE_CLASS_KEY: &str = r"Software\Classes\CLSID\{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}";
 const SOURCE_INPROC_KEY: &str =
     r"Software\Classes\CLSID\{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}\InprocServer32";
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -148,19 +151,20 @@ fn ensure_portable_install(payload: &[u8]) -> Result<(), String> {
     validate_native_architecture()?;
     validate_embedded_source(payload)?;
     cleanup_legacy_install()?;
-    if fs::read(source_path()).ok().as_deref() != Some(payload) || !source_registration_matches() {
+    let source = payload_source_path(payload)?;
+    if fs::read(&source).ok().as_deref() != Some(payload) || !source_registration_matches(&source) {
         run_elevated("--portable-register-elevated")?;
     }
-    if fs::read(source_path()).ok().as_deref() != Some(payload) {
+    if fs::read(&source).ok().as_deref() != Some(payload) {
         return Err("portable camera source was not installed correctly".into());
     }
-    if !source_registration_matches() {
+    if !source_registration_matches(&source) {
         return Err("portable camera source COM registration was not installed correctly".into());
     }
     Ok(())
 }
 
-fn source_registration_matches() -> bool {
+fn source_registration_matches(source: &Path) -> bool {
     let Some(registered) = registry_string(SOURCE_INPROC_KEY, None) else {
         return false;
     };
@@ -169,7 +173,7 @@ fn source_registration_matches() -> bool {
     };
     PathBuf::from(registered)
         .to_string_lossy()
-        .eq_ignore_ascii_case(&source_path().to_string_lossy())
+        .eq_ignore_ascii_case(&source.to_string_lossy())
         && threading_model
             .to_string_lossy()
             .eq_ignore_ascii_case("Both")
@@ -377,12 +381,20 @@ fn portable_directory() -> Result<PathBuf, String> {
         .map(|path| path.join("Automatic Screen Camera Rust Portable"))
 }
 
-fn source_path() -> PathBuf {
-    portable_directory()
-        .unwrap_or_else(|_| {
-            PathBuf::from(r"C:\Program Files\Automatic Screen Camera Rust Portable")
-        })
-        .join(SOURCE_FILE)
+fn payload_source_path(payload: &[u8]) -> Result<PathBuf, String> {
+    Ok(portable_directory()?.join(payload_source_file_name(payload)))
+}
+
+fn payload_source_file_name(payload: &[u8]) -> String {
+    // The filename changes with the payload so an in-use previous DLL never
+    // needs to be overwritten. FNV-1a is sufficient here because the trusted
+    // embedded payload, rather than untrusted input, selects the local name.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in payload {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{SOURCE_FILE_PREFIX}{hash:016x}.dll")
 }
 
 fn old_source_path() -> PathBuf {
@@ -397,61 +409,123 @@ fn install(payload: &[u8]) -> Result<(), String> {
     let directory = portable_directory()?;
     fs::create_dir_all(&directory)
         .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
-    let source = directory.join(SOURCE_FILE);
-    let staging = directory.join(format!("{SOURCE_FILE}.installing"));
-    let backup = directory.join(format!("{SOURCE_FILE}.backup"));
+    let source = directory.join(payload_source_file_name(payload));
+    let staging = source.with_extension("dll.installing");
     let _ = fs::remove_file(&staging);
-    if !source.exists() && backup.exists() {
-        fs::rename(&backup, &source)
-            .map_err(|error| format!("could not recover {}: {error}", source.display()))?;
+    let source_exists = source.exists();
+    if source_exists {
+        if fs::read(&source).ok().as_deref() != Some(payload) {
+            return Err(format!(
+                "camera source payload identity collision at {}",
+                source.display()
+            ));
+        }
     } else {
-        let _ = fs::remove_file(&backup);
-    }
-    fs::write(&staging, payload)
-        .map_err(|error| format!("could not stage {}: {error}", staging.display()))?;
-    if source.exists() {
-        if let Err(error) = invoke_registration(&source, b"DllUnregisterServer\0") {
+        fs::write(&staging, payload)
+            .map_err(|error| format!("could not stage {}: {error}", staging.display()))?;
+        if let Err(error) = fs::rename(&staging, &source) {
             let _ = fs::remove_file(&staging);
-            return Err(error);
-        }
-        if let Err(error) = fs::rename(&source, &backup) {
-            let _ = invoke_registration(&source, b"DllRegisterServer\0");
-            let _ = fs::remove_file(&staging);
-            return Err(format!("could not back up {}: {error}", source.display()));
+            if fs::read(&source).ok().as_deref() != Some(payload) {
+                return Err(format!("could not install {}: {error}", source.display()));
+            }
         }
     }
-    if let Err(error) = fs::rename(&staging, &source) {
-        if backup.exists() {
-            let _ = fs::rename(&backup, &source);
-            let _ = invoke_registration(&source, b"DllRegisterServer\0");
-        }
-        return Err(format!("could not install {}: {error}", source.display()));
-    }
+
+    let previous_source = registered_managed_source(&directory);
     if let Err(error) = invoke_registration(&source, b"DllRegisterServer\0") {
-        let _ = fs::remove_file(&source);
-        if backup.exists() {
-            let _ = fs::rename(&backup, &source);
-            let _ = invoke_registration(&source, b"DllRegisterServer\0");
+        if let Some(previous) = previous_source
+            && previous != source
+        {
+            let _ = invoke_registration(&previous, b"DllRegisterServer\0");
+        }
+        if !source_exists {
+            let _ = fs::remove_file(&source);
         }
         return Err(error);
     }
-    let _ = fs::remove_file(backup);
+    cleanup_managed_sources(&directory, Some(&source));
     Ok(())
 }
 
 fn cleanup() -> Result<(), String> {
     configure_startup(false)?;
     let camera_result = remove_virtual_camera();
-    let source = source_path();
-    if source.is_file() {
-        invoke_registration(&source, b"DllUnregisterServer\0")?;
-        fs::remove_file(&source)
-            .map_err(|error| format!("could not remove {}: {error}", source.display()))?;
+    let directory = portable_directory()?;
+    if let Some(source) = registered_managed_source(&directory) {
+        let _ = invoke_registration(&source, b"DllUnregisterServer\0");
     }
-    if let Some(parent) = source.parent() {
-        let _ = fs::remove_dir(parent);
-    }
+    delete_registry_tree(HKEY_LOCAL_MACHINE, SOURCE_CLASS_KEY)?;
+    cleanup_managed_sources(&directory, None);
+    let _ = fs::remove_dir(&directory);
     camera_result
+}
+
+fn registered_managed_source(directory: &Path) -> Option<PathBuf> {
+    let source = PathBuf::from(registry_string(SOURCE_INPROC_KEY, None)?);
+    is_managed_source(&source, directory).then_some(source)
+}
+
+fn is_managed_source(source: &Path, directory: &Path) -> bool {
+    let Some(parent) = source.parent() else {
+        return false;
+    };
+    let Some(file_name) = source.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    parent
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&directory.to_string_lossy())
+        && (file_name.eq_ignore_ascii_case(SOURCE_FILE)
+            || (file_name.len() > SOURCE_FILE_PREFIX.len() + 4
+                && file_name
+                    .get(..SOURCE_FILE_PREFIX.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(SOURCE_FILE_PREFIX))
+                && file_name
+                    .get(file_name.len() - 4..)
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case(".dll"))))
+}
+
+fn cleanup_managed_sources(directory: &Path, keep: Option<&Path>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if keep.is_some_and(|keep| {
+            path.to_string_lossy()
+                .eq_ignore_ascii_case(&keep.to_string_lossy())
+        }) {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name
+            .get(.."AutomaticScreenCameraSource".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("AutomaticScreenCameraSource"))
+        {
+            let _ = remove_or_schedule(&path);
+        }
+    }
+}
+
+fn remove_or_schedule(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {}
+    }
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: the source path is terminated, and a null destination requests
+    // deletion at reboot after any process holding the old DLL has exited.
+    unsafe {
+        MoveFileExW(
+            PCWSTR(path.as_ptr()),
+            PCWSTR::null(),
+            MOVEFILE_DELAY_UNTIL_REBOOT,
+        )
+    }
+    .map_err(|error| format!("could not remove or schedule camera source deletion: {error}"))
 }
 
 fn invoke_registration(path: &Path, export: &'static [u8]) -> Result<(), String> {
@@ -509,4 +583,37 @@ fn run_elevated(argument: &str) -> Result<(), String> {
     Ok(())
 }
 
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_source_names_are_stable_and_versioned() {
+        assert_eq!(
+            payload_source_file_name(b"test"),
+            "AutomaticScreenCameraSource-f9e6e6ef197c2b25.dll"
+        );
+        assert_ne!(
+            payload_source_file_name(b"first"),
+            payload_source_file_name(b"second")
+        );
+    }
+
+    #[test]
+    fn only_owned_dll_names_are_managed() {
+        let directory = Path::new(r"C:\Program Files\Automatic Screen Camera Rust Portable");
+        assert!(is_managed_source(&directory.join(SOURCE_FILE), directory));
+        assert!(is_managed_source(
+            &directory.join("AutomaticScreenCameraSource-0123456789abcdef.dll"),
+            directory
+        ));
+        assert!(!is_managed_source(
+            &directory.join("AutomaticScreenCameraSource-0123456789abcdef.dll.installing"),
+            directory
+        ));
+        assert!(!is_managed_source(
+            Path::new(r"C:\Windows\System32\AutomaticScreenCameraSource.dll"),
+            directory
+        ));
+    }
+}

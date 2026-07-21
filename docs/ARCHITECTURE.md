@@ -1,6 +1,6 @@
 # Architecture
 
-`windows-x64-portable.exe` is a native, self-deploying application. It embeds an x64 Media Foundation source DLL. First launch validates native Windows architecture, elevates only to extract and register that DLL, and then runs the tray application unelevated. `--cleanup-portable` unregisters and removes the payload. There is no Setup, uninstall entry, migration path, or cross-architecture deployment.
+`windows-x64-portable.exe` is a native, self-deploying application. It embeds an x64 Media Foundation source DLL. First launch validates native Windows architecture, elevates only to extract and register that DLL, and then runs the tray application unelevated. Each distinct payload is extracted to a content-versioned DLL filename before COM registration switches to it, so an older DLL locked by a camera process never blocks an upgrade. Unlocked stale copies are removed immediately and locked copies are scheduled for deletion at reboot. `--cleanup-portable` unregisters and removes the payload. There is no Setup, uninstall entry, migration path, or cross-architecture deployment.
 
 The application pipeline is fixed at 1280×720 BGRA and 30 fps:
 
