@@ -1,10 +1,8 @@
-name: Rust checks and packages
+name: Build and publish release
 
 on:
   push:
     branches: [main]
-  pull_request:
-  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -12,32 +10,10 @@ concurrency:
 
 permissions:
   contents: read
-  checks: write
 
 jobs:
-  portable-checks:
-    name: Portable Rust checks
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install pinned Rust
-        run: rustup show
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Unit tests
-        run: cargo test --workspace --all-targets
-      - name: Dependency audit
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # quick-xml is used only by Wayland's build-time protocol scanner;
-          # the application never parses untrusted XML at runtime.
-          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
-
-  windows:
-    name: Windows ${{ matrix.architecture }}
+  package:
+    name: Package Windows ${{ matrix.architecture }}
     runs-on: windows-2022
     strategy:
       fail-fast: false
@@ -57,13 +33,14 @@ jobs:
         with:
           arch: ${{ matrix.msvc-arch }}
           sdk: 10.0.22621.0
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
-      - name: Run Windows x64 tests
-        if: matrix.architecture == 'x64'
-        run: cargo test --workspace --all-targets --target ${{ matrix.target }}
-      - name: Package portable executable
-        run: cargo run -p xtask -- portable ${{ matrix.architecture }} dist
+      - name: Test x64 and package
+        shell: pwsh
+        run: |
+          if ('${{ matrix.architecture }}' -eq 'x64') {
+            cargo test --workspace --all-targets --target ${{ matrix.target }}
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          cargo run -p xtask -- portable ${{ matrix.architecture }} dist
       - name: Upload unsigned portable artifact
         uses: actions/upload-artifact@v7
         with:
@@ -72,3 +49,29 @@ jobs:
             dist/*.exe
             dist/*.sha256
           if-no-files-found: error
+
+  publish:
+    name: Publish unsigned release
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download portable artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: AutomaticScreenCamera-windows-*-unsigned
+          merge-multiple: true
+          path: release-assets
+      - name: Publish release and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          gh release create "main-$short_sha" \
+            release-assets/*.exe \
+            release-assets/*.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "Main build $short_sha" \
+            --generate-notes

@@ -32,24 +32,22 @@ Configuration schema 1, references, and logs live under `%LocalAppData%\Automati
 
 ### Testing from macOS
 
-You do not need a physical Windows PC for routine development. On macOS, run the
-platform-independent checks directly:
+You do not need a physical Windows PC for routine development. Before pushing to
+`main`, run the platform-independent checks and cross-target Clippy checks locally:
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+cargo clippy --workspace --all-targets --target aarch64-pc-windows-msvc -- -D warnings
 ```
 
-Then open the [Windows workflow](https://github.com/NatanSlvdr/WebcamSwitcher/actions/workflows/windows.yml),
-choose **Run workflow**, and download the two unsigned portable artifacts after it
-passes. This uses Windows runners to compile and package native x64 and ARM64 builds
-and to execute the x64 Windows test suite. The same workflow runs automatically for
-pull requests and pushes to `main`.
-
-Publishing is intentionally separate from routine CI. After updating the Cargo
-package version, push the matching semantic-version tag (for example `v0.2.0`) to
-run the release workflow and publish both unsigned executables with their checksums.
+Every push to `main` runs the [Windows workflow](https://github.com/NatanSlvdr/WebcamSwitcher/actions/workflows/windows.yml).
+It executes the x64 Windows tests, packages native x64 and ARM64 builds, and
+automatically creates a GitHub release tagged with the commit's short SHA. The
+release contains both unsigned portable executables and their checksums; no manual
+approval or version tag is required.
 
 GitHub-hosted runners cannot validate an interactive desktop, a physical webcam, or
 virtual-camera enumeration. For that final smoke test on an Apple-silicon Mac, create
