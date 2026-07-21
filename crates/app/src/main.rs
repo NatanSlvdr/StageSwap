@@ -5,7 +5,7 @@ use asc_core::{
     AppConfig, AppSnapshot, Command, ConfigStore, DeviceState, Frame, OutputMode, RestartTarget,
     RunState,
 };
-use eframe::egui::{self, Color32, RichText, TextureHandle, TextureOptions, Vec2};
+use eframe::egui::{self, Color32, RichText, Stroke, TextureHandle, TextureOptions, Vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -44,7 +44,20 @@ fn main() -> eframe::Result {
         "Automatic Screen Camera",
         options,
         Box::new(move |context| {
-            context.egui_ctx.set_visuals(egui::Visuals::dark());
+            let mut visuals = egui::Visuals::dark();
+            visuals.panel_fill = Color32::from_rgb(18, 20, 24);
+            visuals.window_fill = Color32::from_rgb(23, 25, 30);
+            visuals.selection.bg_fill = Color32::from_rgb(55, 115, 245);
+            visuals.widgets.inactive.corner_radius = 6.into();
+            visuals.widgets.hovered.corner_radius = 6.into();
+            visuals.widgets.active.corner_radius = 6.into();
+            visuals.widgets.hovered.bg_fill = Color32::from_rgb(48, 53, 63);
+            visuals.widgets.active.bg_fill = Color32::from_rgb(59, 67, 82);
+            context.egui_ctx.set_visuals(visuals);
+            context.egui_ctx.style_mut_of(egui::Theme::Dark, |style| {
+                style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+                style.spacing.button_padding = egui::vec2(14.0, 8.0);
+            });
             let app = SwitcherApp::new(loaded.config, loaded.warnings, store);
             #[cfg(windows)]
             if !start_visible && app.tray.is_none() {
@@ -86,7 +99,6 @@ struct SwitcherApp {
     store: ConfigStore,
     load_warnings: Vec<String>,
     show_settings: bool,
-    show_previews: bool,
     settings_tab: SettingsTab,
     textures: HashMap<&'static str, PreviewTexture>,
     log: LocalLog,
@@ -115,7 +127,6 @@ impl SwitcherApp {
             store,
             load_warnings,
             show_settings: false,
-            show_previews: false,
             settings_tab: SettingsTab::General,
             textures: HashMap::new(),
             log,
@@ -196,7 +207,7 @@ impl SwitcherApp {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.heading("Automatic Screen Camera");
-                ui.label(RichText::new("Virtual camera control center").color(Color32::GRAY));
+                ui.label(RichText::new("Live switcher").color(Color32::GRAY));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Settings").clicked() {
@@ -204,9 +215,6 @@ impl SwitcherApp {
                     self.send(Command::RefreshVideoDevices);
                     self.send(Command::Rescan);
                     self.show_settings = true;
-                }
-                if ui.button("4 previews").clicked() {
-                    self.show_previews = true;
                 }
             });
         });
@@ -226,53 +234,103 @@ impl SwitcherApp {
                 });
         }
         ui.add_space(8.0);
-        ui.columns(2, |columns| {
-            columns[0].vertical(|ui| {
-                ui.label(RichText::new("LIVE OUTPUT").small().color(Color32::GRAY));
-                self.preview(
-                    ui,
-                    "final",
-                    snapshot.previews.final_output.as_deref(),
-                    [640.0, 360.0],
-                );
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    for (mode, label) in [
-                        (OutputMode::Automatic, "Automatic"),
-                        (OutputMode::ForceCamera, "Force webcam"),
-                        (OutputMode::ForceScreen, "Force screen"),
-                    ] {
-                        if ui.selectable_label(snapshot.mode == mode, label).clicked() {
-                            self.set_mode(mode);
-                        }
-                    }
-                });
-            });
-            columns[1].vertical(|ui| {
-                ui.heading("Status");
+        let available_width = ui.available_width();
+        let preview_width = (available_width * 0.64).clamp(470.0, 720.0);
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(preview_width, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.label(RichText::new("SIGNAL FLOW").small().color(Color32::GRAY));
+                    let cell_width = ((ui.available_width() - 10.0) / 2.0).max(180.0);
+                    egui::Grid::new("dashboard-preview-grid")
+                        .num_columns(2)
+                        .spacing([10.0, 10.0])
+                        .show(ui, |ui| {
+                            self.preview_cell(
+                                ui,
+                                "webcam",
+                                "WEBCAM",
+                                snapshot.previews.webcam.as_deref(),
+                                cell_width,
+                            );
+                            self.preview_cell(
+                                ui,
+                                "screen",
+                                "SCREEN",
+                                snapshot.previews.screen.as_deref(),
+                                cell_width,
+                            );
+                            ui.end_row();
+                            self.preview_cell(
+                                ui,
+                                "reference",
+                                "REFERENCE",
+                                snapshot.previews.reference.as_deref(),
+                                cell_width,
+                            );
+                            self.preview_cell(
+                                ui,
+                                "output",
+                                "OUTPUT",
+                                snapshot.previews.final_output.as_deref(),
+                                cell_width,
+                            );
+                            ui.end_row();
+                        });
+                },
+            );
+
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.label(RichText::new("CONTROL").small().color(Color32::GRAY));
                 status_row(ui, "Webcam", snapshot.webcam_state);
-                status_row(ui, "Screen capture", snapshot.screen_state);
-                status_row(ui, "Virtual camera", snapshot.virtual_camera_state);
+                status_row(ui, "Screen", snapshot.screen_state);
+                status_row(ui, "Output", snapshot.virtual_camera_state);
                 ui.separator();
-                ui.label(format!("Selected output: {:?}", snapshot.actual_output));
-                ui.label(format!("Detection: {:?}", snapshot.detection));
-                ui.label(format!(
-                    "Transition: {:>3}% screen",
-                    (snapshot.transition.screen_mix * 100.0).round()
-                ));
-                ui.add_space(12.0);
-                ui.horizontal(|ui| match snapshot.run_state {
-                    RunState::Running | RunState::Starting => {
-                        if ui.button("Stop automation").clicked() {
-                            self.send(Command::Stop);
-                        }
+                detail_row(ui, "Selected", format!("{:?}", snapshot.actual_output));
+                detail_row(ui, "Detection", format!("{:?}", snapshot.detection));
+                detail_row(
+                    ui,
+                    "Screen mix",
+                    format!("{}%", (snapshot.transition.screen_mix * 100.0).round()),
+                );
+                ui.add_space(4.0);
+
+                let run_label = match snapshot.run_state {
+                    RunState::Running | RunState::Starting => "Stop automation",
+                    _ => "Start automation",
+                };
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 36.0],
+                        egui::Button::new(RichText::new(run_label).strong()),
+                    )
+                    .clicked()
+                {
+                    match snapshot.run_state {
+                        RunState::Running | RunState::Starting => self.send(Command::Stop),
+                        _ => self.send(Command::Start),
                     }
-                    _ => {
-                        if ui.button("Start automation").clicked() {
-                            self.send(Command::Start);
-                        }
+                }
+
+                ui.label(RichText::new("OUTPUT MODE").small().color(Color32::GRAY));
+                for (mode, label) in [
+                    (OutputMode::Automatic, "Automatic"),
+                    (OutputMode::ForceCamera, "Webcam"),
+                    (OutputMode::ForceScreen, "Screen"),
+                ] {
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 30.0],
+                            egui::Button::selectable(snapshot.mode == mode, label),
+                        )
+                        .clicked()
+                    {
+                        self.set_mode(mode);
                     }
-                });
+                }
+                ui.add_space(2.0);
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Capture reference").clicked() {
                         self.send(Command::CaptureReference);
@@ -281,35 +339,55 @@ impl SwitcherApp {
                         self.send(Command::Rescan);
                     }
                 });
-                ui.add_space(12.0);
-                ui.heading("Recent activity");
-                if snapshot.recent_activity.is_empty() {
-                    ui.label(RichText::new("No activity yet").color(Color32::GRAY));
-                }
-                for activity in snapshot.recent_activity.iter().rev().take(7) {
-                    ui.label(format!("• {activity}"));
-                }
-                ui.add_space(8.0);
-                ui.collapsing("Component controls", |ui| {
-                    restart_button(ui, &self.runtime, "Restart webcam", RestartTarget::Webcam);
-                    restart_button(
-                        ui,
-                        &self.runtime,
-                        "Restart screen capture",
-                        RestartTarget::ScreenCapture,
-                    );
-                    restart_button(
-                        ui,
-                        &self.runtime,
-                        "Restart virtual camera",
-                        RestartTarget::VirtualCamera,
-                    );
-                    restart_button(ui, &self.runtime, "Restart all", RestartTarget::All);
-                });
             });
         });
+
+        ui.add_space(6.0);
+        self.console(ui, &snapshot);
         self.settings_window(context);
-        self.previews_window(context, &snapshot);
+    }
+
+    fn console(&self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
+        egui::Frame::new()
+            .fill(Color32::from_rgb(7, 9, 12))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(42, 47, 55)))
+            .corner_radius(5)
+            .inner_margin(egui::Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("●").color(Color32::from_rgb(255, 95, 87)));
+                    ui.label(RichText::new("●").color(Color32::from_rgb(254, 188, 46)));
+                    ui.label(RichText::new("●").color(Color32::from_rgb(40, 200, 64)));
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("runtime console")
+                            .monospace()
+                            .small()
+                            .color(Color32::from_rgb(142, 150, 163)),
+                    );
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt("runtime-console")
+                    .max_height(112.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        if snapshot.recent_activity.is_empty() {
+                            ui.label(
+                                RichText::new("> waiting for runtime events…")
+                                    .monospace()
+                                    .color(Color32::from_rgb(112, 122, 136)),
+                            );
+                        }
+                        for activity in snapshot.recent_activity.iter().rev().take(8).rev() {
+                            ui.label(
+                                RichText::new(format!("> {activity}"))
+                                    .monospace()
+                                    .color(Color32::from_rgb(190, 205, 190)),
+                            );
+                        }
+                    });
+            });
     }
 
     fn settings_window(&mut self, context: &egui::Context) {
@@ -426,9 +504,6 @@ impl SwitcherApp {
                             "Restart screen capture",
                             RestartTarget::ScreenCapture,
                         );
-                        if ui.button("Open four previews").clicked() {
-                            self.show_previews = true;
-                        }
                     }
                     SettingsTab::Detection => {
                         ui.heading("Reference");
@@ -520,49 +595,6 @@ impl SwitcherApp {
         }
     }
 
-    fn previews_window(&mut self, context: &egui::Context, snapshot: &AppSnapshot) {
-        if !self.show_previews {
-            return;
-        }
-        let mut open = self.show_previews;
-        egui::Window::new("Four previews")
-            .open(&mut open)
-            .default_size([920.0, 620.0])
-            .show(context, |ui| {
-                egui::Grid::new("preview-grid")
-                    .num_columns(2)
-                    .show(ui, |ui| {
-                        self.preview_cell(
-                            ui,
-                            "webcam",
-                            "Webcam",
-                            snapshot.previews.webcam.as_deref(),
-                        );
-                        self.preview_cell(
-                            ui,
-                            "screen",
-                            "Screen",
-                            snapshot.previews.screen.as_deref(),
-                        );
-                        ui.end_row();
-                        self.preview_cell(
-                            ui,
-                            "final-grid",
-                            "Final output",
-                            snapshot.previews.final_output.as_deref(),
-                        );
-                        self.preview_cell(
-                            ui,
-                            "reference",
-                            "Saved reference (detection only)",
-                            snapshot.previews.reference.as_deref(),
-                        );
-                        ui.end_row();
-                    });
-            });
-        self.show_previews = open;
-    }
-
     fn exit_confirmation(&mut self, context: &egui::Context) {
         if !self.show_exit_confirmation {
             return;
@@ -592,10 +624,16 @@ impl SwitcherApp {
         key: &'static str,
         title: &str,
         frame: Option<&Frame>,
+        width: f32,
     ) {
         ui.vertical(|ui| {
-            ui.strong(title);
-            self.preview(ui, key, frame, [420.0, 236.0]);
+            ui.label(
+                RichText::new(title)
+                    .small()
+                    .strong()
+                    .color(Color32::LIGHT_GRAY),
+            );
+            self.preview(ui, key, frame, [width, width * 9.0 / 16.0]);
         });
     }
 
@@ -764,6 +802,15 @@ fn status_row(ui: &mut egui::Ui, label: &str, state: DeviceState) {
     });
 }
 
+fn detail_row(ui: &mut egui::Ui, label: &str, value: String) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(Color32::GRAY));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(value);
+        });
+    });
+}
+
 fn frame_image(frame: &Frame) -> egui::ColorImage {
     let mut rgba = Vec::with_capacity(frame.pixels().len());
     for pixel in frame.pixels().chunks_exact(4) {
@@ -815,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_banner_all_settings_tabs_and_preview_window_render() {
+    fn responsive_dashboard_and_all_settings_tabs_render() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
             AppConfig {
@@ -825,39 +872,37 @@ mod tests {
             vec!["Test warning banner".into()],
             ConfigStore::new(directory.path()),
         );
-        app.show_previews = true;
         let context = egui::Context::default();
-        for dpi_scale in [1.0, 1.5] {
-            for tab in [
-                SettingsTab::General,
-                SettingsTab::Sources,
-                SettingsTab::Detection,
-                SettingsTab::Output,
-                SettingsTab::Logs,
-            ] {
-                app.settings_tab = tab;
-                app.show_settings = true;
-                let mut input = egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1120.0, 760.0),
-                    )),
-                    ..egui::RawInput::default()
-                };
-                input
-                    .viewports
-                    .get_mut(&egui::ViewportId::ROOT)
-                    .unwrap()
-                    .native_pixels_per_point = Some(dpi_scale);
-                let output = context.run_ui(input, |ui| {
-                    assert_eq!(ui.ctx().native_pixels_per_point(), Some(dpi_scale));
-                    let context = ui.ctx().clone();
-                    app.dashboard(&context, ui);
-                });
-                assert!(
-                    !output.shapes.is_empty(),
-                    "{tab:?} at {dpi_scale}× produced no UI shapes"
-                );
+        for viewport in [egui::vec2(820.0, 600.0), egui::vec2(1120.0, 760.0)] {
+            for dpi_scale in [1.0, 1.5] {
+                for tab in [
+                    SettingsTab::General,
+                    SettingsTab::Sources,
+                    SettingsTab::Detection,
+                    SettingsTab::Output,
+                    SettingsTab::Logs,
+                ] {
+                    app.settings_tab = tab;
+                    app.show_settings = true;
+                    let mut input = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, viewport)),
+                        ..egui::RawInput::default()
+                    };
+                    input
+                        .viewports
+                        .get_mut(&egui::ViewportId::ROOT)
+                        .unwrap()
+                        .native_pixels_per_point = Some(dpi_scale);
+                    let output = context.run_ui(input, |ui| {
+                        assert_eq!(ui.ctx().native_pixels_per_point(), Some(dpi_scale));
+                        let context = ui.ctx().clone();
+                        app.dashboard(&context, ui);
+                    });
+                    assert!(
+                        !output.shapes.is_empty(),
+                        "{tab:?} at {viewport:?} and {dpi_scale}× produced no UI shapes"
+                    );
+                }
             }
         }
     }
