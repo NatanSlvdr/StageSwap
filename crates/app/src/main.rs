@@ -308,16 +308,12 @@ fn preview_converter_loop(shared: &Arc<(Mutex<PreviewConverterState>, Condvar)>)
             .0
             .lock()
             .expect("preview converter state is not poisoned");
-        if state
-            .latest_request
-            .as_ref()
-            .is_some_and(|(requested, requested_size)| {
-                Arc::ptr_eq(requested, &job.frame) && *requested_size == job.size
-            })
-        {
-            state.ready = Some(prepared);
-        }
+        store_completed_preview(&mut state, prepared);
     }
+}
+
+fn store_completed_preview(state: &mut PreviewConverterState, prepared: PreparedPreview) {
+    state.ready = Some(prepared);
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -431,59 +427,60 @@ enum FpsReading {
 
 #[derive(Default)]
 struct FpsTracker {
-    samples: VecDeque<(Instant, u64)>,
+    samples: VecDeque<Instant>,
     last_sequence: Option<u64>,
-    last_advanced_at: Option<Instant>,
+    last_presented_at: Option<Instant>,
     last_display_update: Option<Instant>,
     displayed: Option<u32>,
 }
 
 impl FpsTracker {
-    fn observe(&mut self, frame: Option<&Frame>, now: Instant) -> FpsReading {
-        if let Some(frame) = frame
-            && self.last_sequence != Some(frame.sequence)
+    fn record_presentation(&mut self, sequence: u64, now: Instant) {
+        if self.last_sequence == Some(sequence) {
+            return;
+        }
+        if self
+            .last_sequence
+            .is_some_and(|previous| sequence <= previous)
+            || self
+                .last_presented_at
+                .is_some_and(|presented| now.saturating_duration_since(presented) >= FPS_WINDOW)
         {
-            if self
-                .last_sequence
-                .is_some_and(|sequence| frame.sequence <= sequence)
-            {
-                self.samples.clear();
-                self.displayed = None;
-                self.last_display_update = None;
-            }
-            self.last_sequence = Some(frame.sequence);
-            self.last_advanced_at = Some(now);
-            self.samples.push_back((frame.received_at, frame.sequence));
-            while self.samples.front().is_some_and(|(received_at, _)| {
-                frame
-                    .received_at
-                    .checked_duration_since(*received_at)
-                    .is_some_and(|age| age > FPS_WINDOW)
-            }) {
-                self.samples.pop_front();
-            }
-
-            if self
-                .last_display_update
-                .is_none_or(|updated| now.saturating_duration_since(updated) >= FPS_REFRESH)
-            {
-                self.last_display_update = Some(now);
-                if let (Some((first_time, first_sequence)), Some((last_time, last_sequence))) =
-                    (self.samples.front(), self.samples.back())
-                {
-                    let elapsed = last_time.saturating_duration_since(*first_time);
-                    let frames = last_sequence.saturating_sub(*first_sequence);
-                    if frames > 0 && !elapsed.is_zero() {
-                        self.displayed =
-                            Some(((frames as f64 / elapsed.as_secs_f64()).round() as u32).min(999));
-                    }
-                }
-            }
+            self.samples.clear();
+            self.displayed = None;
+            self.last_display_update = None;
+        }
+        self.last_sequence = Some(sequence);
+        self.last_presented_at = Some(now);
+        self.samples.push_back(now);
+        while self
+            .samples
+            .front()
+            .is_some_and(|presented| now.saturating_duration_since(*presented) > FPS_WINDOW)
+        {
+            self.samples.pop_front();
         }
 
         if self
-            .last_advanced_at
-            .is_some_and(|advanced| now.saturating_duration_since(advanced) >= FPS_WINDOW)
+            .last_display_update
+            .is_none_or(|updated| now.saturating_duration_since(updated) >= FPS_REFRESH)
+        {
+            self.last_display_update = Some(now);
+            if let (Some(first), Some(last)) = (self.samples.front(), self.samples.back()) {
+                let elapsed = last.saturating_duration_since(*first);
+                let frames = self.samples.len().saturating_sub(1);
+                if frames > 0 && !elapsed.is_zero() {
+                    self.displayed =
+                        Some(((frames as f64 / elapsed.as_secs_f64()).round() as u32).min(999));
+                }
+            }
+        }
+    }
+
+    fn reading(&self, now: Instant) -> FpsReading {
+        if self
+            .last_presented_at
+            .is_some_and(|presented| now.saturating_duration_since(presented) >= FPS_WINDOW)
         {
             FpsReading::Value(0)
         } else {
@@ -1871,12 +1868,8 @@ impl SwitcherApp {
             }
         };
         let contour_width = 3.0;
-        let fps_reading = options.show_fps.then(|| {
-            self.fps_trackers
-                .entry(kind)
-                .or_default()
-                .observe(frame.map(Arc::as_ref), Instant::now())
-        });
+        let now = Instant::now();
+        let mut presented_sequence = None;
         let preview_frame = egui::Frame::new()
             .fill(Color32::from_rgb(12, 14, 18))
             .stroke(Stroke::new(contour_width, contour_color))
@@ -1913,11 +1906,13 @@ impl SwitcherApp {
                                 if !Arc::ptr_eq(&texture.source, &prepared.frame)
                                     || texture.size != prepared.size
                                 {
+                                    presented_sequence = Some(prepared.frame.sequence);
                                     texture.texture.set(prepared.image, TextureOptions::LINEAR);
                                     texture.source = prepared.frame;
                                     texture.size = prepared.size;
                                 }
                             } else {
+                                presented_sequence = Some(prepared.frame.sequence);
                                 let texture = ui.ctx().load_texture(
                                     kind.key(),
                                     prepared.image,
@@ -1954,6 +1949,13 @@ impl SwitcherApp {
                     }
                 },
             );
+        });
+        let fps_reading = options.show_fps.then(|| {
+            let tracker = self.fps_trackers.entry(kind).or_default();
+            if let Some(sequence) = presented_sequence {
+                tracker.record_presentation(sequence, now);
+            }
+            tracker.reading(now)
         });
         if let Some(reading) = fps_reading {
             paint_fps_overlay(ui, preview.response.rect, reading);
@@ -3349,18 +3351,6 @@ fn bgra_color(value: u32) -> Color32 {
 mod tests {
     use super::*;
 
-    fn frame_at(sequence: u64, received_at: Instant) -> Frame {
-        Frame::new(
-            vec![0, 0, 0, 255].into(),
-            asc_core::Size::new(1, 1),
-            4,
-            sequence,
-            0,
-            received_at,
-        )
-        .unwrap()
-    }
-
     #[test]
     fn default_ui_fonts_are_bundled() {
         assert!(!egui::FontDefinitions::default().font_data.is_empty());
@@ -3402,7 +3392,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_converter_drops_superseded_frames() {
+    fn preview_converter_collapses_pending_jobs_to_latest_frame() {
         let converter = PreviewConverter::new(PreviewKind::Output);
         let now = Instant::now();
         for sequence in 1..=12 {
@@ -3432,6 +3422,46 @@ mod tests {
             );
             thread::yield_now();
         }
+    }
+
+    #[test]
+    fn preview_converter_keeps_completed_frame_when_newer_request_is_pending() {
+        let now = Instant::now();
+        let completed = Arc::new(Frame::placeholder(
+            asc_core::Size::new(2, 2),
+            0xff00_0001,
+            1,
+            0,
+            now,
+        ));
+        let pending = Arc::new(Frame::placeholder(
+            asc_core::Size::new(2, 2),
+            0xff00_0002,
+            2,
+            0,
+            now,
+        ));
+        let size = [2, 2];
+        let mut state = PreviewConverterState {
+            latest_request: Some((Arc::clone(&pending), size)),
+            pending: Some(PreviewJob {
+                frame: Arc::clone(&pending),
+                size,
+            }),
+            ..PreviewConverterState::default()
+        };
+
+        store_completed_preview(
+            &mut state,
+            PreparedPreview {
+                image: frame_image(&completed, size),
+                frame: completed,
+                size,
+            },
+        );
+
+        assert_eq!(state.ready.as_ref().unwrap().frame.sequence, 1);
+        assert_eq!(state.pending.as_ref().unwrap().frame.sequence, 2);
     }
 
     #[test]
@@ -3525,46 +3555,59 @@ mod tests {
     }
 
     #[test]
-    fn fps_tracker_measures_steady_and_skipped_sequences() {
+    fn fps_tracker_measures_presented_frames_at_steady_and_reduced_rates() {
         let start = Instant::now();
         let mut steady = FpsTracker::default();
-        let mut reading = FpsReading::Pending;
         for sequence in 1..=31 {
             let elapsed = Duration::from_secs_f64((sequence - 1) as f64 / 30.0);
-            let frame = frame_at(sequence, start + elapsed);
-            reading = steady.observe(Some(&frame), start + elapsed);
+            steady.record_presentation(sequence, start + elapsed);
         }
-        assert_eq!(reading, FpsReading::Value(30));
-
-        let mut skipped = FpsTracker::default();
-        let first = frame_at(1, start);
-        assert_eq!(skipped.observe(Some(&first), start), FpsReading::Pending);
-        let later = frame_at(11, start + Duration::from_millis(333));
         assert_eq!(
-            skipped.observe(Some(&later), start + Duration::from_millis(333)),
+            steady.reading(start + Duration::from_secs(1)),
             FpsReading::Value(30)
+        );
+
+        let mut reduced = FpsTracker::default();
+        for sequence in 1..=16 {
+            let elapsed = Duration::from_secs_f64((sequence - 1) as f64 / 15.0);
+            reduced.record_presentation(sequence, start + elapsed);
+        }
+        assert_eq!(
+            reduced.reading(start + Duration::from_secs(1)),
+            FpsReading::Value(15)
         );
     }
 
     #[test]
-    fn fps_tracker_resets_and_reports_stalls() {
+    fn fps_tracker_counts_presentations_instead_of_source_sequence_gaps() {
         let start = Instant::now();
         let mut tracker = FpsTracker::default();
-        let first = frame_at(10, start);
-        tracker.observe(Some(&first), start);
-        let later = frame_at(20, start + Duration::from_millis(333));
+        tracker.record_presentation(1, start);
+        tracker.record_presentation(11, start + Duration::from_millis(333));
         assert_eq!(
-            tracker.observe(Some(&later), start + Duration::from_millis(333)),
-            FpsReading::Value(30)
+            tracker.reading(start + Duration::from_millis(333)),
+            FpsReading::Value(3)
+        );
+    }
+
+    #[test]
+    fn fps_tracker_resets_and_reports_presentation_stalls() {
+        let start = Instant::now();
+        let mut tracker = FpsTracker::default();
+        tracker.record_presentation(10, start);
+        tracker.record_presentation(20, start + Duration::from_millis(333));
+        assert_eq!(
+            tracker.reading(start + Duration::from_millis(333)),
+            FpsReading::Value(3)
         );
 
-        let reset = frame_at(1, start + Duration::from_millis(500));
+        tracker.record_presentation(1, start + Duration::from_millis(500));
         assert_eq!(
-            tracker.observe(Some(&reset), start + Duration::from_millis(500)),
+            tracker.reading(start + Duration::from_millis(500)),
             FpsReading::Pending
         );
         assert_eq!(
-            tracker.observe(Some(&reset), start + Duration::from_millis(1500)),
+            tracker.reading(start + Duration::from_millis(1500)),
             FpsReading::Value(0)
         );
     }
