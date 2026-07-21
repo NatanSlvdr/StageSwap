@@ -1,8 +1,8 @@
 use asc_core::{
     AppConfig, AppSnapshot, Command, DebouncedDetector, DetectorSettings, DeviceState, Frame,
-    FrameMetadata, GrayImage, PIPELINE_FPS, PIPELINE_SIZE, RunState, Size, Source,
+    FrameCompositor, FrameMetadata, FramePacer, GrayImage, PIPELINE_FPS, RunState, Size, Source,
     SourceAvailability, TransitionController, bgra_to_gray, decide, image_similarity,
-    resize_bilinear,
+    resize_bgra_to_gray, resize_bilinear,
 };
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -17,6 +17,8 @@ use asc_windows::{
     FramePublisher, MediaFoundationVideoInput, ScreenInput, VideoInput, VirtualCameraController,
     WindowsGraphicsScreenInput, choose_video_device, configure_startup, frame_pipe_name,
 };
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const COMMAND_CAPACITY: usize = 32;
 const ACTIVITY_LIMIT: usize = 20;
@@ -75,6 +77,7 @@ struct RuntimeState {
     config: AppConfig,
     snapshot: AppSnapshot,
     transition: TransitionController,
+    compositor: FrameCompositor,
     activity: VecDeque<String>,
     sequence: u64,
     started_at: Instant,
@@ -105,6 +108,7 @@ impl RuntimeState {
             snapshot,
             config,
             transition: TransitionController::default(),
+            compositor: FrameCompositor::default(),
             activity: VecDeque::with_capacity(ACTIVITY_LIMIT),
             sequence: 0,
             started_at: now,
@@ -189,12 +193,11 @@ impl RuntimeState {
         }
         self.sequence = self.sequence.wrapping_add(1).max(1);
         let timestamp = now.saturating_duration_since(self.started_at).as_nanos() / 100;
-        let output = Frame::blend(
-            self.snapshot.previews.webcam.as_deref(),
-            self.snapshot.previews.screen.as_deref(),
+        let output = self.compositor.compose(
+            self.snapshot.previews.webcam.as_ref(),
+            self.snapshot.previews.screen.as_ref(),
             self.snapshot.transition.screen_mix,
             self.config.placeholder_color_bgra,
-            PIPELINE_SIZE,
             FrameMetadata {
                 sequence: self.sequence,
                 timestamp_100ns: i64::try_from(timestamp).unwrap_or(i64::MAX),
@@ -244,9 +247,13 @@ impl RuntimeState {
 }
 
 fn gray_thumbnail(frame: &Frame) -> Option<GrayImage> {
-    bgra_to_gray(frame.pixels(), frame.size, frame.stride as usize)
-        .ok()
-        .and_then(|image| resize_bilinear(&image, Size::new(160, 90)).ok())
+    resize_bgra_to_gray(
+        frame.pixels(),
+        frame.size,
+        frame.stride as usize,
+        Size::new(160, 90),
+    )
+    .ok()
 }
 
 fn load_reference(path: &str) -> Option<(GrayImage, Arc<Frame>)> {
@@ -323,9 +330,10 @@ fn run(config: AppConfig, commands: Receiver<Command>, shared: Arc<RwLock<AppSna
     if start_automatically {
         state.command(Command::Start);
     }
-    let frame_interval = Duration::from_secs_f64(1.0 / f64::from(PIPELINE_FPS));
+    let frame_interval = Duration::from_nanos(1_000_000_000 / u64::from(PIPELINE_FPS));
+    let mut pacer = FramePacer::new(Instant::now(), frame_interval);
     loop {
-        match commands.recv_timeout(frame_interval) {
+        match commands.recv_timeout(pacer.wait_duration(Instant::now())) {
             Ok(command) => {
                 platform.command(&command, &mut state);
                 if !state.command(command) {
@@ -341,13 +349,150 @@ fn run(config: AppConfig, commands: Receiver<Command>, shared: Arc<RwLock<AppSna
                 return;
             }
         }
+        let now = Instant::now();
+        if !pacer.is_due(now, Duration::ZERO) {
+            continue;
+        }
+        pacer.advance(now);
         platform.refresh_inputs(&mut state);
-        state.detect(Instant::now());
-        state.tick(Instant::now());
+        state.detect(now);
+        state.tick(now);
         platform.publish(&mut state);
         *shared
             .write()
             .expect("runtime snapshot lock is not poisoned") = state.snapshot.clone();
+    }
+}
+
+#[cfg(windows)]
+struct MonitorScanRequest {
+    generation: u64,
+    reference: Option<GrayImage>,
+    cursor_visible: bool,
+}
+
+#[cfg(windows)]
+struct MonitorScanResult {
+    generation: u64,
+    monitors: Vec<asc_core::MonitorDescriptor>,
+    scores: Vec<MonitorScore>,
+}
+
+#[cfg(windows)]
+struct MonitorScanWorker {
+    requests: Option<SyncSender<MonitorScanRequest>>,
+    results: Option<Receiver<MonitorScanResult>>,
+    worker: Option<JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+    in_flight: bool,
+}
+
+#[cfg(windows)]
+impl MonitorScanWorker {
+    fn start() -> Result<Self, String> {
+        let (request_sender, request_receiver) = mpsc::sync_channel::<MonitorScanRequest>(1);
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::Builder::new()
+            .name("asc-monitor-scan".into())
+            .spawn(move || {
+                while let Ok(request) = request_receiver.recv() {
+                    if worker_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let result = scan_monitors(request, &worker_stop);
+                    if result_sender.send(result).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| format!("could not start monitor scan worker: {error}"))?;
+        Ok(Self {
+            requests: Some(request_sender),
+            results: Some(result_receiver),
+            worker: Some(worker),
+            stop,
+            in_flight: false,
+        })
+    }
+
+    fn request(&mut self, request: MonitorScanRequest) -> bool {
+        if self.in_flight {
+            return false;
+        }
+        let sent = self
+            .requests
+            .as_ref()
+            .is_some_and(|sender| sender.try_send(request).is_ok());
+        self.in_flight = sent;
+        sent
+    }
+
+    fn poll(&mut self) -> Option<MonitorScanResult> {
+        let result = self.results.as_ref()?.try_recv().ok()?;
+        self.in_flight = false;
+        Some(result)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for MonitorScanWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.requests.take();
+        self.results.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(windows)]
+fn scan_monitors(request: MonitorScanRequest, stop: &AtomicBool) -> MonitorScanResult {
+    let input = WindowsGraphicsScreenInput::default();
+    let monitors = input.enumerate().unwrap_or_default();
+    let scores = request
+        .reference
+        .as_ref()
+        .map_or_else(Vec::new, |reference| {
+            monitors
+                .iter()
+                .cloned()
+                .take_while(|_| !stop.load(Ordering::Acquire))
+                .map(|monitor| {
+                    let mut capture = WindowsGraphicsScreenInput::default();
+                    let valid = capture.start(&monitor, request.cursor_visible).is_ok();
+                    let deadline = Instant::now() + Duration::from_millis(750);
+                    let frame = loop {
+                        if stop.load(Ordering::Acquire) {
+                            break None;
+                        }
+                        if let Some(frame) = capture.latest_frame() {
+                            break Some(frame);
+                        }
+                        if Instant::now() >= deadline {
+                            break None;
+                        }
+                        thread::sleep(Duration::from_millis(25));
+                    };
+                    capture.stop();
+                    let similarity = frame
+                        .as_deref()
+                        .and_then(gray_thumbnail)
+                        .map_or(0.0, |candidate| image_similarity(reference, &candidate));
+                    MonitorScore {
+                        monitor,
+                        similarity,
+                        capture_valid: valid && frame.is_some(),
+                    }
+                })
+                .collect()
+        });
+    MonitorScanResult {
+        generation: request.generation,
+        monitors,
+        scores,
     }
 }
 
@@ -361,6 +506,8 @@ struct Platform {
     selected_monitor: Option<asc_core::MonitorDescriptor>,
     monitor_tracker: MonitorTracker,
     last_monitor_scan: Instant,
+    monitor_scan_generation: u64,
+    monitor_scan_worker: Option<MonitorScanWorker>,
 }
 
 #[cfg(windows)]
@@ -488,6 +635,13 @@ impl Platform {
             monitor_tracker.select(monitor);
         }
         state.snapshot.selected_monitor = selected_monitor.clone();
+        let monitor_scan_worker = match MonitorScanWorker::start() {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                state.record(error);
+                None
+            }
+        };
         let mut platform = Self {
             publisher,
             camera,
@@ -497,8 +651,10 @@ impl Platform {
             selected_monitor,
             monitor_tracker,
             last_monitor_scan: Instant::now() - Duration::from_secs(30),
+            monitor_scan_generation: 1,
+            monitor_scan_worker,
         };
-        platform.rescan_monitors(state);
+        platform.request_monitor_scan(state);
         platform
     }
 
@@ -527,6 +683,8 @@ impl Platform {
                     state.config.cursor_visible = config.cursor_visible;
                     self.restart_screen(state);
                     state.config.cursor_visible = old;
+                    self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
+                    self.last_monitor_scan = Instant::now() - Duration::from_secs(30);
                 }
                 if config.placeholder_color_bgra != state.config.placeholder_color_bgra
                     && let Some(camera) = &mut self.camera
@@ -544,6 +702,7 @@ impl Platform {
                         tracker.select(monitor);
                     }
                     self.monitor_tracker = tracker;
+                    self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
                     self.last_monitor_scan = Instant::now() - Duration::from_secs(30);
                 }
             }
@@ -557,6 +716,8 @@ impl Platform {
                                 "Reference captured for this session but could not be saved: {error}"
                             )),
                         }
+                        self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
+                        self.request_monitor_scan(state);
                     } else {
                         state.record("Reference capture failed: invalid screen frame");
                     }
@@ -569,7 +730,8 @@ impl Platform {
                     Ok((reference, preview)) => {
                         state.install_reference(reference, &preview, Instant::now());
                         state.record("Reference imported into local storage");
-                        self.rescan_monitors(state);
+                        self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
+                        self.request_monitor_scan(state);
                     }
                     Err(error) => state.record(format!("Reference import failed: {error}")),
                 }
@@ -582,6 +744,7 @@ impl Platform {
                 {
                     self.selected_monitor = Some(monitor.clone());
                     self.monitor_tracker.select(monitor.clone());
+                    self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
                     state.snapshot.selected_monitor = Some(monitor);
                     self.restart_screen(state);
                 } else {
@@ -602,7 +765,7 @@ impl Platform {
                 }
                 Err(error) => state.record(format!("Video device refresh failed: {error}")),
             },
-            Command::Rescan => self.rescan_monitors(state),
+            Command::Rescan => self.request_monitor_scan(state),
             Command::Stop => {
                 if let Some(publisher) = &self.publisher {
                     let _ = publisher.invalidate();
@@ -669,8 +832,9 @@ impl Platform {
 
     fn refresh_inputs(&mut self, state: &mut RuntimeState) {
         let now = Instant::now();
+        self.refresh_monitor_scan(state);
         if now.duration_since(self.last_monitor_scan) >= Duration::from_secs(30) {
-            self.rescan_monitors(state);
+            self.request_monitor_scan(state);
         }
         let webcam = self.webcam.latest_frame();
         state.snapshot.availability.camera_ready = webcam.is_some();
@@ -711,23 +875,41 @@ impl Platform {
         }
     }
 
-    fn rescan_monitors(&mut self, state: &mut RuntimeState) {
-        self.last_monitor_scan = Instant::now();
-        if let Ok(monitors) = self.screen.enumerate() {
-            state.snapshot.monitors = monitors.into();
-        }
-        let Some(reference) = state.reference.clone() else {
+    fn request_monitor_scan(&mut self, state: &RuntimeState) {
+        let Some(worker) = &mut self.monitor_scan_worker else {
             return;
         };
-        let scores = self.scan_scores(&reference, state.config.cursor_visible);
-        let result = self.monitor_tracker.apply_scan(&scores);
-        let result = if result.confirmation_pending {
-            let confirmation = self.scan_scores(&reference, state.config.cursor_visible);
-            self.monitor_tracker.apply_scan(&confirmation)
-        } else {
-            result
+        if worker.request(MonitorScanRequest {
+            generation: self.monitor_scan_generation,
+            reference: state.reference.clone(),
+            cursor_visible: state.config.cursor_visible,
+        }) {
+            self.last_monitor_scan = Instant::now();
+        }
+    }
+
+    fn refresh_monitor_scan(&mut self, state: &mut RuntimeState) {
+        let Some(result) = self
+            .monitor_scan_worker
+            .as_mut()
+            .and_then(MonitorScanWorker::poll)
+        else {
+            return;
         };
-        if let Some(monitor) = result.tracked
+        if result.generation != self.monitor_scan_generation {
+            self.request_monitor_scan(state);
+            return;
+        }
+        state.snapshot.monitors = result.monitors.into();
+        if result.scores.is_empty() {
+            return;
+        }
+        let tracking = self.monitor_tracker.apply_scan(&result.scores);
+        if tracking.confirmation_pending {
+            self.request_monitor_scan(state);
+            return;
+        }
+        if let Some(monitor) = tracking.tracked
             && self.selected_monitor.as_ref() != Some(&monitor)
         {
             self.selected_monitor = Some(monitor);
@@ -735,39 +917,6 @@ impl Platform {
             self.restart_screen(state);
             state.record("Reference monitor changed after two scans");
         }
-    }
-
-    fn scan_scores(&self, reference: &GrayImage, cursor_visible: bool) -> Vec<MonitorScore> {
-        let Ok(monitors) = self.screen.enumerate() else {
-            return Vec::new();
-        };
-        monitors
-            .into_iter()
-            .map(|monitor| {
-                let mut capture = WindowsGraphicsScreenInput::default();
-                let valid = capture.start(&monitor, cursor_visible).is_ok();
-                let deadline = Instant::now() + Duration::from_millis(750);
-                let frame = loop {
-                    if let Some(frame) = capture.latest_frame() {
-                        break Some(frame);
-                    }
-                    if Instant::now() >= deadline {
-                        break None;
-                    }
-                    thread::sleep(Duration::from_millis(25));
-                };
-                capture.stop();
-                let similarity = frame
-                    .as_deref()
-                    .and_then(gray_thumbnail)
-                    .map_or(0.0, |candidate| image_similarity(reference, &candidate));
-                MonitorScore {
-                    monitor,
-                    similarity,
-                    capture_valid: valid && frame.is_some(),
-                }
-            })
-            .collect()
     }
 
     fn publish(&self, state: &mut RuntimeState) {
@@ -864,6 +1013,42 @@ mod tests {
         assert_eq!(snapshot.mode, OutputMode::ForceScreen);
         assert_eq!(snapshot.actual_output, Source::Placeholder);
         assert!(snapshot.previews.final_output.is_some());
+    }
+
+    #[test]
+    fn command_traffic_does_not_accelerate_output_clock() {
+        let runtime = RuntimeHandle::spawn(AppConfig {
+            start_automatically: true,
+            ..AppConfig::default()
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let first_sequence = loop {
+            if let Some(frame) = runtime.snapshot().previews.final_output {
+                break frame.sequence;
+            }
+            assert!(Instant::now() < deadline, "runtime did not start");
+            thread::yield_now();
+        };
+        for index in 0..40 {
+            let mode = if index % 2 == 0 {
+                OutputMode::ForceCamera
+            } else {
+                OutputMode::ForceScreen
+            };
+            runtime.send(Command::SetMode(mode)).unwrap();
+            thread::sleep(Duration::from_millis(2));
+        }
+        thread::sleep(Duration::from_millis(20));
+        let last_sequence = runtime
+            .snapshot()
+            .previews
+            .final_output
+            .expect("runtime stopped publishing")
+            .sequence;
+        assert!(
+            last_sequence.saturating_sub(first_sequence) <= 5,
+            "commands accelerated output from sequence {first_sequence} to {last_sequence}"
+        );
     }
 
     #[cfg(windows)]

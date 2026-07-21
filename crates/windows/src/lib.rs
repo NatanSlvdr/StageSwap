@@ -108,24 +108,46 @@ mod tests {
 #[cfg(all(test, windows))]
 mod interactive_windows_tests {
     use super::*;
-    use std::collections::HashSet;
+    use asc_core::{FramePacer, PIPELINE_FPS, PIPELINE_SIZE};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
-    fn wait_for_sequences(input: &dyn ScreenInput, count: usize) {
+    fn wait_for_sequences(input: &dyn ScreenInput, count: usize) -> Vec<Instant> {
         let deadline = Instant::now() + Duration::from_secs(20);
-        let mut sequences = HashSet::new();
-        while sequences.len() < count && Instant::now() < deadline {
-            if let Some(frame) = input.latest_frame() {
-                sequences.insert(frame.sequence);
+        let mut samples = Vec::with_capacity(count);
+        let mut last_sequence = None;
+        while samples.len() < count && Instant::now() < deadline {
+            if let Some(frame) = input.latest_frame()
+                && last_sequence != Some(frame.sequence)
+            {
+                last_sequence = Some(frame.sequence);
+                samples.push(frame.received_at);
             }
             thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
-            sequences.len(),
+            samples.len(),
             count,
             "capture did not produce {count} frames"
         );
+        samples
+    }
+
+    fn collect_video_sequences(input: &dyn VideoInput, count: usize) -> Vec<(Instant, i64)> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut samples = Vec::with_capacity(count);
+        let mut last_sequence = None;
+        while samples.len() < count && Instant::now() < deadline {
+            if let Some(frame) = input.latest_frame()
+                && last_sequence != Some(frame.sequence)
+            {
+                last_sequence = Some(frame.sequence);
+                samples.push((frame.received_at, frame.timestamp_100ns));
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        samples
     }
 
     #[test]
@@ -135,7 +157,19 @@ mod interactive_windows_tests {
         let monitor = input.enumerate().unwrap().into_iter().next().unwrap();
         for cursor_visible in [true, false] {
             input.start(&monitor, cursor_visible).unwrap();
-            wait_for_sequences(&input, 300);
+            let samples = wait_for_sequences(&input, 300);
+            let elapsed = samples.last().unwrap().duration_since(samples[0]);
+            let fps = (samples.len() - 1) as f64 / elapsed.as_secs_f64();
+            let maximum_gap = samples
+                .windows(2)
+                .map(|pair| pair[1].duration_since(pair[0]))
+                .max()
+                .unwrap();
+            assert!(fps >= 29.0, "screen capture averaged only {fps:.2} fps");
+            assert!(
+                maximum_gap <= Duration::from_millis(100),
+                "screen capture stalled for {maximum_gap:?}"
+            );
             input.stop();
             assert!(input.latest_frame().is_none());
         }
@@ -168,5 +202,76 @@ mod interactive_windows_tests {
         assert!(camera.is_running());
         camera.restart().unwrap();
         assert!(camera.is_running());
+    }
+
+    #[test]
+    #[ignore = "requires the portable COM source to be installed and no running app instance"]
+    fn virtual_camera_delivers_three_hundred_frames_at_thirty_fps() {
+        let pipe_name = frame_pipe_name().unwrap();
+        let publisher = FramePublisher::start(&pipe_name).unwrap();
+        let _camera = VirtualCameraController::start(pipe_name, 0xff17_1719).unwrap();
+        let mut input = MediaFoundationVideoInput::default();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let device = loop {
+            if let Some(device) = video_input::enumerate_all_video_devices()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|device| device.is_virtual)
+            {
+                break device;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "virtual camera did not appear in device enumeration"
+            );
+            thread::sleep(Duration::from_millis(100));
+        };
+        input.start(&device.id).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let publisher_worker = thread::spawn(move || {
+            let interval = Duration::from_nanos(1_000_000_000 / u64::from(PIPELINE_FPS));
+            let mut pacer = FramePacer::new(Instant::now(), interval);
+            let frame = Frame::placeholder(PIPELINE_SIZE, 0xff20_3040, 1, 0, Instant::now());
+            while !worker_stop.load(Ordering::Acquire) {
+                let wait = pacer.wait_duration(Instant::now());
+                if !wait.is_zero() {
+                    thread::sleep(wait);
+                }
+                let now = Instant::now();
+                pacer.advance(now);
+                if publisher.publish(&frame).is_err() {
+                    break;
+                }
+            }
+        });
+        let _warmup = collect_video_sequences(&input, 30);
+        let samples = collect_video_sequences(&input, 300);
+        stop.store(true, Ordering::Release);
+        publisher_worker.join().unwrap();
+        input.stop();
+
+        assert_eq!(
+            samples.len(),
+            300,
+            "virtual camera did not deliver 300 frames"
+        );
+        assert!(
+            samples.windows(2).all(|pair| pair[1].1 > pair[0].1),
+            "virtual camera sample timestamps were not monotonic"
+        );
+        let elapsed = samples.last().unwrap().0.duration_since(samples[0].0);
+        let fps = (samples.len() - 1) as f64 / elapsed.as_secs_f64();
+        let maximum_gap = samples
+            .windows(2)
+            .map(|pair| pair[1].0.duration_since(pair[0].0))
+            .max()
+            .unwrap();
+        assert!(fps >= 29.0, "virtual camera averaged only {fps:.2} fps");
+        assert!(
+            maximum_gap <= Duration::from_millis(100),
+            "virtual camera stalled for {maximum_gap:?}"
+        );
     }
 }

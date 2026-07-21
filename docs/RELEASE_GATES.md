@@ -11,4 +11,4 @@ Before publication:
 - Reference screenshots exist and the Rust UI comparison passes at both 100% and 150% DPI; the native interactive test suite passes on x64.
 - Artifact versions, source revisions, architecture metadata, and checksums match the release record.
 
-No reliability claim covers excluded lifecycle, hot-plug, driver, contention, or performance scenarios.
+No reliability claim covers excluded lifecycle, hot-plug, driver, contention, or performance scenarios beyond the documented 1280×720-at-30-fps acceptance checks.

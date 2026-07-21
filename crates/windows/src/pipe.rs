@@ -1,4 +1,4 @@
-use asc_core::{Frame, FrameHeader, MAX_FRAME_BYTES};
+use asc_core::{Frame, FrameHeader, HEADER_LEN, MAX_FRAME_BYTES};
 use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -20,10 +20,20 @@ use windows::Win32::System::Pipes::{
 };
 use windows::core::{BOOL, PCWSTR};
 
-#[derive(Default)]
 struct Latest {
     sequence: u64,
-    packet: Vec<u8>,
+    header: [u8; HEADER_LEN],
+    pixels: Arc<[u8]>,
+}
+
+impl Default for Latest {
+    fn default() -> Self {
+        Self {
+            sequence: 0,
+            header: [0; HEADER_LEN],
+            pixels: Arc::from([]),
+        }
+    }
 }
 
 struct Shared {
@@ -99,7 +109,7 @@ impl FramePublisher {
             .lock()
             .map_err(|_| "frame publisher state is poisoned")?;
         latest.sequence = latest.sequence.wrapping_add(1).max(1);
-        let header = FrameHeader {
+        latest.header = FrameHeader {
             sequence: latest.sequence,
             size: frame.size,
             stride: frame.stride,
@@ -108,10 +118,7 @@ impl FramePublisher {
         }
         .encode()
         .map_err(|error| format!("invalid IPC frame: {error:?}"))?;
-        latest.packet.clear();
-        latest.packet.reserve(header.len() + frame.pixels().len());
-        latest.packet.extend_from_slice(&header);
-        latest.packet.extend_from_slice(frame.pixels());
+        latest.pixels = frame.pixels_arc();
         drop(latest);
         self.shared.changed.notify_all();
         Ok(())
@@ -125,10 +132,10 @@ impl FramePublisher {
             .lock()
             .map_err(|_| "frame publisher state is poisoned")?;
         latest.sequence = latest.sequence.wrapping_add(1).max(1);
-        latest.packet = FrameHeader::invalidation(latest.sequence)
+        latest.header = FrameHeader::invalidation(latest.sequence)
             .and_then(FrameHeader::encode)
-            .map_err(|error| format!("invalid IPC invalidation: {error:?}"))?
-            .to_vec();
+            .map_err(|error| format!("invalid IPC invalidation: {error:?}"))?;
+        latest.pixels = Arc::from([]);
         drop(latest);
         self.shared.changed.notify_all();
         Ok(())
@@ -264,9 +271,10 @@ fn send_frames(pipe: HANDLE, shared: &Shared) {
             return;
         }
         let sequence = latest.sequence;
-        let packet = latest.packet.clone();
+        let header = latest.header;
+        let pixels = Arc::clone(&latest.pixels);
         drop(latest);
-        if packet.is_empty() || !write_all(pipe, &packet) {
+        if !write_all(pipe, &header) || (!pixels.is_empty() && !write_all(pipe, &pixels)) {
             return;
         }
         sent = sequence;
@@ -290,6 +298,8 @@ fn write_all(pipe: HANDLE, mut bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asc_core::Size;
+    use std::time::Instant;
 
     #[test]
     fn duplicate_pipe_publisher_is_rejected_during_startup() {
@@ -301,5 +311,22 @@ mod tests {
         let second = FramePublisher::start(&name);
         assert!(second.is_err(), "duplicate publisher unexpectedly started");
         drop(first);
+    }
+
+    #[test]
+    fn publishing_replaces_the_latest_frame_without_copying_its_pixels() {
+        let name = format!(
+            r"\\.\pipe\AutomaticScreenCameraRust.LatestTest.{}",
+            std::process::id()
+        );
+        let publisher = FramePublisher::start(&name).unwrap();
+        let first = Frame::placeholder(Size::new(2, 2), 0xff00_0000, 1, 0, Instant::now());
+        let second = Frame::placeholder(Size::new(2, 2), 0xffff_ffff, 2, 1, Instant::now());
+        let second_pixels = second.pixels_arc();
+        publisher.publish(&first).unwrap();
+        publisher.publish(&second).unwrap();
+        let latest = publisher.shared.latest.lock().unwrap();
+        assert_eq!(latest.sequence, 2);
+        assert!(Arc::ptr_eq(&latest.pixels, &second_pixels));
     }
 }

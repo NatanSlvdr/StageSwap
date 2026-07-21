@@ -9,7 +9,7 @@ This scope replaced the former production application directly. The repository n
 - One screen capture selected by the saved visual reference. Compare a 160×90 grayscale image every 250 ms, with five matches and three mismatches. Scan displays at startup, every 30 seconds, and on explicit Rescan only to locate that reference.
 - Automatic, Force Webcam, and Force Screen modes, with the current 500 ms reversible fade and placeholder fallbacks.
 - One per-user frame transport from the application to a Media Foundation custom source DLL.
-- Virtual-camera output initially limited to RGB32 1280×720 at 30 fps. Add only NV12 720p if Windows Camera or Zoom rejects RGB32; do not restore 1080p without evidence.
+- Virtual-camera output prefers RGB32 1280×720 at 30 fps and retains selectable NV12 720p for Windows Camera and Zoom compatibility; do not restore 1080p without evidence.
 - Local configuration, reference image, previews, tray/main UI, startup preference, and bounded diagnostic logs.
 
 This is a new installation with source CLSID `{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}`, pipe attribute `{905306DD-B9A3-4385-A273-606E05B3208B}`, placeholder attribute `{05CD1551-BFC8-4276-8E0B-70BA4065822E}`, and storage under `%LocalAppData%\AutomaticScreenCameraRust`. It does not import the old schema-v2 data, but startup removes the legacy portable deployment artifacts while preserving user configuration, references, and logs.
@@ -33,7 +33,7 @@ This is a new installation with source CLSID `{402EB87C-123B-4765-9FF7-6E11CC7DA
 | Screen capture | [`windows-capture`](https://github.com/NiiightmareXD/windows-capture) 2.0.0 | Adopted after a warning-clean x64 target build. Native 300-frame execution remains an explicit release-machine test. |
 | Webcam capture | Direct Media Foundation source reader through `windows` | Adopted instead of `nokhwa`, keeping symbolic-link enumeration, fixed RGB32 negotiation, callbacks, and COM ownership inside the Windows adapter. Native webcam execution remains a release-machine test. |
 | Configuration | [`serde`](https://serde.rs/) and [`serde_json`](https://docs.rs/serde_json/latest/serde_json/) | Adopt a new typed `schema_version: 1`, atomic replacement, backup recovery, and defaults-with-warning when both files are invalid. No old-schema migration. |
-| Reference import and CPU image operations | [`image`](https://docs.rs/image/latest/image/) with only PNG, JPEG, and BMP features | Adopted for decoding. The grayscale comparison, BGRA blend, and letterbox remain in the repository with unit tests. NV12 is intentionally absent until consumer evidence requires it. |
+| Reference import and CPU image operations | [`image`](https://docs.rs/image/latest/image/) with only PNG, JPEG, and BMP features | Adopted for decoding. Direct grayscale thumbnails, cached BGRA composition, letterboxing, and the NV12 compatibility conversion remain in the repository with unit tests. |
 | Main window and previews | `eframe` 0.35 / `egui` with `wgpu` | Adopt with the retained dashboard, five settings tabs, 2×2 previews, and restrained visual parity at 100% and 150% DPI. |
 | Tray | `tray-icon` 0.24 | Adopt with close-to-tray, notifications, and the retained lifecycle actions. |
 | Virtual-camera media source | No production-ready drop-in crate found | Implement in the Rust DLL with `windows`. Reuse the current protocol and behavior; do not invent a new driver architecture. |
@@ -69,6 +69,6 @@ automatic-screen-camera/
 1. Run format, Clippy, unit tests, dependency audit, and Debug/Release builds.
 2. Build the Media Foundation DLL first, validate its PE architecture, embed it in the matching application, then validate the EXE and generate its SHA-256 sidecar.
 3. Execute COM/source-state, capture start/stop, stale-frame, restart, deployment, cleanup, UI, and workflow tests on Windows 11 x64.
-4. Verify RGB32 1280×720 at 30 fps in Windows Camera and Zoom. Add only NV12 720p if those results prove it necessary.
+4. Verify preferred RGB32 1280×720 at 30 fps in Windows Camera and Zoom, then explicitly exercise the retained NV12 720p fallback.
 
 Consumer compatibility is the irreducible release risk; cross-compilation alone does not satisfy the native Windows acceptance gates.

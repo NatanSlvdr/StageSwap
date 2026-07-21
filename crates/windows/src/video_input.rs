@@ -23,6 +23,13 @@ use windows_core::{HRESULT, PCWSTR, PWSTR, Ref, implement};
 const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 
 pub fn enumerate_video_devices() -> Result<Vec<InputDevice>, String> {
+    Ok(enumerate_all_video_devices()?
+        .into_iter()
+        .filter(|device| !device.is_virtual)
+        .collect())
+}
+
+pub(super) fn enumerate_all_video_devices() -> Result<Vec<InputDevice>, String> {
     let mut attributes = None;
     // SAFETY: output storage is writable and Media Foundation is initialized by
     // the owning runtime thread.
@@ -65,11 +72,11 @@ pub fn enumerate_video_devices() -> Result<Vec<InputDevice>, String> {
         )
         .unwrap_or_default();
         let is_virtual = name.contains("Automatic Screen Camera");
-        if !is_virtual && !id.is_empty() {
+        if !id.is_empty() {
             result.push(InputDevice {
                 id,
                 name,
-                is_virtual: false,
+                is_virtual,
             });
         }
     }

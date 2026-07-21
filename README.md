@@ -17,9 +17,10 @@ On every launch, the app removes any legacy portable registration and files befo
 - Windows 11 x64.
 - Immutable CPU BGRA frames and output fixed at 1280×720, 30 fps.
 - Media Foundation webcam input, Windows Graphics Capture screen input, synchronous bounded channels, and no Tokio.
-- Reference detection every 250 ms with 5-match/3-mismatch debounce; monitor discovery at startup, every 30 seconds, and on Rescan requires the same winner twice.
+- Reference detection every 250 ms with 5-match/3-mismatch debounce; asynchronous monitor discovery at startup, every 30 seconds, and on Rescan requires the same winner twice without pausing output.
 - CPU aspect-fit, black letterboxing, placeholder fallback, and reversible 500 ms blend.
-- The virtual camera advertises only RGB32 1280×720 at 30 fps. NV12 720p is added only if Windows Camera or Zoom proves it necessary; 1080p is excluded.
+- The virtual camera prefers RGB32 1280×720 at 30 fps and retains selectable NV12 720p for Windows Camera and Zoom compatibility; 1080p is excluded.
+- Output uses deadline-based 30 fps pacing. Dashboard previews refresh independently at 15 fps and use display-sized textures.
 - Dashboard, five settings tabs, four previews, tray/close-to-tray, warning notifications, exit confirmation, 14-day JSONL logs, and webcam/screen/virtual/all restarts.
 - No hot-plug manager, sleep/resume recovery, docking recovery, dynamic formats, OBS integration, or kernel driver.
 

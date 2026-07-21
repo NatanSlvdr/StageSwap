@@ -132,16 +132,16 @@ impl MediaStream {
     pub(super) fn new(placeholder_bgra: u32, pipe_name: String) -> windows_core::Result<Self> {
         // SAFETY: Media Foundation constructors return owned COM interfaces.
         let events = unsafe { MFCreateEventQueue()? };
-        let nv12_type = create_video_type(&MFVideoFormat_NV12, WIDTH, NV12_FRAME_BYTES, 12)?;
         let rgb32_type = create_video_type(&MFVideoFormat_RGB32, STRIDE, FRAME_BYTES, 32)?;
+        let nv12_type = create_video_type(&MFVideoFormat_NV12, WIDTH, NV12_FRAME_BYTES, 12)?;
         // SAFETY: both media types remain alive for the descriptor construction call.
         let descriptor =
-            unsafe { MFCreateStreamDescriptor(0, &[Some(nv12_type.clone()), Some(rgb32_type)])? };
+            unsafe { MFCreateStreamDescriptor(0, &[Some(rgb32_type.clone()), Some(nv12_type)])? };
         // SAFETY: descriptor owns its handler and advertised media types.
         unsafe {
             descriptor
                 .GetMediaTypeHandler()?
-                .SetCurrentMediaType(&nv12_type)?
+                .SetCurrentMediaType(&rgb32_type)?
         };
         let mut attributes = None;
         // SAFETY: MFCreateAttributes initializes the provided COM out slot.
@@ -455,8 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn nv12_is_default_and_placeholder_samples_have_increasing_timestamps()
-    -> windows_core::Result<()> {
+    fn rgb32_is_default_and_nv12_remains_selectable() -> windows_core::Result<()> {
         let _test_lock = super::super::TEST_LOCK
             .lock()
             .expect("media-source test lock poisoned");
@@ -472,24 +471,33 @@ mod tests {
         let current = unsafe { handler.GetCurrentMediaType()? };
         assert_eq!(
             unsafe { current.GetGUID(&MF_MT_SUBTYPE)? },
-            MFVideoFormat_NV12
+            MFVideoFormat_RGB32
         );
         stream.start()?;
         let first = stream.make_placeholder_sample(None)?;
-        let second = stream.make_placeholder_sample(None)?;
-        // SAFETY: both samples are live and initialized by make_placeholder_sample.
-        let first_time = unsafe { first.GetSampleTime()? };
-        let second_time = unsafe { second.GetSampleTime()? };
-        assert_eq!(second_time - first_time, FRAME_DURATION_100NS);
-
-        // SAFETY: the sample owns one contiguous NV12 buffer.
+        // SAFETY: the sample owns one contiguous RGB32 buffer.
         let buffer = unsafe { first.ConvertToContiguousBuffer()? };
         let mut bytes = core::ptr::null_mut();
         let mut length = 0;
         // SAFETY: Lock initializes bytes and length for this live buffer.
         unsafe { buffer.Lock(&mut bytes, None, Some(&mut length))? };
+        assert_eq!(length, FRAME_BYTES);
+        let pixel = unsafe { core::slice::from_raw_parts(bytes, 4) };
+        assert_eq!(pixel, 0xff33_2211_u32.to_le_bytes());
+        // SAFETY: balances the successful Lock.
+        unsafe { buffer.Unlock()? };
+
+        let nv12 = unsafe { handler.GetMediaTypeByIndex(1)? };
+        assert_eq!(unsafe { nv12.GetGUID(&MF_MT_SUBTYPE)? }, MFVideoFormat_NV12);
+        stream.set_media_type(&nv12)?;
+        let second = stream.make_placeholder_sample(None)?;
+        assert_eq!(
+            unsafe { second.GetSampleTime()? } - unsafe { first.GetSampleTime()? },
+            FRAME_DURATION_100NS
+        );
+        let buffer = unsafe { second.ConvertToContiguousBuffer()? };
+        unsafe { buffer.Lock(&mut bytes, None, Some(&mut length))? };
         assert_eq!(length, NV12_FRAME_BYTES);
-        // SAFETY: the locked buffer exposes the complete NV12 image.
         let pixels = unsafe { core::slice::from_raw_parts(bytes, length as usize) };
         let [b, g, r, _] = 0xff33_2211_u32.to_le_bytes();
         assert_eq!(
@@ -505,7 +513,6 @@ mod tests {
             pixels[uv + 1],
             limited_v(i32::from(r), i32::from(g), i32::from(b))
         );
-        // SAFETY: balances the successful Lock.
         unsafe { buffer.Unlock()? };
         stream.stop(false)?;
         stream.shutdown();

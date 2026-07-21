@@ -1,5 +1,5 @@
 use crate::ScreenInput;
-use asc_core::{Frame, MonitorDescriptor, Size};
+use asc_core::{Frame, FramePacer, MonitorDescriptor, Size};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,6 +14,7 @@ use windows_capture::settings::{
 };
 
 const SCREEN_FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 30);
+const SCREEN_FRAME_EARLY_TOLERANCE: Duration = Duration::from_millis(1);
 
 #[derive(Default)]
 struct Shared {
@@ -24,7 +25,7 @@ struct Shared {
 struct CaptureHandler {
     shared: Arc<Shared>,
     scratch: Vec<u8>,
-    last_frame_at: Option<Instant>,
+    pacer: Option<FramePacer>,
 }
 
 impl GraphicsCaptureApiHandler for CaptureHandler {
@@ -35,7 +36,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         Ok(Self {
             shared: context.flags,
             scratch: Vec::new(),
-            last_frame_at: None,
+            pacer: None,
         })
     }
 
@@ -45,13 +46,13 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         _control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
         let now = Instant::now();
-        if self
-            .last_frame_at
-            .is_some_and(|previous| now.duration_since(previous) < SCREEN_FRAME_INTERVAL)
-        {
+        let pacer = self
+            .pacer
+            .get_or_insert_with(|| FramePacer::new(now, SCREEN_FRAME_INTERVAL));
+        if !pacer.is_due(now, SCREEN_FRAME_EARLY_TOLERANCE) {
             return Ok(());
         }
-        self.last_frame_at = Some(now);
+        pacer.advance(now);
         let timestamp = frame.timestamp().map_or(0, |time| time.Duration);
         let width = frame.width();
         let height = frame.height();

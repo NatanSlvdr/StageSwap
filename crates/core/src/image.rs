@@ -56,6 +56,65 @@ pub fn bgra_to_gray(bgra: &[u8], size: Size, row_pitch: usize) -> Result<GrayIma
     GrayImage::new(size, pixels)
 }
 
+pub fn resize_bgra_to_gray(
+    bgra: &[u8],
+    size: Size,
+    row_pitch: usize,
+    target: Size,
+) -> Result<GrayImage, ImageError> {
+    let row_bytes = size
+        .width
+        .checked_mul(4)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or(ImageError::InvalidLayout)?;
+    let required = row_pitch
+        .checked_mul(size.height as usize)
+        .ok_or(ImageError::InvalidLayout)?;
+    if size.width == 0
+        || size.height == 0
+        || target.width == 0
+        || target.height == 0
+        || row_pitch < row_bytes
+        || bgra.len() < required
+    {
+        return Err(ImageError::InvalidLayout);
+    }
+
+    let gray_at = |x: u32, y: u32| {
+        let offset = y as usize * row_pitch + x as usize * 4;
+        let b = f64::from(bgra[offset]);
+        let g = f64::from(bgra[offset + 1]);
+        let r = f64::from(bgra[offset + 2]);
+        (0.0722 * b + 0.7152 * g + 0.2126 * r)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    let mut output = vec![0; target.width as usize * target.height as usize];
+    let scale_x = size.width as f64 / target.width as f64;
+    let scale_y = size.height as f64 / target.height as f64;
+    for y in 0..target.height {
+        let source_y = (f64::from(y) + 0.5) * scale_y - 0.5;
+        let y0 = source_y.floor().clamp(0.0, f64::from(size.height - 1)) as u32;
+        let y1 = (y0 + 1).min(size.height - 1);
+        let fraction_y = (source_y - source_y.floor()).clamp(0.0, 1.0);
+        for x in 0..target.width {
+            let source_x = (f64::from(x) + 0.5) * scale_x - 0.5;
+            let x0 = source_x.floor().clamp(0.0, f64::from(size.width - 1)) as u32;
+            let x1 = (x0 + 1).min(size.width - 1);
+            let fraction_x = (source_x - source_x.floor()).clamp(0.0, 1.0);
+            let top = f64::from(gray_at(x0, y0)) * (1.0 - fraction_x)
+                + f64::from(gray_at(x1, y0)) * fraction_x;
+            let bottom = f64::from(gray_at(x0, y1)) * (1.0 - fraction_x)
+                + f64::from(gray_at(x1, y1)) * fraction_x;
+            output[y as usize * target.width as usize + x as usize] =
+                (top * (1.0 - fraction_y) + bottom * fraction_y)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+        }
+    }
+    GrayImage::new(target, output)
+}
+
 pub fn resize_bilinear(source: &GrayImage, target: Size) -> Result<GrayImage, ImageError> {
     if target.width == 0 || target.height == 0 {
         return Err(ImageError::InvalidDimensions);
@@ -160,7 +219,9 @@ mod tests {
         let image = bgra_to_gray(&bgra, Size::new(2, 1), 8).unwrap();
         assert_eq!(image.pixels, [54, 255]);
         let resized = resize_bilinear(&image, Size::new(4, 2)).unwrap();
+        let direct = resize_bgra_to_gray(&bgra, Size::new(2, 1), 8, Size::new(4, 2)).unwrap();
         assert_eq!(resized.size, Size::new(4, 2));
+        assert_eq!(direct, resized);
         assert!((image_similarity(&image, &image) - 1.0).abs() < f64::EPSILON);
     }
 }

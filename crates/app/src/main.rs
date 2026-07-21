@@ -21,6 +21,8 @@ const TRANSITION_AMBER: Color32 = Color32::from_rgb(245, 190, 75);
 const PREVIEW_NEUTRAL: Color32 = Color32::from_rgb(42, 47, 55);
 const FPS_WINDOW: Duration = Duration::from_secs(1);
 const FPS_REFRESH: Duration = Duration::from_millis(250);
+const PREVIEW_REFRESH: Duration = Duration::from_millis(67);
+const HIDDEN_REFRESH: Duration = Duration::from_millis(250);
 
 mod local_log;
 mod portable_payload;
@@ -85,9 +87,12 @@ fn main() -> eframe::Result {
                 style.spacing.item_spacing = egui::vec2(10.0, 10.0);
                 style.spacing.button_padding = egui::vec2(14.0, 8.0);
             });
-            let app = SwitcherApp::new(loaded.config, loaded.warnings, store);
+            let app = SwitcherApp::new(loaded.config, loaded.warnings, store, start_visible);
+            #[cfg(windows)]
+            let mut app = app;
             #[cfg(windows)]
             if !start_visible && app.tray.is_none() {
+                app.window_visible = true;
                 context
                     .egui_ctx
                     .send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -130,6 +135,7 @@ enum SettingsTab {
 
 struct PreviewTexture {
     sequence: u64,
+    size: [usize; 2],
     texture: TextureHandle,
 }
 
@@ -291,10 +297,16 @@ struct SwitcherApp {
     exit_requested: bool,
     show_exit_confirmation: bool,
     last_window_size: Option<Vec2>,
+    window_visible: bool,
 }
 
 impl SwitcherApp {
-    fn new(mut config: AppConfig, load_warnings: Vec<String>, store: ConfigStore) -> Self {
+    fn new(
+        mut config: AppConfig,
+        load_warnings: Vec<String>,
+        store: ConfigStore,
+        window_visible: bool,
+    ) -> Self {
         if config.reference_image_path.is_empty() {
             config.reference_image_path = store.reference_path().display().to_string();
         }
@@ -321,6 +333,7 @@ impl SwitcherApp {
             exit_requested: false,
             show_exit_confirmation: false,
             last_window_size: None,
+            window_visible,
         }
     }
 
@@ -526,10 +539,7 @@ impl SwitcherApp {
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 ui.set_min_size(egui::vec2(width, body_height));
-                egui::ScrollArea::vertical()
-                    .id_salt("dashboard-controls")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.controls_body(ui, snapshot));
+                self.controls_body(ui, snapshot);
             },
         );
         ui.add_space(FOOTER_GAP);
@@ -562,22 +572,21 @@ impl SwitcherApp {
         ui.separator();
         detection_state_group(ui, snapshot.detection);
         screen_mix_group(ui, snapshot.transition.screen_mix);
-        ui.add_space(4.0);
+        ui.add_space(12.0);
 
         let automation_running =
             matches!(snapshot.run_state, RunState::Running | RunState::Starting);
-        let (run_icon, run_label) = if automation_running {
-            (UiIcon::Stop, "Stop automation")
+        let (run_icon, run_label, run_accent) = if automation_running {
+            (UiIcon::Stop, "Stop automation", LIVE_RED)
         } else {
-            (UiIcon::Play, "Start automation")
+            (UiIcon::Play, "Start automation", ACTIVE_GREEN)
         };
-        if icon_button(
+        if accent_icon_button(
             ui,
             run_icon,
             run_label,
             egui::vec2(ui.available_width(), 36.0),
-            false,
-            true,
+            run_accent,
         )
         .clicked()
         {
@@ -588,27 +597,66 @@ impl SwitcherApp {
             }
         }
 
-        ui.add_space(2.0);
-        icon_text(ui, UiIcon::Broadcast, "OUTPUT MODE", Color32::GRAY, false);
-        for (mode, icon, label) in [
-            (OutputMode::Automatic, UiIcon::Automatic, "Automatic"),
-            (OutputMode::ForceCamera, UiIcon::Camera, "Webcam"),
-            (OutputMode::ForceScreen, UiIcon::Monitor, "Screen"),
-        ] {
-            if icon_button(
-                ui,
-                icon,
-                label,
-                egui::vec2(ui.available_width(), 30.0),
-                snapshot.mode == mode,
-                false,
-            )
-            .clicked()
-            {
-                self.set_mode(mode);
-            }
-        }
-        ui.add_space(2.0);
+        ui.add_space(8.0);
+        let gap = 4.0;
+        let row_height = 30.0;
+        let automatic_width = 72.0;
+        let icon_width = row_height;
+        let heading_width =
+            (ui.available_width() - automatic_width - icon_width * 2.0 - gap * 3.0).max(72.0);
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.horizontal_centered(|ui| {
+                indicator_heading(
+                    ui,
+                    UiIcon::Broadcast,
+                    "Output mode",
+                    None,
+                    heading_width,
+                    row_height,
+                );
+                if icon_button(
+                    ui,
+                    UiIcon::Automatic,
+                    "Auto",
+                    egui::vec2(automatic_width, row_height),
+                    snapshot.mode == OutputMode::Automatic,
+                    false,
+                )
+                .clicked()
+                {
+                    self.set_mode(OutputMode::Automatic);
+                }
+                if icon_button(
+                    ui,
+                    UiIcon::Camera,
+                    "",
+                    egui::vec2(icon_width, row_height),
+                    snapshot.mode == OutputMode::ForceCamera,
+                    false,
+                )
+                .on_hover_text("Webcam")
+                .clicked()
+                {
+                    self.set_mode(OutputMode::ForceCamera);
+                }
+                if icon_button(
+                    ui,
+                    UiIcon::Monitor,
+                    "",
+                    egui::vec2(icon_width, row_height),
+                    snapshot.mode == OutputMode::ForceScreen,
+                    false,
+                )
+                .on_hover_text("Screen")
+                .clicked()
+                {
+                    self.set_mode(OutputMode::ForceScreen);
+                }
+            });
+        });
+
+        ui.add_space(8.0);
         let gap = ui.spacing().item_spacing.x;
         if ui.available_width() >= 285.0 {
             let action_width = (ui.available_width() - gap) / 2.0;
@@ -741,7 +789,9 @@ impl SwitcherApp {
                             } else {
                                 &self.settings_draft.selected_video_device_id
                             });
-                            ui.label("Fixed capture: RGB32 1280×720 at 30 fps");
+                            ui.label(
+                                "Preferred output: RGB32 1280×720 at 30 fps; NV12 fallback",
+                            );
                         });
                         restart_button(ui, &self.runtime, "Restart webcam", RestartTarget::Webcam);
                         ui.separator();
@@ -949,22 +999,29 @@ impl SwitcherApp {
                     egui::Layout::centered_and_justified(egui::Direction::TopDown),
                     |ui| {
                         if let Some(frame) = frame {
+                            let texture_size = preview_texture_size(
+                                frame,
+                                inner_size,
+                                ui.ctx().pixels_per_point(),
+                            );
                             let texture =
                                 self.textures
                                     .entry(kind.key())
                                     .or_insert_with(|| PreviewTexture {
                                         sequence: 0,
+                                        size: texture_size,
                                         texture: ui.ctx().load_texture(
                                             kind.key(),
-                                            frame_image(frame),
+                                            frame_image(frame, texture_size),
                                             TextureOptions::LINEAR,
                                         ),
                                     });
-                            if texture.sequence != frame.sequence {
+                            if texture.sequence != frame.sequence || texture.size != texture_size {
                                 texture
                                     .texture
-                                    .set(frame_image(frame), TextureOptions::LINEAR);
+                                    .set(frame_image(frame, texture_size), TextureOptions::LINEAR);
                                 texture.sequence = frame.sequence;
+                                texture.size = texture_size;
                             }
                             ui.add(
                                 egui::Image::new((texture.texture.id(), inner_size))
@@ -1032,6 +1089,7 @@ impl eframe::App for SwitcherApp {
         if let Some(action) = self.tray.as_ref().and_then(tray::Tray::poll) {
             match action {
                 tray::TrayAction::Show => {
+                    self.window_visible = true;
                     context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     context.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
@@ -1039,6 +1097,7 @@ impl eframe::App for SwitcherApp {
                 tray::TrayAction::Exit => {
                     if self.config.confirm_exit {
                         self.show_exit_confirmation = true;
+                        self.window_visible = true;
                         context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         context.send_viewport_cmd(egui::ViewportCommand::Focus);
                     } else {
@@ -1075,15 +1134,20 @@ impl eframe::App for SwitcherApp {
         if close_requested && self.config.close_to_tray && !self.exit_requested {
             context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.window_visible = false;
         } else if close_requested && self.config.confirm_exit && !self.exit_requested {
             context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.show_exit_confirmation = true;
         }
+        context.request_repaint_after(if self.window_visible {
+            PREVIEW_REFRESH
+        } else {
+            HIDDEN_REFRESH
+        });
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
-        context.request_repaint_after(std::time::Duration::from_millis(33));
         self.dashboard(&context, ui);
         self.exit_confirmation(&context);
     }
@@ -1135,8 +1199,9 @@ fn health_state_group(ui: &mut egui::Ui, icon: UiIcon, label: &'static str, curr
         label: friendly_device_state(state),
         current: state == current,
         tone: device_state_tone(state),
+        span: 1,
     });
-    indicator_group(ui, icon, label, None, &choices);
+    indicator_group(ui, icon, label, &choices, None);
 }
 
 #[derive(Clone, Copy)]
@@ -1145,6 +1210,7 @@ struct IndicatorChoice {
     label: &'static str,
     current: bool,
     tone: IndicatorTone,
+    span: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -1161,27 +1227,31 @@ fn detection_state_group(ui: &mut egui::Ui, current: DetectionState) {
             label: "Unknown",
             current: current == DetectionState::Unknown,
             tone: IndicatorTone::Amber,
+            span: 1,
         },
         IndicatorChoice {
             icon: UiIcon::Check,
             label: "Matching",
             current: current == DetectionState::Matching,
             tone: IndicatorTone::Green,
+            span: 1,
         },
         IndicatorChoice {
             icon: UiIcon::Error,
             label: "Not matching",
             current: current == DetectionState::NotMatching,
             tone: IndicatorTone::Red,
+            span: 1,
         },
         IndicatorChoice {
             icon: UiIcon::Unavailable,
             label: "Reference missing",
             current: current == DetectionState::ReferenceMissing,
             tone: IndicatorTone::Red,
+            span: 1,
         },
     ];
-    indicator_group(ui, UiIcon::Target, "Detection", None, &choices);
+    indicator_group(ui, UiIcon::Target, "Detection", &choices, None);
 }
 
 fn screen_mix_group(ui: &mut egui::Ui, screen_mix: f64) {
@@ -1198,18 +1268,21 @@ fn screen_mix_group(ui: &mut egui::Ui, screen_mix: f64) {
             label: "Webcam only",
             current: active == 0,
             tone: IndicatorTone::Green,
+            span: 1,
         },
         IndicatorChoice {
             icon: UiIcon::Layers,
             label: "Crossfading",
             current: active == 1,
             tone: IndicatorTone::Amber,
+            span: 2,
         },
         IndicatorChoice {
             icon: UiIcon::Monitor,
             label: "Screen only",
             current: active == 2,
             tone: IndicatorTone::Green,
+            span: 1,
         },
     ];
     let percentage = format!("{}%", (screen_mix * 100.0).round());
@@ -1217,8 +1290,8 @@ fn screen_mix_group(ui: &mut egui::Ui, screen_mix: f64) {
         ui,
         UiIcon::Layers,
         "Screen mix",
-        Some(&percentage),
         &choices,
+        Some((1, &percentage)),
     );
 }
 
@@ -1226,19 +1299,28 @@ fn indicator_group(
     ui: &mut egui::Ui,
     icon: UiIcon,
     label: &'static str,
-    value: Option<&str>,
     choices: &[IndicatorChoice],
+    chip_value: Option<(usize, &str)>,
 ) {
     let gap = 4.0;
     let chip_size = 28.0;
-    let chips_width = chip_size * choices.len() as f32 + gap * (choices.len() as f32 - 1.0);
+    let slots = choices
+        .iter()
+        .map(|choice| usize::from(choice.span))
+        .sum::<usize>();
+    let chips_width = chip_size * slots as f32 + gap * (slots as f32 - 1.0);
     let heading_width = (ui.available_width() - chips_width - gap).max(64.0);
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
         ui.horizontal_centered(|ui| {
-            indicator_heading(ui, icon, label, value, heading_width, chip_size);
-            for choice in choices {
-                indicator_chip(ui, label, *choice, chip_size);
+            indicator_heading(ui, icon, label, None, heading_width, chip_size);
+            for (index, choice) in choices.iter().enumerate() {
+                let width =
+                    chip_size * f32::from(choice.span) + gap * (f32::from(choice.span) - 1.0);
+                let value = chip_value
+                    .filter(|(value_index, _)| *value_index == index)
+                    .map(|(_, value)| value);
+                indicator_chip(ui, label, *choice, width, value);
             }
         });
     });
@@ -1277,7 +1359,13 @@ fn indicator_heading(
     }
 }
 
-fn indicator_chip(ui: &mut egui::Ui, group: &'static str, choice: IndicatorChoice, width: f32) {
+fn indicator_chip(
+    ui: &mut egui::Ui,
+    group: &'static str,
+    choice: IndicatorChoice,
+    width: f32,
+    value: Option<&str>,
+) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 28.0), Sense::hover());
     let amount = ui.ctx().animate_bool_with_time(
         ui.make_persistent_id((group, choice.label)),
@@ -1292,13 +1380,39 @@ fn indicator_chip(ui: &mut egui::Ui, group: &'static str, choice: IndicatorChoic
         Stroke::new(1.0 + amount, stroke_color),
         StrokeKind::Inside,
     );
-    draw_icon(
-        ui.painter(),
-        Rect::from_center_size(rect.center(), egui::vec2(15.0, 15.0)),
-        choice.icon,
-        icon_color,
-        1.55,
-    );
+    if let Some(value) = value {
+        let font = FontId::monospace(10.5);
+        let galley = ui
+            .painter()
+            .layout_no_wrap(value.to_owned(), font, icon_color);
+        let icon_size = 14.0;
+        let gap = 5.0;
+        let content_width = icon_size + gap + galley.size().x;
+        let icon_rect = Rect::from_min_size(
+            Pos2::new(
+                rect.center().x - content_width / 2.0,
+                rect.center().y - icon_size / 2.0,
+            ),
+            egui::vec2(icon_size, icon_size),
+        );
+        draw_icon(ui.painter(), icon_rect, choice.icon, icon_color, 1.5);
+        ui.painter().galley(
+            Pos2::new(
+                icon_rect.right() + gap,
+                rect.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            icon_color,
+        );
+    } else {
+        draw_icon(
+            ui.painter(),
+            Rect::from_center_size(rect.center(), egui::vec2(15.0, 15.0)),
+            choice.icon,
+            icon_color,
+            1.55,
+        );
+    }
     response.on_hover_text(choice.label);
 }
 
@@ -1435,10 +1549,38 @@ fn icon_button(
     selected: bool,
     emphasized: bool,
 ) -> egui::Response {
+    icon_button_impl(ui, icon, text, desired_size, selected, emphasized, None)
+}
+
+fn accent_icon_button(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    text: &str,
+    desired_size: Vec2,
+    accent: Color32,
+) -> egui::Response {
+    icon_button_impl(ui, icon, text, desired_size, false, true, Some(accent))
+}
+
+fn icon_button_impl(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    text: &str,
+    desired_size: Vec2,
+    selected: bool,
+    emphasized: bool,
+    accent: Option<Color32>,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
     let visuals = ui.style().interact(&response);
     let fill = if selected {
         ui.visuals().selection.bg_fill
+    } else if let Some(accent) = accent {
+        mix_color(
+            Color32::from_rgb(25, 28, 33),
+            accent,
+            if response.hovered() { 0.48 } else { 0.34 },
+        )
     } else if emphasized && !response.hovered() {
         Color32::from_rgb(38, 42, 50)
     } else {
@@ -1446,6 +1588,8 @@ fn icon_button(
     };
     let stroke = if selected {
         Stroke::new(1.0, ui.visuals().selection.stroke.color)
+    } else if let Some(accent) = accent {
+        Stroke::new(1.25, accent)
     } else {
         visuals.bg_stroke
     };
@@ -1461,21 +1605,24 @@ fn icon_button(
     let font = FontId::proportional(if emphasized { 14.0 } else { 12.0 });
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
     let icon_size = if emphasized { 16.0 } else { 14.0 };
-    let content_width = icon_size + 7.0 + galley.size().x;
+    let text_gap = if text.is_empty() { 0.0 } else { 7.0 };
+    let content_width = icon_size + text_gap + galley.size().x;
     let left = rect.center().x - content_width / 2.0;
     let icon_rect = Rect::from_min_size(
         Pos2::new(left, rect.center().y - icon_size / 2.0),
         egui::vec2(icon_size, icon_size),
     );
     draw_icon(ui.painter(), icon_rect, icon, color, 1.45);
-    ui.painter().galley(
-        Pos2::new(
-            icon_rect.right() + 7.0,
-            rect.center().y - galley.size().y / 2.0,
-        ),
-        galley,
-        color,
-    );
+    if !text.is_empty() {
+        ui.painter().galley(
+            Pos2::new(
+                icon_rect.right() + text_gap,
+                rect.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            color,
+        );
+    }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -1743,15 +1890,38 @@ fn mix_color(from: Color32, to: Color32, amount: f32) -> Color32 {
     )
 }
 
-fn frame_image(frame: &Frame) -> egui::ColorImage {
-    let mut rgba = Vec::with_capacity(frame.pixels().len());
-    for pixel in frame.pixels().chunks_exact(4) {
-        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+fn preview_texture_size(frame: &Frame, maximum: Vec2, pixels_per_point: f32) -> [usize; 2] {
+    let maximum_width = (maximum.x * pixels_per_point).round().max(1.0) as u32;
+    let maximum_height = (maximum.y * pixels_per_point).round().max(1.0) as u32;
+    let scale = f64::min(
+        f64::min(
+            f64::from(maximum_width) / f64::from(frame.size.width),
+            f64::from(maximum_height) / f64::from(frame.size.height),
+        ),
+        1.0,
+    );
+    [
+        (f64::from(frame.size.width) * scale).round().max(1.0) as usize,
+        (f64::from(frame.size.height) * scale).round().max(1.0) as usize,
+    ]
+}
+
+fn frame_image(frame: &Frame, target: [usize; 2]) -> egui::ColorImage {
+    let mut pixels = Vec::with_capacity(target[0] * target[1]);
+    for y in 0..target[1] {
+        let source_y = y * frame.size.height as usize / target[1];
+        for x in 0..target[0] {
+            let source_x = x * frame.size.width as usize / target[0];
+            let offset = source_y * frame.stride as usize + source_x * 4;
+            pixels.push(Color32::from_rgba_unmultiplied(
+                frame.pixels()[offset + 2],
+                frame.pixels()[offset + 1],
+                frame.pixels()[offset],
+                frame.pixels()[offset + 3],
+            ));
+        }
     }
-    egui::ColorImage::from_rgba_unmultiplied(
-        [frame.size.width as usize, frame.size.height as usize],
-        &rgba,
-    )
+    egui::ColorImage::new(target, pixels)
 }
 
 fn bgra_color(value: u32) -> Color32 {
@@ -1791,9 +1961,25 @@ mod tests {
             Instant::now(),
         )
         .unwrap();
-        let image = frame_image(&frame);
+        let image = frame_image(&frame, [2, 1]);
         assert_eq!(image.size, [2, 1]);
         assert_eq!(image.as_raw(), &[1, 2, 3, 255, 10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn preview_texture_is_capped_to_its_display_size() {
+        let frame = Frame::placeholder(
+            asc_core::Size::new(1280, 720),
+            0xff03_0201,
+            1,
+            0,
+            Instant::now(),
+        );
+        let size = preview_texture_size(&frame, egui::vec2(320.0, 180.0), 1.0);
+        assert_eq!(size, [320, 180]);
+        let image = frame_image(&frame, size);
+        assert_eq!(image.size, size);
+        assert_eq!(image.pixels[0], Color32::from_rgb(3, 2, 1));
     }
 
     #[test]
@@ -1949,6 +2135,7 @@ mod tests {
             },
             vec!["Test warning banner".into()],
             ConfigStore::new(directory.path()),
+            true,
         );
         let context = egui::Context::default();
         for viewport in [
