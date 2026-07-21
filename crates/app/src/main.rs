@@ -11,6 +11,8 @@ use eframe::egui::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const WINDOW_ASPECT_RATIO: f32 = 16.0 / 9.0;
@@ -195,9 +197,131 @@ enum SettingsSaveState {
 }
 
 struct PreviewTexture {
-    sequence: u64,
+    source: Arc<Frame>,
     size: [usize; 2],
     texture: TextureHandle,
+}
+
+struct PreviewJob {
+    frame: Arc<Frame>,
+    size: [usize; 2],
+}
+
+struct PreparedPreview {
+    frame: Arc<Frame>,
+    size: [usize; 2],
+    image: egui::ColorImage,
+}
+
+#[derive(Default)]
+struct PreviewConverterState {
+    latest_request: Option<(Arc<Frame>, [usize; 2])>,
+    pending: Option<PreviewJob>,
+    ready: Option<PreparedPreview>,
+    stopping: bool,
+}
+
+struct PreviewConverter {
+    shared: Arc<(Mutex<PreviewConverterState>, Condvar)>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl PreviewConverter {
+    fn new(kind: PreviewKind) -> Self {
+        let shared = Arc::new((Mutex::new(PreviewConverterState::default()), Condvar::new()));
+        let worker_shared = Arc::clone(&shared);
+        let worker = thread::Builder::new()
+            .name(format!("asc-preview-{}", kind.key()))
+            .spawn(move || preview_converter_loop(&worker_shared))
+            .expect("preview conversion worker can be created");
+        Self {
+            shared,
+            worker: Some(worker),
+        }
+    }
+
+    fn submit(&self, frame: Arc<Frame>, size: [usize; 2]) {
+        let (state, wake) = &*self.shared;
+        let mut state = state
+            .lock()
+            .expect("preview converter state is not poisoned");
+        if state
+            .latest_request
+            .as_ref()
+            .is_some_and(|(requested, requested_size)| {
+                Arc::ptr_eq(requested, &frame) && *requested_size == size
+            })
+        {
+            return;
+        }
+        state.latest_request = Some((Arc::clone(&frame), size));
+        state.pending = Some(PreviewJob { frame, size });
+        wake.notify_one();
+    }
+
+    fn take_ready(&self) -> Option<PreparedPreview> {
+        self.shared
+            .0
+            .lock()
+            .expect("preview converter state is not poisoned")
+            .ready
+            .take()
+    }
+}
+
+impl Drop for PreviewConverter {
+    fn drop(&mut self) {
+        let (state, wake) = &*self.shared;
+        if let Ok(mut state) = state.lock() {
+            state.stopping = true;
+            state.pending = None;
+            wake.notify_one();
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn preview_converter_loop(shared: &Arc<(Mutex<PreviewConverterState>, Condvar)>) {
+    loop {
+        let job = {
+            let (state, wake) = &**shared;
+            let mut state = state
+                .lock()
+                .expect("preview converter state is not poisoned");
+            while state.pending.is_none() && !state.stopping {
+                state = wake
+                    .wait(state)
+                    .expect("preview converter state is not poisoned");
+            }
+            if state.stopping {
+                return;
+            }
+            state
+                .pending
+                .take()
+                .expect("pending preview job is present")
+        };
+        let prepared = PreparedPreview {
+            image: frame_image(&job.frame, job.size),
+            frame: Arc::clone(&job.frame),
+            size: job.size,
+        };
+        let mut state = shared
+            .0
+            .lock()
+            .expect("preview converter state is not poisoned");
+        if state
+            .latest_request
+            .as_ref()
+            .is_some_and(|(requested, requested_size)| {
+                Arc::ptr_eq(requested, &job.frame) && *requested_size == job.size
+            })
+        {
+            state.ready = Some(prepared);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -266,7 +390,7 @@ struct SettingsPreviewPair {
 #[derive(Clone, Copy)]
 struct SettingsPreview<'a> {
     kind: PreviewKind,
-    frame: Option<&'a Frame>,
+    frame: Option<&'a Arc<Frame>>,
     label: &'a str,
     empty_message: &'static str,
     actual_output: Source,
@@ -400,6 +524,7 @@ struct SwitcherApp {
     settings_opened_at: Option<Instant>,
     settings_section_changed_at: Option<Instant>,
     textures: HashMap<&'static str, PreviewTexture>,
+    preview_converters: HashMap<PreviewKind, PreviewConverter>,
     fps_trackers: HashMap<PreviewKind, FpsTracker>,
     log: LocalLog,
     last_activity: Option<String>,
@@ -440,6 +565,7 @@ impl SwitcherApp {
             settings_opened_at: None,
             settings_section_changed_at: None,
             textures: HashMap::new(),
+            preview_converters: HashMap::new(),
             fps_trackers: HashMap::new(),
             log,
             last_activity: None,
@@ -676,18 +802,12 @@ impl SwitcherApp {
 
         for row in [
             [
-                (PreviewKind::Webcam, snapshot.previews.webcam.as_deref()),
-                (PreviewKind::Screen, snapshot.previews.screen.as_deref()),
+                (PreviewKind::Webcam, snapshot.previews.webcam.as_ref()),
+                (PreviewKind::Screen, snapshot.previews.screen.as_ref()),
             ],
             [
-                (
-                    PreviewKind::Reference,
-                    snapshot.previews.reference.as_deref(),
-                ),
-                (
-                    PreviewKind::Output,
-                    snapshot.previews.final_output.as_deref(),
-                ),
+                (PreviewKind::Reference, snapshot.previews.reference.as_ref()),
+                (PreviewKind::Output, snapshot.previews.final_output.as_ref()),
             ],
         ] {
             ui.horizontal_top(|ui| {
@@ -1165,7 +1285,7 @@ impl SwitcherApp {
             ui,
             SettingsPreview {
                 kind: PreviewKind::Webcam,
-                frame: snapshot.previews.webcam.as_deref(),
+                frame: snapshot.previews.webcam.as_ref(),
                 label: "Selected webcam",
                 empty_message: "No webcam frame — select, refresh, or restart the camera below.",
                 actual_output: snapshot.actual_output,
@@ -1354,7 +1474,7 @@ impl SwitcherApp {
             ui,
             SettingsPreview {
                 kind: PreviewKind::Output,
-                frame: snapshot.previews.final_output.as_deref(),
+                frame: snapshot.previews.final_output.as_ref(),
                 label: "Current virtual-camera output",
                 empty_message: "No output frame — restart the virtual camera below.",
                 actual_output: snapshot.actual_output,
@@ -1590,7 +1710,7 @@ impl SwitcherApp {
                         ui,
                         SettingsPreview {
                             kind: PreviewKind::Screen,
-                            frame: snapshot.previews.screen.as_deref(),
+                            frame: snapshot.previews.screen.as_ref(),
                             label: "Live screen",
                             empty_message: "No screen frame — rescan or restart capture below.",
                             actual_output: snapshot.actual_output,
@@ -1601,7 +1721,7 @@ impl SwitcherApp {
                         ui,
                         SettingsPreview {
                             kind: PreviewKind::Reference,
-                            frame: snapshot.previews.reference.as_deref(),
+                            frame: snapshot.previews.reference.as_ref(),
                             label: "Reference image",
                             empty_message: "No reference image — capture or import one below.",
                             actual_output: snapshot.actual_output,
@@ -1615,7 +1735,7 @@ impl SwitcherApp {
                 ui,
                 SettingsPreview {
                     kind: PreviewKind::Screen,
-                    frame: snapshot.previews.screen.as_deref(),
+                    frame: snapshot.previews.screen.as_ref(),
                     label: "Live screen",
                     empty_message: "No screen frame — rescan or restart capture below.",
                     actual_output: snapshot.actual_output,
@@ -1626,7 +1746,7 @@ impl SwitcherApp {
                 ui,
                 SettingsPreview {
                     kind: PreviewKind::Reference,
-                    frame: snapshot.previews.reference.as_deref(),
+                    frame: snapshot.previews.reference.as_ref(),
                     label: "Reference image",
                     empty_message: "No reference image — capture or import one below.",
                     actual_output: snapshot.actual_output,
@@ -1667,7 +1787,7 @@ impl SwitcherApp {
         &mut self,
         ui: &mut egui::Ui,
         kind: PreviewKind,
-        frame: Option<&Frame>,
+        frame: Option<&Arc<Frame>>,
         width: f32,
         height: f32,
         actual_output: Source,
@@ -1689,7 +1809,7 @@ impl SwitcherApp {
         &mut self,
         ui: &mut egui::Ui,
         kind: PreviewKind,
-        frame: Option<&Frame>,
+        frame: Option<&Arc<Frame>>,
         maximum: [f32; 2],
         actual_output: Source,
         options: PreviewOptions,
@@ -1712,7 +1832,7 @@ impl SwitcherApp {
             self.fps_trackers
                 .entry(kind)
                 .or_default()
-                .observe(frame, Instant::now())
+                .observe(frame.map(Arc::as_ref), Instant::now())
         });
         let preview_frame = egui::Frame::new()
             .fill(Color32::from_rgb(12, 14, 18))
@@ -1732,31 +1852,56 @@ impl SwitcherApp {
                 egui::Layout::centered_and_justified(egui::Direction::TopDown),
                 |ui| {
                     if let Some(frame) = frame {
-                        let texture_size =
-                            preview_texture_size(frame, inner_size, ui.ctx().pixels_per_point());
-                        let texture =
-                            self.textures
-                                .entry(kind.key())
-                                .or_insert_with(|| PreviewTexture {
-                                    sequence: 0,
-                                    size: texture_size,
-                                    texture: ui.ctx().load_texture(
-                                        kind.key(),
-                                        frame_image(frame, texture_size),
-                                        TextureOptions::LINEAR,
-                                    ),
-                                });
-                        if texture.sequence != frame.sequence || texture.size != texture_size {
-                            texture
-                                .texture
-                                .set(frame_image(frame, texture_size), TextureOptions::LINEAR);
-                            texture.sequence = frame.sequence;
-                            texture.size = texture_size;
-                        }
-                        ui.add(
-                            egui::Image::new((texture.texture.id(), inner_size))
-                                .maintain_aspect_ratio(true),
+                        let texture_size = preview_texture_size(
+                            frame.as_ref(),
+                            inner_size,
+                            ui.ctx().pixels_per_point(),
                         );
+                        let prepared = {
+                            let converter = self
+                                .preview_converters
+                                .entry(kind)
+                                .or_insert_with(|| PreviewConverter::new(kind));
+                            converter.submit(Arc::clone(frame), texture_size);
+                            converter.take_ready()
+                        };
+                        if let Some(prepared) = prepared {
+                            if let Some(texture) = self.textures.get_mut(kind.key()) {
+                                if !Arc::ptr_eq(&texture.source, &prepared.frame)
+                                    || texture.size != prepared.size
+                                {
+                                    texture.texture.set(prepared.image, TextureOptions::LINEAR);
+                                    texture.source = prepared.frame;
+                                    texture.size = prepared.size;
+                                }
+                            } else {
+                                let texture = ui.ctx().load_texture(
+                                    kind.key(),
+                                    prepared.image,
+                                    TextureOptions::LINEAR,
+                                );
+                                self.textures.insert(
+                                    kind.key(),
+                                    PreviewTexture {
+                                        source: prepared.frame,
+                                        size: prepared.size,
+                                        texture,
+                                    },
+                                );
+                            }
+                        }
+                        if let Some(texture) = self.textures.get(kind.key()) {
+                            ui.add(
+                                egui::Image::new((texture.texture.id(), inner_size))
+                                    .maintain_aspect_ratio(true),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new("Preparing preview…")
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(112, 120, 134)),
+                            );
+                        }
                     } else {
                         ui.label(
                             RichText::new(options.empty_message)
@@ -2962,6 +3107,39 @@ mod tests {
 
         let high_dpi = preview_texture_size(&frame, egui::vec2(640.0, 360.0), 2.0);
         assert_eq!(high_dpi, [480, 270]);
+    }
+
+    #[test]
+    fn preview_converter_drops_superseded_frames() {
+        let converter = PreviewConverter::new(PreviewKind::Output);
+        let now = Instant::now();
+        for sequence in 1..=12 {
+            converter.submit(
+                Arc::new(Frame::placeholder(
+                    asc_core::Size::new(1280, 720),
+                    0xff00_0000 | sequence,
+                    u64::from(sequence),
+                    0,
+                    now,
+                )),
+                [480, 270],
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(prepared) = converter.take_ready()
+                && prepared.frame.sequence == 12
+            {
+                assert_eq!(prepared.size, [480, 270]);
+                assert_eq!(prepared.image.pixels[0], Color32::from_rgb(0, 0, 12));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "latest preview frame was not prepared"
+            );
+            thread::yield_now();
+        }
     }
 
     #[test]
