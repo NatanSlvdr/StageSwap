@@ -18,9 +18,10 @@ On every launch, the app removes any legacy portable registration and files befo
 - Immutable CPU BGRA frames and output fixed at 1280×720, 30 fps.
 - Media Foundation webcam input, Windows Graphics Capture screen input, synchronous bounded channels, and no Tokio.
 - Reference detection every 250 ms with 5-match/3-mismatch debounce; asynchronous monitor discovery at startup, every 30 seconds, and on Rescan requires the same winner twice without pausing output.
-- CPU aspect-fit, black letterboxing, placeholder fallback, and reversible 500 ms blend.
+- CPU aspect-fit, black letterboxing, configurable missing-source fallback, and reversible 500 ms blend.
 - The virtual camera prefers RGB32 1280×720 at 30 fps and retains selectable NV12 720p for Windows Camera and Zoom compatibility; 1080p is excluded.
-- Output uses deadline-based 30 fps pacing. Dashboard previews refresh independently at 15 fps and use display-sized textures.
+- Output uses deadline-based 30 fps pacing. Visible dashboard previews refresh independently at 30 fps and use display-sized textures; hidden tray operation remains throttled.
+- A fixed black off screen with a centered red crossed-camera icon is shown by the output preview when automation is stopped and by the virtual camera whenever the app publisher is absent.
 - Dashboard, five settings tabs, four previews, tray/close-to-tray, warning notifications, exit confirmation, 14-day JSONL logs, and webcam/screen/virtual/all restarts.
 - No hot-plug manager, sleep/resume recovery, docking recovery, dynamic formats, OBS integration, or kernel driver.
 
@@ -71,7 +72,7 @@ In the VM, use the short smoke pass below:
 
 1. Launch the x64 portable executable and approve first-run registration.
 2. Confirm that Windows Camera lists **Automatic Screen Camera**.
-3. Verify screen capture, Force Screen, and the placeholder output.
+3. Verify screen capture, Force Screen, the configurable missing-source fallback, and the crossed-camera off screen after stopping automation.
 4. Verify webcam capture and Force Webcam if the VM exposes a camera.
 5. Verify Automatic mode, tray/close behavior, restart actions, and cleanup.
 

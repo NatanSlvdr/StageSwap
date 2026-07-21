@@ -198,7 +198,7 @@ mod interactive_windows_tests {
     #[ignore = "requires the portable COM source to be installed"]
     fn virtual_camera_can_restart_manually() {
         let pipe = frame_pipe_name().unwrap();
-        let mut camera = VirtualCameraController::start(pipe, 0xff17_1719).unwrap();
+        let mut camera = VirtualCameraController::start(pipe).unwrap();
         assert!(camera.is_running());
         camera.restart().unwrap();
         assert!(camera.is_running());
@@ -209,7 +209,7 @@ mod interactive_windows_tests {
     fn virtual_camera_delivers_three_hundred_frames_at_thirty_fps() {
         let pipe_name = frame_pipe_name().unwrap();
         let publisher = FramePublisher::start(&pipe_name).unwrap();
-        let _camera = VirtualCameraController::start(pipe_name, 0xff17_1719).unwrap();
+        let _camera = VirtualCameraController::start(pipe_name).unwrap();
         let mut input = MediaFoundationVideoInput::default();
         let deadline = Instant::now() + Duration::from_secs(5);
         let device = loop {

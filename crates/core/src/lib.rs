@@ -17,7 +17,7 @@ pub use decision::{Decision, decide};
 pub use detector::{DebouncedDetector, DetectorSettings};
 pub use frame::{
     FRAME_STALE_AFTER, Frame, FrameCompositor, FrameError, FrameMetadata, PIPELINE_FPS,
-    PIPELINE_SIZE,
+    PIPELINE_SIZE, off_frame, off_frame_pixels,
 };
 pub use image::{
     GrayImage, ImageError, bgra_to_gray, image_similarity, resize_bgra_to_gray, resize_bilinear,

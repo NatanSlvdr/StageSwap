@@ -20,7 +20,6 @@ use windows_core::{Error, GUID, HRESULT, Interface, PCSTR, PCWSTR, PWSTR, Ref, i
 const SOURCE_ID: &str = "{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}";
 pub(crate) const LEGACY_SOURCE_ID: &str = "{4B8BA04C-7A67-4DD5-B9F4-C607940A7A64}";
 const PIPE_ATTRIBUTE: GUID = GUID::from_u128(0x905306dd_b9a3_4385_a273_606e05b3208b);
-const PLACEHOLDER_ATTRIBUTE: GUID = GUID::from_u128(0x05cd1551_bfc8_4276_8e0b_70ba4065822e);
 
 type CreateVirtualCamera = unsafe extern "system" fn(
     MFVirtualCameraType,
@@ -183,7 +182,7 @@ fn camera_event_failed(event: &IMFMediaEvent) -> bool {
 
 /// Owns COM and Media Foundation on one runtime thread and controls the
 /// system-lifetime virtual camera registration. Dropping it deliberately
-/// releases the controller without calling `Stop`, preserving placeholder
+/// releases the controller without calling `Stop`, preserving off-screen
 /// output for existing Frame Server sessions.
 pub struct VirtualCameraController {
     camera: Option<IMFVirtualCamera>,
@@ -191,13 +190,12 @@ pub struct VirtualCameraController {
     running: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
     pipe_name: String,
-    placeholder_bgra: u32,
     mf_started: bool,
     com_initialized: bool,
 }
 
 impl VirtualCameraController {
-    pub fn start(pipe_name: String, placeholder_bgra: u32) -> Result<Self, String> {
+    pub fn start(pipe_name: String) -> Result<Self, String> {
         // SAFETY: this constructor and Drop run on the owning runtime thread.
         unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
             .ok()
@@ -214,7 +212,6 @@ impl VirtualCameraController {
             running: Arc::new(AtomicBool::new(false)),
             generation: Arc::new(AtomicU64::new(0)),
             pipe_name,
-            placeholder_bgra: placeholder_bgra | 0xff00_0000,
             mf_started: true,
             com_initialized: true,
         };
@@ -232,7 +229,6 @@ impl VirtualCameraController {
             // SAFETY: attributes and terminated string are valid for each call.
             unsafe {
                 camera.SetString(&PIPE_ATTRIBUTE, PCWSTR(pipe.as_ptr()))?;
-                camera.SetUINT32(&PLACEHOLDER_ATTRIBUTE, self.placeholder_bgra)?;
             }
             Ok(())
         })()
@@ -265,15 +261,6 @@ impl VirtualCameraController {
         self.callback = None;
         self.camera = None;
         self.open()
-    }
-
-    pub fn update_placeholder(&mut self, placeholder_bgra: u32) -> Result<(), String> {
-        let placeholder_bgra = placeholder_bgra | 0xff00_0000;
-        if self.placeholder_bgra == placeholder_bgra && self.is_running() {
-            return Ok(());
-        }
-        self.placeholder_bgra = placeholder_bgra;
-        self.restart()
     }
 }
 

@@ -1,6 +1,6 @@
 use super::OBJECTS;
 use super::pipe_reader::PipeReader;
-use asc_core::{PIPELINE_SIZE, SharedFrameCache};
+use asc_core::{PIPELINE_SIZE, SharedFrameCache, off_frame_pixels};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{E_POINTER, S_OK};
@@ -97,25 +97,11 @@ fn bgra_to_nv12(output: &mut [u8], bgra: &[u8]) {
     }
 }
 
-fn fill_nv12_color(output: &mut [u8], color_bgra: u32) {
-    let [b, g, r, _] = color_bgra.to_le_bytes();
-    let y = limited_y(i32::from(r), i32::from(g), i32::from(b));
-    let u = limited_u(i32::from(r), i32::from(g), i32::from(b));
-    let v = limited_v(i32::from(r), i32::from(g), i32::from(b));
-    let y_plane_bytes = (WIDTH * HEIGHT) as usize;
-    let (y_plane, uv_plane) = output.split_at_mut(y_plane_bytes);
-    y_plane.fill(y);
-    for pair in uv_plane.chunks_exact_mut(2) {
-        pair.copy_from_slice(&[u, v]);
-    }
-}
-
 struct StreamState {
     parent: Option<IMFMediaSource>,
     state: MF_STREAM_STATE,
     shutdown: bool,
     next_time_100ns: i64,
-    placeholder_bgra: u32,
 }
 
 #[implement(IMFMediaStream2)]
@@ -124,12 +110,14 @@ pub(super) struct MediaStream {
     descriptor: IMFStreamDescriptor,
     attributes: IMFAttributes,
     frames: Arc<Mutex<SharedFrameCache>>,
+    off_bgra: Arc<[u8]>,
+    off_nv12: Arc<[u8]>,
     _pipe_reader: PipeReader,
     state: Mutex<StreamState>,
 }
 
 impl MediaStream {
-    pub(super) fn new(placeholder_bgra: u32, pipe_name: String) -> windows_core::Result<Self> {
+    pub(super) fn new(pipe_name: String) -> windows_core::Result<Self> {
         // SAFETY: Media Foundation constructors return owned COM interfaces.
         let events = unsafe { MFCreateEventQueue()? };
         let rgb32_type = create_video_type(&MFVideoFormat_RGB32, STRIDE, FRAME_BYTES, 32)?;
@@ -163,18 +151,22 @@ impl MediaStream {
         OBJECTS.fetch_add(1, Ordering::Relaxed);
         let frames = Arc::new(Mutex::new(SharedFrameCache::default()));
         let pipe_reader = PipeReader::start(pipe_name, Arc::clone(&frames));
+        let off_bgra = off_frame_pixels();
+        let mut off_nv12 = vec![0; NV12_FRAME_BYTES as usize];
+        bgra_to_nv12(&mut off_nv12, &off_bgra);
         Ok(Self {
             events,
             descriptor,
             attributes,
             frames,
+            off_bgra,
+            off_nv12: off_nv12.into(),
             _pipe_reader: pipe_reader,
             state: Mutex::new(StreamState {
                 parent: None,
                 state: MF_STREAM_STATE_STOPPED,
                 shutdown: false,
                 next_time_100ns: 0,
-                placeholder_bgra: placeholder_bgra | 0xff00_0000,
             }),
         })
     }
@@ -257,8 +249,8 @@ impl MediaStream {
         let _ = unsafe { self.events.Shutdown() };
     }
 
-    fn make_placeholder_sample(&self, token: Option<IUnknown>) -> windows_core::Result<IMFSample> {
-        let (timestamp, color) = {
+    fn make_output_sample(&self, token: Option<IUnknown>) -> windows_core::Result<IMFSample> {
+        let timestamp = {
             let mut state = self.state.lock().expect("stream state lock poisoned");
             if state.shutdown {
                 return Err(Error::from_hresult(MF_E_SHUTDOWN));
@@ -268,7 +260,7 @@ impl MediaStream {
             }
             let timestamp = state.next_time_100ns;
             state.next_time_100ns = state.next_time_100ns.saturating_add(FRAME_DURATION_100NS);
-            (timestamp, state.placeholder_bgra)
+            timestamp
         };
         let live_frame = self
             .frames
@@ -308,14 +300,12 @@ impl MediaStream {
                 if let Some(frame) = live_frame {
                     bgra_to_nv12(output, frame.pixels());
                 } else {
-                    fill_nv12_color(output, color);
+                    output.copy_from_slice(&self.off_nv12);
                 }
             } else if let Some(frame) = live_frame {
                 output.copy_from_slice(frame.pixels());
             } else {
-                for pixel in output.chunks_exact_mut(4) {
-                    pixel.copy_from_slice(&color.to_le_bytes());
-                }
+                output.copy_from_slice(&self.off_bgra);
             }
             buffer.Unlock()?;
             buffer.SetCurrentLength(frame_bytes)?;
@@ -402,7 +392,7 @@ impl IMFMediaStream_Impl for MediaStream_Impl {
         Ok(self.descriptor.clone())
     }
     fn RequestSample(&self, token: Ref<IUnknown>) -> windows_core::Result<()> {
-        let sample = self.make_placeholder_sample(token.cloned())?;
+        let sample = self.make_output_sample(token.cloned())?;
         // SAFETY: the sample remains alive for the queue call and is AddRef'd by the event.
         unsafe {
             self.events
@@ -462,10 +452,8 @@ mod tests {
         // SAFETY: initializes Media Foundation for this test process.
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
         let _foundation = MediaFoundation;
-        let stream = MediaStream::new(
-            0xff33_2211,
-            r"\\.\pipe\AutomaticScreenCameraRust.Nonexistent.Test".into(),
-        )?;
+        let stream =
+            MediaStream::new(r"\\.\pipe\AutomaticScreenCameraRust.Nonexistent.Test".into())?;
         let handler = unsafe { stream.descriptor.GetMediaTypeHandler()? };
         assert_eq!(unsafe { handler.GetMediaTypeCount()? }, 2);
         let current = unsafe { handler.GetCurrentMediaType()? };
@@ -474,7 +462,7 @@ mod tests {
             MFVideoFormat_RGB32
         );
         stream.start()?;
-        let first = stream.make_placeholder_sample(None)?;
+        let first = stream.make_output_sample(None)?;
         // SAFETY: the sample owns one contiguous RGB32 buffer.
         let buffer = unsafe { first.ConvertToContiguousBuffer()? };
         let mut bytes = core::ptr::null_mut();
@@ -482,15 +470,15 @@ mod tests {
         // SAFETY: Lock initializes bytes and length for this live buffer.
         unsafe { buffer.Lock(&mut bytes, None, Some(&mut length))? };
         assert_eq!(length, FRAME_BYTES);
-        let pixel = unsafe { core::slice::from_raw_parts(bytes, 4) };
-        assert_eq!(pixel, 0xff33_2211_u32.to_le_bytes());
+        let pixels = unsafe { core::slice::from_raw_parts(bytes, length as usize) };
+        assert_eq!(pixels, off_frame_pixels().as_ref());
         // SAFETY: balances the successful Lock.
         unsafe { buffer.Unlock()? };
 
         let nv12 = unsafe { handler.GetMediaTypeByIndex(1)? };
         assert_eq!(unsafe { nv12.GetGUID(&MF_MT_SUBTYPE)? }, MFVideoFormat_NV12);
         stream.set_media_type(&nv12)?;
-        let second = stream.make_placeholder_sample(None)?;
+        let second = stream.make_output_sample(None)?;
         assert_eq!(
             unsafe { second.GetSampleTime()? } - unsafe { first.GetSampleTime()? },
             FRAME_DURATION_100NS
@@ -499,20 +487,9 @@ mod tests {
         unsafe { buffer.Lock(&mut bytes, None, Some(&mut length))? };
         assert_eq!(length, NV12_FRAME_BYTES);
         let pixels = unsafe { core::slice::from_raw_parts(bytes, length as usize) };
-        let [b, g, r, _] = 0xff33_2211_u32.to_le_bytes();
-        assert_eq!(
-            pixels[0],
-            limited_y(i32::from(r), i32::from(g), i32::from(b))
-        );
-        let uv = (WIDTH * HEIGHT) as usize;
-        assert_eq!(
-            pixels[uv],
-            limited_u(i32::from(r), i32::from(g), i32::from(b))
-        );
-        assert_eq!(
-            pixels[uv + 1],
-            limited_v(i32::from(r), i32::from(g), i32::from(b))
-        );
+        let mut expected = vec![0; NV12_FRAME_BYTES as usize];
+        bgra_to_nv12(&mut expected, &off_frame_pixels());
+        assert_eq!(pixels, expected);
         unsafe { buffer.Unlock()? };
         stream.stop(false)?;
         stream.shutdown();

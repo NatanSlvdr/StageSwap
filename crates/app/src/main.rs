@@ -21,7 +21,7 @@ const TRANSITION_AMBER: Color32 = Color32::from_rgb(245, 190, 75);
 const PREVIEW_NEUTRAL: Color32 = Color32::from_rgb(42, 47, 55);
 const FPS_WINDOW: Duration = Duration::from_secs(1);
 const FPS_REFRESH: Duration = Duration::from_millis(250);
-const PREVIEW_REFRESH: Duration = Duration::from_millis(67);
+const PREVIEW_REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 30);
 const HIDDEN_REFRESH: Duration = Duration::from_millis(250);
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const SETTINGS_ENTRANCE_DURATION: Duration = Duration::from_millis(160);
@@ -1286,7 +1286,7 @@ impl SwitcherApp {
         );
         settings_control_row(
             ui,
-            "Placeholder color",
+            "Missing-source fallback color",
             "Used by the virtual camera when the publisher stops.",
             |ui| {
                 let mut color = bgra_color(self.config.placeholder_color_bgra);
@@ -1354,7 +1354,7 @@ impl SwitcherApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(context, |ui| {
-                ui.label("The virtual camera will remain registered and show its placeholder when the publisher stops.");
+                ui.label("The virtual camera will remain registered and show the crossed-camera off screen when the publisher stops.");
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
                         self.show_exit_confirmation = false;

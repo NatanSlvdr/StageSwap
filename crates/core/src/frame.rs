@@ -1,16 +1,147 @@
 use crate::Size;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 pub const PIPELINE_SIZE: Size = Size::new(1280, 720);
 pub const PIPELINE_FPS: u32 = 30;
 pub const FRAME_STALE_AFTER: Duration = Duration::from_secs(1);
+const OFF_ICON_BGRA: [u8; 4] = [0x5a, 0x5a, 0xeb, 0xff];
 
 #[derive(Clone, Copy, Debug)]
 pub struct FrameMetadata {
     pub sequence: u64,
     pub timestamp_100ns: i64,
     pub received_at: Instant,
+}
+
+/// Returns the canonical application-off image shared by the dashboard and
+/// the out-of-process Media Foundation source.
+pub fn off_frame(metadata: FrameMetadata) -> Frame {
+    Frame::new(
+        off_frame_pixels(),
+        PIPELINE_SIZE,
+        PIPELINE_SIZE.width * 4,
+        metadata.sequence,
+        metadata.timestamp_100ns,
+        metadata.received_at,
+    )
+    .expect("off frame dimensions are valid")
+}
+
+pub fn off_frame_pixels() -> Arc<[u8]> {
+    static PIXELS: OnceLock<Arc<[u8]>> = OnceLock::new();
+    Arc::clone(PIXELS.get_or_init(render_off_frame))
+}
+
+fn render_off_frame() -> Arc<[u8]> {
+    let size = PIPELINE_SIZE;
+    let mut pixels = vec![0; size.width as usize * size.height as usize * 4];
+    for alpha in pixels.iter_mut().skip(3).step_by(4) {
+        *alpha = 0xff;
+    }
+
+    // Centered camera outline.
+    stroke_rect(&mut pixels, size, 430, 270, 850, 500, 18, OFF_ICON_BGRA);
+    stroke_rect(&mut pixels, size, 540, 220, 740, 288, 18, OFF_ICON_BGRA);
+    stroke_circle(&mut pixels, size, 640, 385, 72, 18, OFF_ICON_BGRA);
+
+    // A single strong diagonal makes the camera unmistakably disabled.
+    draw_thick_line(&mut pixels, size, (405, 190), (875, 550), 34, OFF_ICON_BGRA);
+    pixels.into()
+}
+
+fn paint_pixel(pixels: &mut [u8], size: Size, x: u32, y: u32, color: [u8; 4]) {
+    if x >= size.width || y >= size.height {
+        return;
+    }
+    let offset = (y as usize * size.width as usize + x as usize) * 4;
+    pixels[offset..offset + 4].copy_from_slice(&color);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stroke_rect(
+    pixels: &mut [u8],
+    size: Size,
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+    thickness: u32,
+    color: [u8; 4],
+) {
+    for y in top..bottom {
+        for x in left..right {
+            if x < left + thickness
+                || x >= right.saturating_sub(thickness)
+                || y < top + thickness
+                || y >= bottom.saturating_sub(thickness)
+            {
+                paint_pixel(pixels, size, x, y, color);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stroke_circle(
+    pixels: &mut [u8],
+    size: Size,
+    center_x: i32,
+    center_y: i32,
+    radius: i32,
+    thickness: i32,
+    color: [u8; 4],
+) {
+    let inner = (radius - thickness).max(0);
+    let inner_squared = inner * inner;
+    let outer_squared = radius * radius;
+    for y in center_y - radius..=center_y + radius {
+        for x in center_x - radius..=center_x + radius {
+            let dx = x - center_x;
+            let dy = y - center_y;
+            let distance = dx * dx + dy * dy;
+            if (inner_squared..=outer_squared).contains(&distance) && x >= 0 && y >= 0 {
+                paint_pixel(pixels, size, x as u32, y as u32, color);
+            }
+        }
+    }
+}
+
+fn draw_thick_line(
+    pixels: &mut [u8],
+    size: Size,
+    start: (i32, i32),
+    end: (i32, i32),
+    thickness: i32,
+    color: [u8; 4],
+) {
+    let radius = f64::from(thickness) / 2.0;
+    let minimum_x = start.0.min(end.0) - thickness;
+    let maximum_x = start.0.max(end.0) + thickness;
+    let minimum_y = start.1.min(end.1) - thickness;
+    let maximum_y = start.1.max(end.1) + thickness;
+    let dx = f64::from(end.0 - start.0);
+    let dy = f64::from(end.1 - start.1);
+    let length_squared = dx * dx + dy * dy;
+
+    for y in minimum_y..=maximum_y {
+        for x in minimum_x..=maximum_x {
+            let projection = ((f64::from(x - start.0) * dx + f64::from(y - start.1) * dy)
+                / length_squared)
+                .clamp(0.0, 1.0);
+            let closest_x = f64::from(start.0) + projection * dx;
+            let closest_y = f64::from(start.1) + projection * dy;
+            let distance_x = f64::from(x) - closest_x;
+            let distance_y = f64::from(y) - closest_y;
+            if distance_x * distance_x + distance_y * distance_y <= radius * radius
+                && x >= 0
+                && y >= 0
+            {
+                paint_pixel(pixels, size, x as u32, y as u32, color);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -368,6 +499,39 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn off_frame_is_deterministic_black_with_a_red_crossed_camera() {
+        let now = Instant::now();
+        let first = off_frame(FrameMetadata {
+            sequence: 7,
+            timestamp_100ns: 11,
+            received_at: now,
+        });
+        let second = off_frame(FrameMetadata {
+            sequence: 8,
+            timestamp_100ns: 12,
+            received_at: now,
+        });
+
+        assert_eq!(first.size, PIPELINE_SIZE);
+        assert_eq!(first.stride, PIPELINE_SIZE.width * 4);
+        assert!(Arc::ptr_eq(&first.pixels_arc(), &second.pixels_arc()));
+        let pixel = |x: usize, y: usize| {
+            let offset = (y * PIPELINE_SIZE.width as usize + x) * 4;
+            &first.pixels()[offset..offset + 4]
+        };
+        assert_eq!(pixel(0, 0), &[0, 0, 0, 255]);
+        assert_eq!(pixel(1279, 719), &[0, 0, 0, 255]);
+        assert_eq!(pixel(430, 270), OFF_ICON_BGRA);
+        assert_eq!(pixel(640, 370), OFF_ICON_BGRA);
+        assert!(
+            first
+                .pixels()
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0, 0, 0, 255] || pixel == OFF_ICON_BGRA)
+        );
+    }
 
     #[test]
     fn rejects_invalid_frames() {

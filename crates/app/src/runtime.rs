@@ -1,7 +1,7 @@
 use asc_core::{
     AppConfig, AppSnapshot, Command, DebouncedDetector, DetectorSettings, DeviceState, Frame,
     FrameCompositor, FrameMetadata, FramePacer, GrayImage, PIPELINE_FPS, RunState, Size, Source,
-    SourceAvailability, TransitionController, bgra_to_gray, decide, image_similarity,
+    SourceAvailability, TransitionController, bgra_to_gray, decide, image_similarity, off_frame,
     resize_bgra_to_gray, resize_bilinear,
 };
 use std::collections::VecDeque;
@@ -32,10 +32,21 @@ pub struct RuntimeHandle {
 impl RuntimeHandle {
     pub fn spawn(config: AppConfig) -> Self {
         let (commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let snapshot = Arc::new(RwLock::new(AppSnapshot {
+        let now = Instant::now();
+        let mut transition = TransitionController::default();
+        let mut initial_snapshot = AppSnapshot {
             mode: config.output_mode,
             ..AppSnapshot::default()
-        }));
+        };
+        initial_snapshot.actual_output = Source::Placeholder;
+        initial_snapshot.automatic_target = Source::Placeholder;
+        initial_snapshot.transition = transition.request(Source::Placeholder, now);
+        initial_snapshot.previews.final_output = Some(Arc::new(off_frame(FrameMetadata {
+            sequence: 1,
+            timestamp_100ns: 0,
+            received_at: now,
+        })));
+        let snapshot = Arc::new(RwLock::new(initial_snapshot));
         let worker_snapshot = Arc::clone(&snapshot);
         let worker = thread::Builder::new()
             .name("asc-runtime".into())
@@ -98,19 +109,29 @@ impl RuntimeState {
             ..DetectorSettings::default()
         });
         let now = Instant::now();
+        let sequence = 1;
+        let mut transition = TransitionController::default();
         let mut snapshot = AppSnapshot {
             mode,
             selected_video_device_id: config.selected_video_device_id.clone(),
             ..AppSnapshot::default()
         };
+        snapshot.actual_output = Source::Placeholder;
+        snapshot.automatic_target = Source::Placeholder;
+        snapshot.transition = transition.request(Source::Placeholder, now);
+        snapshot.previews.final_output = Some(Arc::new(off_frame(FrameMetadata {
+            sequence,
+            timestamp_100ns: 0,
+            received_at: now,
+        })));
         snapshot.previews.reference = reference_preview;
         Self {
             snapshot,
             config,
-            transition: TransitionController::default(),
+            transition,
             compositor: FrameCompositor::default(),
             activity: VecDeque::with_capacity(ACTIVITY_LIMIT),
-            sequence: 0,
+            sequence,
             started_at: now,
             reference,
             detector,
@@ -134,6 +155,7 @@ impl RuntimeState {
             }
             Command::Stop => {
                 self.snapshot.run_state = RunState::Stopped;
+                self.show_off_output(Instant::now());
                 self.record("Automation stopped");
             }
             Command::SetMode(mode) => {
@@ -173,6 +195,19 @@ impl RuntimeState {
             Command::Exit => return false,
         }
         true
+    }
+
+    fn show_off_output(&mut self, now: Instant) {
+        self.sequence = self.sequence.wrapping_add(1).max(1);
+        let timestamp = now.saturating_duration_since(self.started_at).as_nanos() / 100;
+        self.snapshot.actual_output = Source::Placeholder;
+        self.snapshot.automatic_target = Source::Placeholder;
+        self.snapshot.transition = self.transition.request(Source::Placeholder, now);
+        self.snapshot.previews.final_output = Some(Arc::new(off_frame(FrameMetadata {
+            sequence: self.sequence,
+            timestamp_100ns: i64::try_from(timestamp).unwrap_or(i64::MAX),
+            received_at: now,
+        })));
     }
 
     fn tick(&mut self, now: Instant) {
@@ -537,10 +572,7 @@ impl Platform {
                 });
         let camera = publisher.as_ref().and_then(|_| {
             pipe_name.as_ref().and_then(|pipe_name| {
-                match VirtualCameraController::start(
-                    pipe_name.clone(),
-                    state.config.placeholder_color_bgra,
-                ) {
+                match VirtualCameraController::start(pipe_name.clone()) {
                     Ok(camera) => {
                         state.snapshot.virtual_camera_state = DeviceState::Ready;
                         state.record("Virtual camera initialized");
@@ -686,14 +718,6 @@ impl Platform {
                     self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
                     self.last_monitor_scan = Instant::now() - Duration::from_secs(30);
                 }
-                if config.placeholder_color_bgra != state.config.placeholder_color_bgra
-                    && let Some(camera) = &mut self.camera
-                    && let Err(error) = camera.update_placeholder(config.placeholder_color_bgra)
-                {
-                    state.snapshot.virtual_camera_state = DeviceState::Failed;
-                    state.snapshot.warning = Some(error.clone());
-                    state.record(format!("Virtual camera placeholder update failed: {error}"));
-                }
                 if config.similarity_threshold != state.config.similarity_threshold {
                     let mut tracker = MonitorTracker::new(MonitorTrackerSettings {
                         match_threshold: config.similarity_threshold,
@@ -811,7 +835,7 @@ impl Platform {
         } else if self.publisher.is_none() {
             Err("virtual camera frame publisher is unavailable".into())
         } else if let Some(pipe_name) = &self.pipe_name {
-            VirtualCameraController::start(pipe_name.clone(), state.config.placeholder_color_bgra)
+            VirtualCameraController::start(pipe_name.clone())
                 .map(|camera| self.camera = Some(camera))
         } else {
             Err("virtual camera pipe is unavailable".into())
@@ -1013,6 +1037,61 @@ mod tests {
         assert_eq!(snapshot.mode, OutputMode::ForceScreen);
         assert_eq!(snapshot.actual_output, Source::Placeholder);
         assert!(snapshot.previews.final_output.is_some());
+    }
+
+    #[test]
+    fn stopped_runtime_uses_the_canonical_off_frame_and_running_resumes_output() {
+        let runtime = RuntimeHandle::spawn(AppConfig {
+            start_automatically: false,
+            ..AppConfig::default()
+        });
+        let initial = runtime.snapshot();
+        let initial_output = initial
+            .previews
+            .final_output
+            .expect("stopped runtime should start with an off frame");
+        assert_eq!(initial.run_state, RunState::Stopped);
+        assert_eq!(initial.actual_output, Source::Placeholder);
+        assert_eq!(
+            initial_output.pixels(),
+            asc_core::off_frame_pixels().as_ref()
+        );
+
+        runtime.send(Command::Start).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let running_sequence = loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.run_state == RunState::Running
+                && let Some(output) = snapshot.previews.final_output
+                && output.sequence > initial_output.sequence
+            {
+                break output.sequence;
+            }
+            assert!(Instant::now() < deadline, "runtime did not resume output");
+            thread::yield_now();
+        };
+
+        runtime.send(Command::Stop).unwrap();
+        let stopped = loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.run_state == RunState::Stopped
+                && snapshot
+                    .previews
+                    .final_output
+                    .as_ref()
+                    .is_some_and(|output| output.sequence > running_sequence)
+            {
+                break snapshot;
+            }
+            assert!(Instant::now() < deadline, "runtime did not stop");
+            thread::yield_now();
+        };
+        let stopped_output = stopped.previews.final_output.expect("off frame is present");
+        assert_eq!(stopped.actual_output, Source::Placeholder);
+        assert_eq!(
+            stopped_output.pixels(),
+            asc_core::off_frame_pixels().as_ref()
+        );
     }
 
     #[test]

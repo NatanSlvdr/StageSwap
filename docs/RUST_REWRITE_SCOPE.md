@@ -7,12 +7,12 @@ This scope replaced the former production application directly. The repository n
 - One self-contained Windows 11 x64 application. The portable executable may embed and deploy its matching camera-source DLL; users install neither OBS nor another runtime application.
 - One webcam input. Store its identifier, open it at startup, and use a fixed internal BGRA/RGB32 1280×720 at 30 fps contract.
 - One screen capture selected by the saved visual reference. Compare a 160×90 grayscale image every 250 ms, with five matches and three mismatches. Scan displays at startup, every 30 seconds, and on explicit Rescan only to locate that reference.
-- Automatic, Force Webcam, and Force Screen modes, with the current 500 ms reversible fade and placeholder fallbacks.
+- Automatic, Force Webcam, and Force Screen modes, with the current 500 ms reversible fade, configurable missing-source fallback, and fixed crossed-camera off screen.
 - One per-user frame transport from the application to a Media Foundation custom source DLL.
 - Virtual-camera output prefers RGB32 1280×720 at 30 fps and retains selectable NV12 720p for Windows Camera and Zoom compatibility; do not restore 1080p without evidence.
 - Local configuration, reference image, previews, tray/main UI, startup preference, and bounded diagnostic logs.
 
-This is a new installation with source CLSID `{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}`, pipe attribute `{905306DD-B9A3-4385-A273-606E05B3208B}`, placeholder attribute `{05CD1551-BFC8-4276-8E0B-70BA4065822E}`, and storage under `%LocalAppData%\AutomaticScreenCameraRust`. It does not import the old schema-v2 data, but startup removes the legacy portable deployment artifacts while preserving user configuration, references, and logs.
+This is a new installation with source CLSID `{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}`, pipe attribute `{905306DD-B9A3-4385-A273-606E05B3208B}`, and storage under `%LocalAppData%\AutomaticScreenCameraRust`. It does not import the old schema-v2 data, but startup removes the legacy portable deployment artifacts while preserving user configuration, references, and logs.
 
 ## Deliberate non-goals
 

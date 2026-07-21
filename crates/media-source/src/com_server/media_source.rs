@@ -22,7 +22,6 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows_core::{ComObject, Error, GUID, HRESULT, IUnknown, Ref, implement, w};
 
-const PLACEHOLDER_ATTRIBUTE: GUID = GUID::from_u128(0x05cd1551_bfc8_4276_8e0b_70ba4065822e);
 const PIPE_ATTRIBUTE: GUID = GUID::from_u128(0x905306dd_b9a3_4385_a273_606e05b3208b);
 const ERROR_SET_NOT_FOUND_HRESULT: HRESULT = HRESULT(0x8007_0492_u32 as i32);
 
@@ -71,10 +70,8 @@ impl MediaSource {
                 w!("Automatic Screen Camera"),
             )?;
         }
-        let placeholder =
-            unsafe { activation.GetUINT32(&PLACEHOLDER_ATTRIBUTE) }.unwrap_or(0xff17_1719);
         let pipe_name = read_string_attribute(activation, &PIPE_ATTRIBUTE).unwrap_or_default();
-        let stream = ComObject::new(MediaStream::new(placeholder, pipe_name)?);
+        let stream = ComObject::new(MediaStream::new(pipe_name)?);
         let stream_descriptor = stream.descriptor();
         // SAFETY: the descriptor array remains alive for the constructor call.
         let descriptor =

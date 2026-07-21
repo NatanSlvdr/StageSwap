@@ -10,7 +10,7 @@ Run the full retained workflow in a Windows 11 x64 VM:
 6. Exercise Automatic switching both ways, Force Webcam, Force Screen, and reversal during the 500 ms fade.
 7. Verify the main window, tray behavior, four previews, cursor option, placeholder color, startup preferences, 14-day logs, and all four manual restart actions.
 8. In Windows Camera and Zoom, verify virtual-camera enumeration and preferred RGB32 1280×720 output at 30 fps. Confirm NV12 720p remains selectable and renders correctly when explicitly negotiated.
-9. Terminate the tray application and verify placeholder output. Repeat switching without functional failure.
+9. Stop automation and verify that the dashboard output and virtual-camera consumer both show the same black frame with a centered red crossed-camera icon. Terminate the tray application and verify that the consumer continues showing that off frame. Repeat switching without functional failure.
 10. In a release build, measure at least 300 post-warm-up frames for Force Webcam, Force Screen, Automatic, and a reversed transition. Require monotonic sample timestamps, at least 29 fps average wall-clock delivery, and no capture gap over 100 ms. Leave each of Windows Camera and Zoom running for several minutes and confirm the displayed rate remains 30 fps.
 11. Record Task Manager CPU for 60 seconds with the dashboard open and with the app hidden in the tray. Compare it with the previous build; CPU must improve materially, but there is no fixed percentage gate.
 
