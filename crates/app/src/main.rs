@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use asc_app::RuntimeHandle;
 use asc_core::{
     AppConfig, AppSnapshot, Command, ConfigStore, DeviceState, Frame, OutputMode, RestartTarget,
@@ -782,6 +784,11 @@ fn bgra_color(value: u32) -> Color32 {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn default_ui_fonts_are_bundled() {
+        assert!(!egui::FontDefinitions::default().font_data.is_empty());
+    }
 
     #[test]
     fn preview_conversion_preserves_size_and_bgra_channels() {
