@@ -378,9 +378,17 @@ struct PreviewOptions {
 
 #[derive(Clone, Copy, Debug)]
 struct SettingsPreviewControls {
+    heading: Rect,
     preview: Rect,
     controls: Rect,
     side_by_side: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SettingsSection {
+    icon: UiIcon,
+    title: &'static str,
+    description: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -1270,6 +1278,7 @@ impl SwitcherApp {
             "Begin monitoring and switching after the app is ready.",
         );
 
+        settings_section_divider(ui);
         settings_section_heading(
             ui,
             UiIcon::Window,
@@ -1289,6 +1298,7 @@ impl SwitcherApp {
             "Ask before stopping the app and its active capture pipeline.",
         );
 
+        settings_section_divider(ui);
         settings_section_heading(
             ui,
             UiIcon::Bell,
@@ -1317,14 +1327,13 @@ impl SwitcherApp {
                     "Saved camera is unavailable".into()
                 }
             });
-        settings_section_heading(
-            ui,
-            UiIcon::Camera,
-            "Camera input",
-            "Preview and choose the camera used whenever webcam output is active.",
-        );
         self.settings_preview_control_row(
             ui,
+            SettingsSection {
+                icon: UiIcon::Camera,
+                title: "Camera input",
+                description: "Preview and choose the camera used whenever webcam output is active.",
+            },
             SettingsPreview {
                 kind: PreviewKind::Webcam,
                 frame: snapshot.previews.webcam.as_ref(),
@@ -1387,18 +1396,17 @@ impl SwitcherApp {
 
     fn screen_detection_settings(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.runtime.snapshot();
-        settings_section_heading(
-            ui,
-            UiIcon::Monitor,
-            "Screen capture",
-            "Preview and choose the display Automatic mode watches.",
-        );
         let selected_monitor = snapshot
             .selected_monitor
             .as_ref()
             .map_or("No display selected", |monitor| monitor.label.as_str());
         self.settings_preview_control_row(
             ui,
+            SettingsSection {
+                icon: UiIcon::Monitor,
+                title: "Screen capture",
+                description: "Preview and choose the display Automatic mode watches.",
+            },
             SettingsPreview {
                 kind: PreviewKind::Screen,
                 frame: snapshot.previews.screen.as_ref(),
@@ -1443,14 +1451,15 @@ impl SwitcherApp {
             },
         );
 
-        settings_section_heading(
-            ui,
-            UiIcon::Target,
-            "Reference and matching",
-            "Automatic mode shows the webcam while the screen resembles this reference.",
-        );
+        settings_section_divider(ui);
         self.settings_preview_control_row(
             ui,
+            SettingsSection {
+                icon: UiIcon::Target,
+                title: "Reference and matching",
+                description:
+                    "Automatic mode shows the webcam while the screen resembles this reference.",
+            },
             SettingsPreview {
                 kind: PreviewKind::Reference,
                 frame: snapshot.previews.reference.as_ref(),
@@ -1465,12 +1474,16 @@ impl SwitcherApp {
                     settings_detection_status(ui, snapshot.detection);
                 });
                 ui.add_space(10.0);
-                ui.horizontal_wrapped(|ui| {
+                ui.horizontal(|ui| {
+                    let geometry = reference_control_geometry(
+                        ui.available_width(),
+                        ui.spacing().item_spacing.x,
+                    );
                     if icon_button(
                         ui,
                         UiIcon::Capture,
                         "Capture screen",
-                        egui::vec2(132.0, 32.0),
+                        egui::vec2(geometry.action_width, 32.0),
                         false,
                         false,
                     )
@@ -1482,7 +1495,7 @@ impl SwitcherApp {
                         ui,
                         UiIcon::Image,
                         "Import image…",
-                        egui::vec2(122.0, 32.0),
+                        egui::vec2(geometry.action_width, 32.0),
                         false,
                         false,
                     )
@@ -1492,28 +1505,34 @@ impl SwitcherApp {
                     }
                 });
                 ui.add_space(12.0);
-                ui.label(
-                    RichText::new("Match strictness")
-                        .size(12.0)
-                        .color(Color32::from_rgb(224, 228, 235)),
-                );
+                let strictness = format!("{:.0}%", app.config.similarity_threshold * 100.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Match strictness")
+                            .size(12.0)
+                            .color(Color32::from_rgb(224, 228, 235)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Reset 98%").clicked() {
+                            app.config.similarity_threshold = 0.98;
+                        }
+                        ui.label(RichText::new(strictness).monospace());
+                    });
+                });
                 ui.label(
                     RichText::new("Higher values require a closer visual match.")
                         .size(10.5)
                         .color(Color32::from_rgb(126, 134, 148)),
                 );
-                let strictness = format!("{:.0}%", app.config.similarity_threshold * 100.0);
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [(ui.available_width() - 92.0).max(90.0), 24.0],
-                        egui::Slider::new(&mut app.config.similarity_threshold, 0.50..=1.0)
-                            .show_value(false),
-                    );
-                    ui.label(RichText::new(strictness).monospace());
-                    if ui.small_button("Reset 98%").clicked() {
-                        app.config.similarity_threshold = 0.98;
-                    }
-                });
+                let geometry = reference_control_geometry(
+                    ui.available_width(),
+                    ui.spacing().item_spacing.x,
+                );
+                ui.add_sized(
+                    [geometry.slider_width, 24.0],
+                    egui::Slider::new(&mut app.config.similarity_threshold, 0.50..=1.0)
+                        .show_value(false),
+                );
             },
         );
     }
@@ -1536,6 +1555,7 @@ impl SwitcherApp {
         );
         settings_detection_status(ui, snapshot.detection);
 
+        settings_section_divider(ui);
         settings_section_heading(
             ui,
             UiIcon::Wrench,
@@ -1562,6 +1582,7 @@ impl SwitcherApp {
             }
         });
 
+        settings_section_divider(ui);
         settings_section_heading(
             ui,
             UiIcon::Info,
@@ -1613,6 +1634,7 @@ impl SwitcherApp {
             "Every 250 ms · 5 matches · 3 mismatches · full scan every 30 seconds",
         );
 
+        settings_section_divider(ui);
         settings_section_heading(
             ui,
             UiIcon::Folder,
@@ -1667,11 +1689,13 @@ impl SwitcherApp {
     fn settings_preview_control_row(
         &mut self,
         ui: &mut egui::Ui,
+        section: SettingsSection,
         preview: SettingsPreview<'_>,
         add_controls: impl FnOnce(&mut Self, &mut egui::Ui),
     ) -> SettingsPreviewControls {
         let available = ui.available_width();
         let side_by_side = available >= SETTINGS_PREVIEW_COLUMNS_BREAKPOINT;
+        let mut heading_rect = Rect::NOTHING;
         let mut preview_rect = Rect::NOTHING;
         let mut controls_rect = Rect::NOTHING;
         if side_by_side {
@@ -1688,6 +1712,13 @@ impl SwitcherApp {
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             ui.set_width(controls_width);
+                            heading_rect = settings_section_heading(
+                                ui,
+                                section.icon,
+                                section.title,
+                                section.description,
+                            );
+                            ui.add_space(10.0);
                             add_controls(self, ui);
                         },
                     );
@@ -1695,6 +1726,9 @@ impl SwitcherApp {
                 });
             });
         } else {
+            heading_rect =
+                settings_section_heading(ui, section.icon, section.title, section.description);
+            ui.add_space(8.0);
             preview_rect = self.settings_single_preview(ui, preview);
             ui.add_space(10.0);
             let controls = ui.allocate_ui_with_layout(
@@ -1708,10 +1742,12 @@ impl SwitcherApp {
             controls_rect = controls.response.rect;
         }
         let layout = SettingsPreviewControls {
+            heading: heading_rect,
             preview: preview_rect,
             controls: controls_rect,
             side_by_side,
         };
+        debug_assert!(layout.heading.is_positive());
         debug_assert!(layout.preview.is_positive());
         debug_assert!(layout.controls.is_positive());
         debug_assert_eq!(
@@ -2117,34 +2153,50 @@ fn settings_nav_button(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn settings_section_heading(ui: &mut egui::Ui, icon: UiIcon, title: &str, description: &str) {
-    if ui.cursor().top() > ui.min_rect().top() + 110.0 {
-        ui.add_space(18.0);
-    }
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(17.0, 17.0), Sense::hover());
-        draw_icon(
-            ui.painter(),
-            rect,
-            icon,
-            Color32::from_rgb(119, 164, 247),
-            1.45,
+fn settings_section_heading(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    title: &str,
+    description: &str,
+) -> Rect {
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(17.0, 17.0), Sense::hover());
+            draw_icon(
+                ui.painter(),
+                rect,
+                icon,
+                Color32::from_rgb(119, 164, 247),
+                1.45,
+            );
+            ui.label(
+                RichText::new(title)
+                    .size(14.0)
+                    .strong()
+                    .color(Color32::from_rgb(228, 231, 237)),
+            );
+        });
+        ui.add_space(2.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(description)
+                    .size(11.0)
+                    .color(Color32::from_rgb(128, 136, 150)),
+            )
+            .wrap(),
         );
-        ui.label(
-            RichText::new(title)
-                .size(14.0)
-                .strong()
-                .color(Color32::from_rgb(228, 231, 237)),
-        );
-    });
-    ui.add_space(2.0);
-    ui.label(
-        RichText::new(description)
-            .size(11.0)
-            .color(Color32::from_rgb(128, 136, 150)),
-    );
-    ui.add_space(7.0);
-    ui.separator();
+    })
+    .response
+    .rect
+}
+
+fn settings_section_divider(ui: &mut egui::Ui) -> Rect {
+    ui.add_space(14.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 0, Color32::from_rgb(61, 67, 78));
+    ui.add_space(14.0);
+    rect
 }
 
 fn settings_toggle_row(ui: &mut egui::Ui, value: &mut bool, title: &str, description: &str) {
@@ -2226,6 +2278,19 @@ struct SettingsSwitchGeometry {
 struct SelectorUtilityGeometry {
     selector_width: f32,
     action_width: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReferenceControlGeometry {
+    action_width: f32,
+    slider_width: f32,
+}
+
+fn reference_control_geometry(available: f32, gap: f32) -> ReferenceControlGeometry {
+    ReferenceControlGeometry {
+        action_width: ((available - gap) / 2.0).max(80.0),
+        slider_width: available.max(1.0),
+    }
 }
 
 fn selector_utility_geometry(available: f32, gap: f32) -> SelectorUtilityGeometry {
@@ -3630,6 +3695,34 @@ mod tests {
     }
 
     #[test]
+    fn reference_actions_share_available_width_without_overflow() {
+        for available in [220.0, 360.0, 520.0] {
+            let gap = 8.0;
+            let geometry = reference_control_geometry(available, gap);
+            assert!(geometry.action_width >= 80.0);
+            assert!((geometry.action_width * 2.0 + gap - available).abs() < 0.01);
+            assert_eq!(geometry.slider_width, available);
+        }
+    }
+
+    #[test]
+    fn settings_category_divider_is_full_width_and_between_sections() {
+        let context = egui::Context::default();
+        let mut first = Rect::NOTHING;
+        let mut divider = Rect::NOTHING;
+        let mut second = Rect::NOTHING;
+        let _ = context.run_ui(egui::RawInput::default(), |ui| {
+            ui.set_width(520.0);
+            first = ui.allocate_space(egui::vec2(ui.available_width(), 30.0)).1;
+            divider = settings_section_divider(ui);
+            second = ui.allocate_space(egui::vec2(ui.available_width(), 30.0)).1;
+        });
+        assert!(first.bottom() < divider.top());
+        assert!(divider.bottom() < second.top());
+        assert!((divider.width() - 520.0).abs() < 0.01);
+    }
+
+    #[test]
     fn four_settings_categories_keep_every_recovery_target_in_diagnostics() {
         assert_eq!(SettingsTab::ALL.len(), 4);
         for target in [
@@ -3689,6 +3782,11 @@ mod tests {
                     ui.set_width(width);
                     layout = Some(app.settings_preview_control_row(
                         ui,
+                        SettingsSection {
+                            icon: UiIcon::Camera,
+                            title: "Test section",
+                            description: "Test section description.",
+                        },
                         SettingsPreview {
                             kind,
                             frame: None,
@@ -3703,6 +3801,7 @@ mod tests {
                 });
                 let layout = layout.unwrap();
                 assert_eq!(layout.side_by_side, expected_side_by_side);
+                assert!(layout.heading.is_positive());
                 assert!(layout.preview.is_positive());
                 assert!(layout.controls.is_positive());
                 assert!(layout.preview.left() >= -0.01 && layout.preview.right() <= width + 0.01);
@@ -3715,7 +3814,9 @@ mod tests {
                 assert!(!layout.preview.intersects(layout.controls));
                 if expected_side_by_side {
                     assert!(layout.controls.left() > layout.preview.right());
+                    assert!(layout.controls.contains_rect(layout.heading));
                 } else {
+                    assert!(layout.heading.bottom() < layout.preview.top());
                     assert!(layout.controls.top() > layout.preview.bottom());
                 }
                 assert!(!output.shapes.is_empty());
