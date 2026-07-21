@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use windows::Win32::Foundation::{CloseHandle, E_NOTIMPL, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Media::MediaFoundation::{
     IMFAsyncCallback, IMFAsyncCallback_Impl, IMFAsyncResult, IMFMediaEvent, IMFVirtualCamera,
-    MEError, MEExtendedType, MF_FRAMESERVER_VCAMEVENT_EXTENDED_PIPELINE_SHUTDOWN, MF_VERSION,
-    MFSTARTUP_FULL, MFShutdown, MFStartup, MFVirtualCameraAccess,
-    MFVirtualCameraAccess_CurrentUser, MFVirtualCameraLifetime, MFVirtualCameraLifetime_System,
-    MFVirtualCameraType, MFVirtualCameraType_SoftwareCameraSource,
+    MEError, MEExtendedType, MF_E_INVALIDREQUEST,
+    MF_FRAMESERVER_VCAMEVENT_EXTENDED_PIPELINE_SHUTDOWN, MF_VERSION, MFSTARTUP_FULL, MFShutdown,
+    MFStartup, MFVirtualCameraAccess, MFVirtualCameraAccess_CurrentUser, MFVirtualCameraLifetime,
+    MFVirtualCameraLifetime_System, MFVirtualCameraType, MFVirtualCameraType_SoftwareCameraSource,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
@@ -316,7 +316,11 @@ pub(crate) fn remove_virtual_camera_for_source(source_id: &str) -> Result<(), St
         (|| -> windows_core::Result<()> {
             // SAFETY: camera is a live controller created on this thread.
             unsafe {
-                camera.Remove()?;
+                if let Err(error) = camera.Remove()
+                    && !virtual_camera_registration_is_absent(&error)
+                {
+                    return Err(error);
+                }
                 camera.Shutdown()?;
             }
             Ok(())
@@ -326,6 +330,13 @@ pub(crate) fn remove_virtual_camera_for_source(source_id: &str) -> Result<(), St
     let _ = unsafe { MFShutdown() };
     unsafe { CoUninitialize() };
     result
+}
+
+fn virtual_camera_registration_is_absent(error: &windows_core::Error) -> bool {
+    // MFCreateVirtualCamera also returns a controller when this identity has not
+    // been registered. Remove reports that state as MF_E_INVALIDREQUEST, so
+    // cleanup must treat it as the idempotent "already removed" case.
+    error.code() == MF_E_INVALIDREQUEST
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -363,5 +374,14 @@ mod tests {
         };
         assert!(camera_event_failed(&event));
         Ok(())
+    }
+
+    #[test]
+    fn missing_virtual_camera_registration_is_already_removed() {
+        let error = Error::from_hresult(MF_E_INVALIDREQUEST);
+        assert!(virtual_camera_registration_is_absent(&error));
+        assert!(!virtual_camera_registration_is_absent(
+            &Error::from_hresult(windows::Win32::Foundation::E_ACCESSDENIED,)
+        ));
     }
 }
