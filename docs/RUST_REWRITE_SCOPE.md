@@ -34,7 +34,7 @@ This is a new installation with source CLSID `{402EB87C-123B-4765-9FF7-6E11CC7DA
 | Webcam capture | Direct Media Foundation source reader through `windows` | Adopted instead of `nokhwa`, keeping symbolic-link enumeration, fixed RGB32 negotiation, callbacks, and COM ownership inside the Windows adapter. Native webcam execution remains a release-machine test. |
 | Configuration | [`serde`](https://serde.rs/) and [`serde_json`](https://docs.rs/serde_json/latest/serde_json/) | Adopt a new typed `schema_version: 1`, atomic replacement, backup recovery, and defaults-with-warning when both files are invalid. No old-schema migration. |
 | Reference import and CPU image operations | [`image`](https://docs.rs/image/latest/image/) with only PNG, JPEG, and BMP features | Adopted for decoding. Direct grayscale thumbnails, cached BGRA composition, letterboxing, and the NV12 compatibility conversion remain in the repository with unit tests. |
-| Main window and previews | `eframe` 0.35 / `egui` with `wgpu` | Adopt with the retained dashboard, five settings tabs, 2×2 previews, and restrained visual parity at 100% and 150% DPI. |
+| Main window and previews | `eframe` 0.35 / `egui` with `wgpu` | Adopt with the retained dashboard, four settings categories, contextual previews, and restrained visual parity at 100% and 150% DPI. |
 | Tray | `tray-icon` 0.24 | Adopt with close-to-tray, notifications, and the retained lifecycle actions. |
 | Virtual-camera media source | No production-ready drop-in crate found | Implement in the Rust DLL with `windows`. Reuse the current protocol and behavior; do not invent a new driver architecture. |
 

@@ -8,7 +8,7 @@ Run the full retained workflow in a Windows 11 x64 VM:
 4. Select the single expected webcam, relaunch, and verify that the saved device opens as fixed 720p30 RGB32 capture.
 5. Select the current monitor, capture and import references, Rescan, and verify a new highest-scoring monitor is selected only after the immediate confirmation scan.
 6. Exercise Automatic switching both ways, Force Webcam, Force Screen, and reversal during the 500 ms fade.
-7. Verify the main window, tray behavior, four previews, cursor option, placeholder color, startup preferences, 14-day logs, and all four manual restart actions.
+7. Verify the main window, tray behavior, dashboard previews, contextual Settings previews, cursor option, startup preferences, 14-day logs, and all four manual restart actions. Confirm the persisted missing-source fallback still behaves correctly; it no longer has a Settings editor.
 8. In Windows Camera and Zoom, verify virtual-camera enumeration and preferred RGB32 1280×720 output at 30 fps. Confirm NV12 720p remains selectable and renders correctly when explicitly negotiated.
 9. Stop automation and verify that the dashboard output and virtual-camera consumer both show the same black frame with a centered red crossed-camera icon. Terminate the tray application and verify that the consumer continues showing that off frame. Repeat switching without functional failure.
 10. In a release build, measure at least 300 post-warm-up frames for Force Webcam, Force Screen, Automatic, and a reversed transition. Require monotonic sample timestamps, at least 29 fps average wall-clock delivery, and no capture gap over 100 ms. Leave each of Windows Camera and Zoom running for several minutes and confirm the displayed rate remains 30 fps.

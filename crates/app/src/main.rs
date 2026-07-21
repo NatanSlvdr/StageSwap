@@ -21,6 +21,8 @@ const LIVE_RED: Color32 = Color32::from_rgb(235, 90, 90);
 const ACTIVE_GREEN: Color32 = Color32::from_rgb(76, 205, 132);
 const TRANSITION_AMBER: Color32 = Color32::from_rgb(245, 190, 75);
 const PREVIEW_NEUTRAL: Color32 = Color32::from_rgb(42, 47, 55);
+const SETTINGS_BLUE: Color32 = Color32::from_rgb(64, 118, 216);
+const SETTINGS_SWITCH_OFF: Color32 = Color32::from_rgb(49, 56, 68);
 const FPS_WINDOW: Duration = Duration::from_secs(1);
 const FPS_REFRESH: Duration = Duration::from_millis(250);
 const PREVIEW_REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 30);
@@ -30,11 +32,11 @@ const MAX_PREVIEW_TEXTURE_HEIGHT: u32 = 270;
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const SETTINGS_ENTRANCE_DURATION: Duration = Duration::from_millis(160);
 const SETTINGS_SECTION_DURATION: Duration = Duration::from_millis(120);
-const SETTINGS_SIDEBAR_WIDTH: f32 = 222.0;
-const SETTINGS_CONTENT_WIDTH: f32 = 760.0;
+const SETTINGS_SIDEBAR_WIDTH: f32 = 196.0;
+const SETTINGS_CONTENT_WIDTH: f32 = 960.0;
 const SETTINGS_PREVIEW_WIDTH: f32 = 480.0;
 const SETTINGS_PREVIEW_HEIGHT: f32 = 270.0;
-const SETTINGS_PREVIEW_COLUMNS_BREAKPOINT: f32 = 620.0;
+const SETTINGS_PREVIEW_COLUMNS_BREAKPOINT: f32 = 700.0;
 
 mod local_log;
 mod portable_payload;
@@ -141,16 +143,14 @@ enum SettingsTab {
     App,
     Webcam,
     ScreenDetection,
-    VirtualCamera,
     Diagnostics,
 }
 
 impl SettingsTab {
-    const ALL: [(Self, UiIcon, &'static str); 5] = [
+    const ALL: [(Self, UiIcon, &'static str); 4] = [
         (Self::App, UiIcon::Settings, "App"),
         (Self::Webcam, UiIcon::Camera, "Webcam"),
         (Self::ScreenDetection, UiIcon::Monitor, "Screen & detection"),
-        (Self::VirtualCamera, UiIcon::Broadcast, "Virtual camera"),
         (Self::Diagnostics, UiIcon::Layers, "Diagnostics"),
     ];
 
@@ -159,7 +159,6 @@ impl SettingsTab {
             Self::App => "App",
             Self::Webcam => "Webcam",
             Self::ScreenDetection => "Screen & detection",
-            Self::VirtualCamera => "Virtual camera",
             Self::Diagnostics => "Diagnostics",
         }
     }
@@ -170,9 +169,6 @@ impl SettingsTab {
             Self::Webcam => "Select, verify, and recover the camera used for webcam output.",
             Self::ScreenDetection => {
                 "Choose what to capture and teach Automatic mode when to show the webcam."
-            }
-            Self::VirtualCamera => {
-                "Verify the feed sent to other apps and configure its missing-source fallback."
             }
             Self::Diagnostics => {
                 "Inspect component health, technical details, logs, and recovery tools."
@@ -381,9 +377,9 @@ struct PreviewOptions {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct SettingsPreviewPair {
-    screen: Rect,
-    reference: Rect,
+struct SettingsPreviewControls {
+    preview: Rect,
+    controls: Rect,
     side_by_side: bool,
 }
 
@@ -491,25 +487,53 @@ impl FpsTracker {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UiIcon {
-    Automatic,
     Back,
+    Bell,
     Broadcast,
     Camera,
     Capture,
     Check,
     Error,
+    Folder,
     Image,
+    Info,
     Layers,
     Loader,
     Monitor,
     Play,
     Question,
     Refresh,
+    Robot,
+    Route,
     Settings,
     Stop,
     Target,
     Unavailable,
+    Window,
+    Wrench,
 }
+
+const SETTINGS_RECOVERY_TARGETS: [(UiIcon, &str, f32, RestartTarget); 4] = [
+    (
+        UiIcon::Camera,
+        "Restart webcam",
+        148.0,
+        RestartTarget::Webcam,
+    ),
+    (
+        UiIcon::Monitor,
+        "Restart screen capture",
+        184.0,
+        RestartTarget::ScreenCapture,
+    ),
+    (
+        UiIcon::Broadcast,
+        "Restart virtual camera",
+        188.0,
+        RestartTarget::VirtualCamera,
+    ),
+    (UiIcon::Layers, "Restart all", 126.0, RestartTarget::All),
+];
 
 struct SwitcherApp {
     config: AppConfig,
@@ -913,7 +937,7 @@ impl SwitcherApp {
             ui.horizontal(|ui| {
                 indicator_heading(
                     ui,
-                    UiIcon::Broadcast,
+                    UiIcon::Route,
                     "Output mode",
                     None,
                     heading_width,
@@ -921,7 +945,7 @@ impl SwitcherApp {
                 );
                 if icon_button(
                     ui,
-                    UiIcon::Automatic,
+                    UiIcon::Robot,
                     "Auto",
                     egui::vec2(automatic_width, row_height),
                     snapshot.mode == OutputMode::Automatic,
@@ -1047,10 +1071,10 @@ impl SwitcherApp {
     fn settings_header(&mut self, ui: &mut egui::Ui) -> bool {
         let mut go_back = false;
         ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), 62.0),
+            egui::vec2(ui.available_width(), 54.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                let back = icon_button(ui, UiIcon::Back, "", egui::vec2(38.0, 38.0), false, false)
+                let back = icon_button(ui, UiIcon::Back, "", egui::vec2(34.0, 34.0), false, false)
                     .on_hover_text("Back to dashboard");
                 if back.clicked() {
                     go_back = true;
@@ -1128,17 +1152,17 @@ impl SwitcherApp {
     fn settings_sidebar(&mut self, ui: &mut egui::Ui, height: f32) -> Vec<Rect> {
         egui::Frame::new()
             .fill(Color32::from_rgb(20, 22, 27))
-            .inner_margin(egui::Margin::symmetric(12, 18))
+            .inner_margin(egui::Margin::symmetric(10, 12))
             .show(ui, |ui| {
-                ui.set_width(SETTINGS_SIDEBAR_WIDTH - 24.0);
-                ui.set_min_height((height - 36.0).max(0.0));
+                ui.set_width(SETTINGS_SIDEBAR_WIDTH - 20.0);
+                ui.set_min_height((height - 24.0).max(0.0));
                 ui.label(
                     RichText::new("PREFERENCES")
                         .size(10.0)
                         .strong()
                         .color(Color32::from_rgb(112, 120, 134)),
                 );
-                ui.add_space(10.0);
+                ui.add_space(8.0);
                 let mut navigation_rects = Vec::with_capacity(SettingsTab::ALL.len());
                 for (tab, icon, label) in SettingsTab::ALL {
                     let response = settings_nav_button(ui, tab, icon, label, self.settings_tab);
@@ -1148,7 +1172,7 @@ impl SwitcherApp {
                         self.confirm_clear_logs = false;
                         self.settings_section_changed_at = Some(Instant::now());
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(3.0);
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                     ui.label(
@@ -1174,7 +1198,7 @@ impl SwitcherApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let available_width = ui.available_width();
-                let content_width = (available_width - 44.0).min(SETTINGS_CONTENT_WIDTH);
+                let content_width = (available_width - 28.0).min(SETTINGS_CONTENT_WIDTH);
                 ui.allocate_ui_with_layout(
                     egui::vec2(available_width, ui.available_height()),
                     egui::Layout::top_down(egui::Align::Center),
@@ -1184,10 +1208,10 @@ impl SwitcherApp {
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
                                 ui.set_opacity(0.62 + section_progress * 0.38);
-                                ui.add_space(28.0 + (1.0 - section_progress) * 5.0);
+                                ui.add_space(18.0 + (1.0 - section_progress) * 5.0);
                                 ui.label(
                                     RichText::new(self.settings_tab.title())
-                                        .size(26.0)
+                                        .size(23.0)
                                         .strong()
                                         .color(Color32::WHITE),
                                 );
@@ -1197,17 +1221,16 @@ impl SwitcherApp {
                                         .size(13.0)
                                         .color(Color32::from_rgb(154, 161, 174)),
                                 );
-                                ui.add_space(28.0);
+                                ui.add_space(18.0);
                                 match self.settings_tab {
                                     SettingsTab::App => self.app_settings(ui),
                                     SettingsTab::Webcam => self.webcam_settings(ui),
                                     SettingsTab::ScreenDetection => {
                                         self.screen_detection_settings(ui)
                                     }
-                                    SettingsTab::VirtualCamera => self.virtual_camera_settings(ui),
                                     SettingsTab::Diagnostics => self.diagnostics_settings(ui),
                                 }
-                                ui.add_space(32.0);
+                                ui.add_space(22.0);
                             },
                         );
                     },
@@ -1224,6 +1247,7 @@ impl SwitcherApp {
     fn app_settings(&mut self, ui: &mut egui::Ui) {
         settings_section_heading(
             ui,
+            UiIcon::Play,
             "Startup",
             "These choices take effect the next time Windows or the app starts.",
         );
@@ -1248,6 +1272,7 @@ impl SwitcherApp {
 
         settings_section_heading(
             ui,
+            UiIcon::Window,
             "Window behavior",
             "Control what happens when you close or fully exit the app.",
         );
@@ -1266,6 +1291,7 @@ impl SwitcherApp {
 
         settings_section_heading(
             ui,
+            UiIcon::Bell,
             "Notifications",
             "Choose whether Windows should surface important app warnings.",
         );
@@ -1279,24 +1305,6 @@ impl SwitcherApp {
 
     fn webcam_settings(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.runtime.snapshot();
-        settings_device_status(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state);
-        ui.add_space(14.0);
-        self.settings_single_preview(
-            ui,
-            SettingsPreview {
-                kind: PreviewKind::Webcam,
-                frame: snapshot.previews.webcam.as_ref(),
-                label: "Selected webcam",
-                empty_message: "No webcam frame — select, refresh, or restart the camera below.",
-                actual_output: snapshot.actual_output,
-            },
-        );
-
-        settings_section_heading(
-            ui,
-            "Camera input",
-            "Choose the camera used whenever webcam output is active.",
-        );
         let selected_name = snapshot
             .video_devices
             .iter()
@@ -1309,74 +1317,106 @@ impl SwitcherApp {
                     "Saved camera is unavailable".into()
                 }
             });
-        settings_control_row(ui, "Camera", "Changes apply automatically.", |ui| {
-            egui::ComboBox::from_id_salt("webcam-selector")
-                .width(260.0)
-                .selected_text(selected_name)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.config.selected_video_device_id,
-                        String::new(),
-                        "No camera selected",
-                    );
-                    for device in snapshot.video_devices.iter() {
-                        ui.selectable_value(
-                            &mut self.config.selected_video_device_id,
-                            device.id.clone(),
-                            &device.name,
-                        );
-                    }
-                });
-        });
-        settings_action_row(
+        settings_section_heading(
             ui,
-            "Camera connection",
-            "Refresh the device list or reconnect the selected camera.",
-            |ui| {
+            UiIcon::Camera,
+            "Camera input",
+            "Preview and choose the camera used whenever webcam output is active.",
+        );
+        self.settings_preview_control_row(
+            ui,
+            SettingsPreview {
+                kind: PreviewKind::Webcam,
+                frame: snapshot.previews.webcam.as_ref(),
+                label: "Selected webcam",
+                empty_message: "No webcam frame — choose a camera or refresh the device list.",
+                actual_output: snapshot.actual_output,
+            },
+            |app, ui| {
+                settings_device_status(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state);
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new("Camera")
+                        .size(12.0)
+                        .color(Color32::from_rgb(224, 228, 235)),
+                );
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Refresh devices").clicked() {
-                        self.send(Command::RefreshVideoDevices);
+                    let geometry = selector_utility_geometry(
+                        ui.available_width(),
+                        ui.spacing().item_spacing.x,
+                    );
+                    egui::ComboBox::from_id_salt("webcam-selector")
+                        .width(geometry.selector_width)
+                        .selected_text(selected_name)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut app.config.selected_video_device_id,
+                                String::new(),
+                                "No camera selected",
+                            );
+                            for device in snapshot.video_devices.iter() {
+                                ui.selectable_value(
+                                    &mut app.config.selected_video_device_id,
+                                    device.id.clone(),
+                                    &device.name,
+                                );
+                            }
+                        });
+                    if icon_only_button(
+                        ui,
+                        UiIcon::Refresh,
+                        "Refresh camera devices",
+                        egui::vec2(geometry.action_width, 32.0),
+                    )
+                    .on_hover_text("Refresh camera devices")
+                    .clicked()
+                    {
+                        app.send(Command::RefreshVideoDevices);
                     }
-                    restart_button(ui, &self.runtime, "Restart webcam", RestartTarget::Webcam);
                 });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Selection applies automatically.")
+                        .size(10.5)
+                        .color(Color32::from_rgb(126, 134, 148)),
+                );
             },
         );
     }
 
     fn screen_detection_settings(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.runtime.snapshot();
-        ui.horizontal_wrapped(|ui| {
-            settings_device_status(ui, UiIcon::Monitor, "Screen capture", snapshot.screen_state);
-            ui.separator();
-            settings_reference_status(ui, snapshot.previews.reference.is_some());
-            ui.separator();
-            settings_detection_status(ui, snapshot.detection);
-        });
-        ui.add_space(14.0);
-        let preview_layout = self.settings_screen_reference_previews(ui, &snapshot);
-        debug_assert!(preview_layout.screen.is_positive());
-        debug_assert!(preview_layout.reference.is_positive());
-        debug_assert_eq!(
-            preview_layout.side_by_side,
-            ui.available_width() >= SETTINGS_PREVIEW_COLUMNS_BREAKPOINT
-        );
-
         settings_section_heading(
             ui,
+            UiIcon::Monitor,
             "Screen capture",
-            "Choose the display Automatic mode watches and what its frames include.",
+            "Preview and choose the display Automatic mode watches.",
         );
         let selected_monitor = snapshot
             .selected_monitor
             .as_ref()
             .map_or("No display selected", |monitor| monitor.label.as_str());
-        settings_control_row(
+        self.settings_preview_control_row(
             ui,
-            "Display",
-            "Used for screen output, reference capture, and matching.",
-            |ui| {
+            SettingsPreview {
+                kind: PreviewKind::Screen,
+                frame: snapshot.previews.screen.as_ref(),
+                label: "Live screen",
+                empty_message: "No screen frame — choose a display or use Recovery in Diagnostics.",
+                actual_output: snapshot.actual_output,
+            },
+            |app, ui| {
+                settings_device_status(ui, UiIcon::Monitor, "Capture", snapshot.screen_state);
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new("Display")
+                        .size(12.0)
+                        .color(Color32::from_rgb(224, 228, 235)),
+                );
+                ui.add_space(4.0);
                 egui::ComboBox::from_id_salt("monitor-selector")
-                    .width(260.0)
+                    .width(ui.available_width())
                     .selected_text(selected_monitor)
                     .show_ui(ui, |ui| {
                         for monitor in snapshot.monitors.iter() {
@@ -1389,128 +1429,91 @@ impl SwitcherApp {
                                 )
                                 .clicked()
                             {
-                                self.send(Command::SelectMonitor(monitor.clone()));
+                                app.send(Command::SelectMonitor(monitor.clone()));
                             }
                         }
                     });
+                ui.add_space(8.0);
+                settings_toggle_row(
+                    ui,
+                    &mut app.config.cursor_visible,
+                    "Include mouse cursor",
+                    "Also add it to new references.",
+                );
             },
-        );
-        settings_toggle_row(
-            ui,
-            &mut self.config.cursor_visible,
-            "Include mouse cursor",
-            "Show the pointer in screen output and newly captured references.",
         );
 
         settings_section_heading(
             ui,
+            UiIcon::Target,
             "Reference and matching",
             "Automatic mode shows the webcam while the screen resembles this reference.",
         );
-        settings_action_row(
+        self.settings_preview_control_row(
             ui,
-            "Reference image",
-            "Use the current screen or import an image from disk.",
-            |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("Set current screen").clicked() {
-                        self.send(Command::CaptureReference);
+            SettingsPreview {
+                kind: PreviewKind::Reference,
+                frame: snapshot.previews.reference.as_ref(),
+                label: "Reference image",
+                empty_message: "No reference image — capture the current screen or import one.",
+                actual_output: snapshot.actual_output,
+            },
+            |app, ui| {
+                ui.horizontal_wrapped(|ui| {
+                    settings_reference_status(ui, snapshot.previews.reference.is_some());
+                    ui.separator();
+                    settings_detection_status(ui, snapshot.detection);
+                });
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui| {
+                    if icon_button(
+                        ui,
+                        UiIcon::Capture,
+                        "Capture screen",
+                        egui::vec2(132.0, 32.0),
+                        false,
+                        false,
+                    )
+                    .clicked()
+                    {
+                        app.send(Command::CaptureReference);
                     }
-                    if ui.button("Import image…").clicked() {
-                        self.import_reference_dialog();
+                    if icon_button(
+                        ui,
+                        UiIcon::Image,
+                        "Import image…",
+                        egui::vec2(122.0, 32.0),
+                        false,
+                        false,
+                    )
+                    .clicked()
+                    {
+                        app.import_reference_dialog();
                     }
                 });
-            },
-        );
-        let strictness = format!("{:.0}%", self.config.similarity_threshold * 100.0);
-        settings_control_row(
-            ui,
-            "Match strictness",
-            "Higher values require the live screen to look more like the reference.",
-            |ui| {
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new("Match strictness")
+                        .size(12.0)
+                        .color(Color32::from_rgb(224, 228, 235)),
+                );
+                ui.label(
+                    RichText::new("Higher values require a closer visual match.")
+                        .size(10.5)
+                        .color(Color32::from_rgb(126, 134, 148)),
+                );
+                let strictness = format!("{:.0}%", app.config.similarity_threshold * 100.0);
                 ui.horizontal(|ui| {
                     ui.add_sized(
-                        [142.0, 24.0],
-                        egui::Slider::new(&mut self.config.similarity_threshold, 0.50..=1.0)
+                        [(ui.available_width() - 92.0).max(90.0), 24.0],
+                        egui::Slider::new(&mut app.config.similarity_threshold, 0.50..=1.0)
                             .show_value(false),
                     );
                     ui.label(RichText::new(strictness).monospace());
                     if ui.small_button("Reset 98%").clicked() {
-                        self.config.similarity_threshold = 0.98;
+                        app.config.similarity_threshold = 0.98;
                     }
                 });
-            },
-        );
-        settings_action_row(
-            ui,
-            "Capture recovery",
-            "Rescan displays or reconnect the selected display capture.",
-            |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("Rescan displays").clicked() {
-                        self.send(Command::Rescan);
-                    }
-                    restart_button(
-                        ui,
-                        &self.runtime,
-                        "Restart capture",
-                        RestartTarget::ScreenCapture,
-                    );
-                });
-            },
-        );
-    }
-
-    fn virtual_camera_settings(&mut self, ui: &mut egui::Ui) {
-        let snapshot = self.runtime.snapshot();
-        settings_device_status(
-            ui,
-            UiIcon::Broadcast,
-            "Virtual camera",
-            snapshot.virtual_camera_state,
-        );
-        ui.add_space(14.0);
-        self.settings_single_preview(
-            ui,
-            SettingsPreview {
-                kind: PreviewKind::Output,
-                frame: snapshot.previews.final_output.as_ref(),
-                label: "Current virtual-camera output",
-                empty_message: "No output frame — restart the virtual camera below.",
-                actual_output: snapshot.actual_output,
-            },
-        );
-
-        settings_section_heading(
-            ui,
-            "Missing-source appearance",
-            "This color appears when automation is running but its selected source is unavailable.",
-        );
-        fallback_color_swatch(ui, bgra_color(self.config.placeholder_color_bgra));
-        ui.add_space(10.0);
-        settings_control_row(
-            ui,
-            "Fallback color",
-            "The preview above updates before the change is saved.",
-            |ui| {
-                let mut color = bgra_color(self.config.placeholder_color_bgra);
-                if ui.color_edit_button_srgba(&mut color).changed() {
-                    self.config.placeholder_color_bgra =
-                        u32::from_le_bytes([color.b(), color.g(), color.r(), color.a()]);
-                }
-            },
-        );
-        settings_action_row(
-            ui,
-            "Virtual-camera recovery",
-            "Reconnect the feed exposed to camera applications.",
-            |ui| {
-                restart_button(
-                    ui,
-                    &self.runtime,
-                    "Restart virtual camera",
-                    RestartTarget::VirtualCamera,
-                );
             },
         );
     }
@@ -1519,6 +1522,7 @@ impl SwitcherApp {
         let snapshot = self.runtime.snapshot();
         settings_section_heading(
             ui,
+            UiIcon::Check,
             "Component health",
             "Use these states to identify which part of the pipeline needs attention.",
         );
@@ -1534,6 +1538,33 @@ impl SwitcherApp {
 
         settings_section_heading(
             ui,
+            UiIcon::Wrench,
+            "Recovery",
+            "Reconnect one component, rescan displays, or restart the complete pipeline.",
+        );
+        ui.horizontal_wrapped(|ui| {
+            if icon_button(
+                ui,
+                UiIcon::Refresh,
+                "Rescan displays",
+                egui::vec2(142.0, 34.0),
+                false,
+                false,
+            )
+            .clicked()
+            {
+                self.send(Command::Rescan);
+            }
+            for (icon, label, width, target) in SETTINGS_RECOVERY_TARGETS {
+                if icon_button(ui, icon, label, egui::vec2(width, 34.0), false, false).clicked() {
+                    self.send(Command::Restart(target));
+                }
+            }
+        });
+
+        settings_section_heading(
+            ui,
+            UiIcon::Info,
             "Technical details",
             "Identifiers, formats, and timing used by the active pipeline.",
         );
@@ -1584,6 +1615,7 @@ impl SwitcherApp {
 
         settings_section_heading(
             ui,
+            UiIcon::Folder,
             "Storage and logs",
             "Configuration, reference images, and logs remain on this computer.",
         );
@@ -1630,19 +1662,63 @@ impl SwitcherApp {
                 });
             },
         );
-        settings_action_row(
-            ui,
-            "Full pipeline recovery",
-            "Reconnect the webcam, screen capture, and virtual camera.",
-            |ui| {
-                restart_button(
-                    ui,
-                    &self.runtime,
-                    "Restart all components",
-                    RestartTarget::All,
-                );
-            },
+    }
+
+    fn settings_preview_control_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        preview: SettingsPreview<'_>,
+        add_controls: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) -> SettingsPreviewControls {
+        let available = ui.available_width();
+        let side_by_side = available >= SETTINGS_PREVIEW_COLUMNS_BREAKPOINT;
+        let mut preview_rect = Rect::NOTHING;
+        let mut controls_rect = Rect::NOTHING;
+        if side_by_side {
+            let gap = 22.0;
+            let preview_width = ((available - gap) * 0.56).min(SETTINGS_PREVIEW_WIDTH);
+            let controls_width = (available - gap - preview_width).max(220.0);
+            let row_height = preview_width / WINDOW_ASPECT_RATIO + 26.0;
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.horizontal_top(|ui| {
+                    preview_rect = self.settings_preview_panel(ui, preview, preview_width);
+                    let controls = ui.allocate_ui_with_layout(
+                        egui::vec2(controls_width, row_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(controls_width);
+                            add_controls(self, ui);
+                        },
+                    );
+                    controls_rect = controls.response.rect;
+                });
+            });
+        } else {
+            preview_rect = self.settings_single_preview(ui, preview);
+            ui.add_space(10.0);
+            let controls = ui.allocate_ui_with_layout(
+                egui::vec2(available, 1.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(available);
+                    add_controls(self, ui);
+                },
+            );
+            controls_rect = controls.response.rect;
+        }
+        let layout = SettingsPreviewControls {
+            preview: preview_rect,
+            controls: controls_rect,
+            side_by_side,
+        };
+        debug_assert!(layout.preview.is_positive());
+        debug_assert!(layout.controls.is_positive());
+        debug_assert_eq!(
+            layout.side_by_side,
+            available >= SETTINGS_PREVIEW_COLUMNS_BREAKPOINT
         );
+        layout
     }
 
     fn settings_single_preview(&mut self, ui: &mut egui::Ui, preview: SettingsPreview<'_>) -> Rect {
@@ -1689,75 +1765,6 @@ impl SwitcherApp {
             },
         )
         .inner
-    }
-
-    fn settings_screen_reference_previews(
-        &mut self,
-        ui: &mut egui::Ui,
-        snapshot: &AppSnapshot,
-    ) -> SettingsPreviewPair {
-        let available = ui.available_width();
-        let side_by_side = available >= SETTINGS_PREVIEW_COLUMNS_BREAKPOINT;
-        let mut screen = Rect::NOTHING;
-        let mut reference = Rect::NOTHING;
-        if side_by_side {
-            let gap = 16.0;
-            let width = ((available - gap) / 2.0).min(SETTINGS_PREVIEW_WIDTH);
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                ui.horizontal_top(|ui| {
-                    screen = self.settings_preview_panel(
-                        ui,
-                        SettingsPreview {
-                            kind: PreviewKind::Screen,
-                            frame: snapshot.previews.screen.as_ref(),
-                            label: "Live screen",
-                            empty_message: "No screen frame — rescan or restart capture below.",
-                            actual_output: snapshot.actual_output,
-                        },
-                        width,
-                    );
-                    reference = self.settings_preview_panel(
-                        ui,
-                        SettingsPreview {
-                            kind: PreviewKind::Reference,
-                            frame: snapshot.previews.reference.as_ref(),
-                            label: "Reference image",
-                            empty_message: "No reference image — capture or import one below.",
-                            actual_output: snapshot.actual_output,
-                        },
-                        width,
-                    );
-                });
-            });
-        } else {
-            screen = self.settings_single_preview(
-                ui,
-                SettingsPreview {
-                    kind: PreviewKind::Screen,
-                    frame: snapshot.previews.screen.as_ref(),
-                    label: "Live screen",
-                    empty_message: "No screen frame — rescan or restart capture below.",
-                    actual_output: snapshot.actual_output,
-                },
-            );
-            ui.add_space(14.0);
-            reference = self.settings_single_preview(
-                ui,
-                SettingsPreview {
-                    kind: PreviewKind::Reference,
-                    frame: snapshot.previews.reference.as_ref(),
-                    label: "Reference image",
-                    empty_message: "No reference image — capture or import one below.",
-                    actual_output: snapshot.actual_output,
-                },
-            );
-        }
-        SettingsPreviewPair {
-            screen,
-            reference,
-            side_by_side,
-        }
     }
 
     fn exit_confirmation(&mut self, context: &egui::Context) {
@@ -2075,7 +2082,7 @@ fn settings_nav_button(
         ui.ctx()
             .animate_bool_with_time(ui.make_persistent_id(("settings-nav", tab)), active, 0.14);
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), Sense::click());
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), Sense::click());
     let idle = Color32::from_rgb(20, 22, 27);
     let hovered = Color32::from_rgb(31, 35, 43);
     let selected_fill = Color32::from_rgb(33, 47, 75);
@@ -2110,30 +2117,139 @@ fn settings_nav_button(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn settings_section_heading(ui: &mut egui::Ui, title: &str, description: &str) {
+fn settings_section_heading(ui: &mut egui::Ui, icon: UiIcon, title: &str, description: &str) {
     if ui.cursor().top() > ui.min_rect().top() + 110.0 {
-        ui.add_space(28.0);
+        ui.add_space(18.0);
     }
-    ui.label(
-        RichText::new(title)
-            .size(15.0)
-            .strong()
-            .color(Color32::from_rgb(228, 231, 237)),
-    );
-    ui.add_space(3.0);
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(17.0, 17.0), Sense::hover());
+        draw_icon(
+            ui.painter(),
+            rect,
+            icon,
+            Color32::from_rgb(119, 164, 247),
+            1.45,
+        );
+        ui.label(
+            RichText::new(title)
+                .size(14.0)
+                .strong()
+                .color(Color32::from_rgb(228, 231, 237)),
+        );
+    });
+    ui.add_space(2.0);
     ui.label(
         RichText::new(description)
-            .size(11.5)
+            .size(11.0)
             .color(Color32::from_rgb(128, 136, 150)),
     );
-    ui.add_space(10.0);
+    ui.add_space(7.0);
     ui.separator();
 }
 
 fn settings_toggle_row(ui: &mut egui::Ui, value: &mut bool, title: &str, description: &str) {
-    settings_control_row(ui, title, description, |ui| {
-        ui.add(egui::Checkbox::without_text(value));
+    let (row, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), Sense::click());
+    if response.clicked() {
+        *value = !*value;
+    }
+    let amount = ui.ctx().animate_bool_with_time(
+        ui.make_persistent_id(("settings-switch", title)),
+        *value,
+        0.12,
+    );
+    if amount > 0.0 && amount < 1.0 {
+        ui.ctx().request_repaint();
+    }
+    let geometry = settings_switch_geometry(row);
+    let title_pos = Pos2::new(row.left(), row.center().y - 7.0);
+    ui.painter().text(
+        title_pos,
+        Align2::LEFT_BOTTOM,
+        title,
+        FontId::proportional(12.5),
+        Color32::from_rgb(224, 228, 235),
+    );
+    ui.painter().text(
+        Pos2::new(row.left(), row.center().y + 4.0),
+        Align2::LEFT_TOP,
+        description,
+        FontId::proportional(10.0),
+        Color32::from_rgb(126, 134, 148),
+    );
+    let (off, on) = settings_switch_colors();
+    ui.painter().rect_filled(
+        geometry.track,
+        geometry.track.height() / 2.0,
+        mix_color(off, on, amount),
+    );
+    ui.painter().rect_stroke(
+        geometry.track,
+        geometry.track.height() / 2.0,
+        Stroke::new(1.0, mix_color(Color32::from_rgb(76, 84, 98), on, amount)),
+        StrokeKind::Inside,
+    );
+    let thumb_x = egui::lerp(
+        (geometry.track.left() + 11.0)..=(geometry.track.right() - 11.0),
+        amount,
+    );
+    ui.painter().circle_filled(
+        Pos2::new(thumb_x, geometry.track.center().y),
+        8.0,
+        Color32::WHITE,
+    );
+    ui.painter().text(
+        geometry.state.center(),
+        Align2::CENTER_CENTER,
+        if *value { "On" } else { "Off" },
+        FontId::proportional(11.0),
+        if *value {
+            Color32::from_rgb(119, 164, 247)
+        } else {
+            Color32::from_rgb(132, 140, 153)
+        },
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, title)
     });
+    response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    ui.separator();
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SettingsSwitchGeometry {
+    state: Rect,
+    track: Rect,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SelectorUtilityGeometry {
+    selector_width: f32,
+    action_width: f32,
+}
+
+fn selector_utility_geometry(available: f32, gap: f32) -> SelectorUtilityGeometry {
+    let action_width = 32.0;
+    SelectorUtilityGeometry {
+        selector_width: (available - gap - action_width).max(80.0),
+        action_width,
+    }
+}
+
+fn settings_switch_geometry(row: Rect) -> SettingsSwitchGeometry {
+    let track = Rect::from_center_size(
+        Pos2::new(row.right() - 21.0, row.center().y),
+        egui::vec2(42.0, 22.0),
+    );
+    let state = Rect::from_center_size(
+        Pos2::new(track.left() - 24.0, row.center().y),
+        egui::vec2(34.0, 22.0),
+    );
+    SettingsSwitchGeometry { state, track }
+}
+
+const fn settings_switch_colors() -> (Color32, Color32) {
+    (SETTINGS_SWITCH_OFF, SETTINGS_BLUE)
 }
 
 fn settings_control_row(
@@ -2143,17 +2259,17 @@ fn settings_control_row(
     add_control: impl FnOnce(&mut egui::Ui),
 ) {
     let width = ui.available_width();
-    let control_width = 280.0_f32.min((width * 0.44).max(180.0));
-    let label_width = (width - control_width - 16.0).max(180.0);
+    let control_width = 300.0_f32.min((width * 0.46).max(120.0));
+    let label_width = (width - control_width - 12.0).max(100.0);
     ui.allocate_ui_with_layout(
-        egui::vec2(width, 66.0),
+        egui::vec2(width, 54.0),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.allocate_ui_with_layout(
-                egui::vec2(label_width, 54.0),
+                egui::vec2(label_width, 44.0),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    ui.add_space(7.0);
+                    ui.add_space(4.0);
                     ui.label(
                         RichText::new(title)
                             .size(13.0)
@@ -2167,7 +2283,7 @@ fn settings_control_row(
                 },
             );
             ui.allocate_ui_with_layout(
-                egui::vec2(control_width, 54.0),
+                egui::vec2(control_width, 44.0),
                 egui::Layout::right_to_left(egui::Align::Center),
                 add_control,
             );
@@ -2248,34 +2364,6 @@ fn settings_status_item(
         ui.add_space(3.0);
         icon_text(ui, status_icon, status, color, false);
     });
-}
-
-fn fallback_color_swatch(ui: &mut egui::Ui, color: Color32) -> Rect {
-    let width = ui.available_width().min(240.0);
-    let height = width / WINDOW_ASPECT_RATIO;
-    let mut rect = Rect::NOTHING;
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), height),
-        egui::Layout::top_down(egui::Align::Center),
-        |ui| {
-            let (allocated, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
-            ui.painter().rect_filled(allocated, 8, color);
-            ui.painter().rect_stroke(
-                allocated,
-                8,
-                Stroke::new(2.0, Color32::from_rgb(70, 76, 88)),
-                StrokeKind::Inside,
-            );
-            rect = allocated;
-        },
-    );
-    rect
-}
-
-fn restart_button(ui: &mut egui::Ui, runtime: &RuntimeHandle, label: &str, target: RestartTarget) {
-    if ui.button(label).clicked() {
-        let _ = runtime.try_send(Command::Restart(target));
-    }
 }
 
 const HEALTH_STATES: [DeviceState; 4] = [
@@ -2656,6 +2744,19 @@ fn icon_button(
     icon_button_impl(ui, icon, text, desired_size, selected, emphasized, None)
 }
 
+fn icon_only_button(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    accessible_label: &str,
+    desired_size: Vec2,
+) -> egui::Response {
+    let response = icon_button_impl(ui, icon, "", desired_size, false, false, None);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), accessible_label)
+    });
+    response
+}
+
 fn accent_icon_button(
     ui: &mut egui::Ui,
     icon: UiIcon,
@@ -2812,6 +2913,58 @@ fn draw_icon(painter: &egui::Painter, rect: Rect, icon: UiIcon, color: Color32, 
             painter.circle_stroke(center, rect.width() * 0.27, stroke);
             painter.circle_stroke(center, rect.width() * 0.43, stroke);
         }
+        UiIcon::Robot => {
+            painter.line_segment(
+                [Pos2::new(x(0.5), y(0.08)), Pos2::new(x(0.5), y(0.22))],
+                stroke,
+            );
+            painter.circle_filled(Pos2::new(x(0.5), y(0.07)), rect.width() * 0.055, color);
+            painter.rect_stroke(
+                Rect::from_min_max(Pos2::new(x(0.13), y(0.22)), Pos2::new(x(0.87), y(0.78))),
+                3,
+                stroke,
+                StrokeKind::Inside,
+            );
+            painter.circle_filled(Pos2::new(x(0.34), y(0.46)), rect.width() * 0.07, color);
+            painter.circle_filled(Pos2::new(x(0.66), y(0.46)), rect.width() * 0.07, color);
+            painter.line_segment(
+                [Pos2::new(x(0.32), y(0.65)), Pos2::new(x(0.68), y(0.65))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.26), y(0.78)), Pos2::new(x(0.26), y(0.92))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.74), y(0.78)), Pos2::new(x(0.74), y(0.92))],
+                stroke,
+            );
+        }
+        UiIcon::Route => {
+            painter.line_segment(
+                [Pos2::new(x(0.18), y(0.5)), Pos2::new(x(0.48), y(0.5))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.48), y(0.5)), Pos2::new(x(0.72), y(0.22))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.48), y(0.5)), Pos2::new(x(0.72), y(0.78))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.72), y(0.22)), Pos2::new(x(0.9), y(0.22))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.72), y(0.78)), Pos2::new(x(0.9), y(0.78))],
+                stroke,
+            );
+            painter.circle_filled(Pos2::new(x(0.14), y(0.5)), rect.width() * 0.08, color);
+            painter.circle_filled(Pos2::new(x(0.9), y(0.22)), rect.width() * 0.08, color);
+            painter.circle_filled(Pos2::new(x(0.9), y(0.78)), rect.width() * 0.08, color);
+        }
         UiIcon::Loader => {
             for index in 0..8 {
                 let angle = std::f32::consts::TAU * index as f32 / 8.0;
@@ -2863,7 +3016,7 @@ fn draw_icon(painter: &egui::Painter, rect: Rect, icon: UiIcon, color: Color32, 
         UiIcon::Stop => {
             painter.rect_filled(rect.shrink(rect.width() * 0.22), 1, color);
         }
-        UiIcon::Automatic | UiIcon::Refresh => {
+        UiIcon::Refresh => {
             painter.circle_stroke(center, rect.width() * 0.35, stroke);
             painter.line_segment(
                 [Pos2::new(x(0.72), y(0.12)), Pos2::new(x(0.9), y(0.14))],
@@ -2879,6 +3032,79 @@ fn draw_icon(painter: &egui::Painter, rect: Rect, icon: UiIcon, color: Color32, 
             );
             painter.line_segment(
                 [Pos2::new(x(0.1), y(0.86)), Pos2::new(x(0.16), y(0.68))],
+                stroke,
+            );
+        }
+        UiIcon::Bell => {
+            painter.line_segment(
+                [Pos2::new(x(0.22), y(0.72)), Pos2::new(x(0.78), y(0.72))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.22), y(0.72)), Pos2::new(x(0.31), y(0.57))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.31), y(0.57)), Pos2::new(x(0.31), y(0.4))],
+                stroke,
+            );
+            painter.circle_stroke(Pos2::new(x(0.5), y(0.4)), rect.width() * 0.19, stroke);
+            painter.line_segment(
+                [Pos2::new(x(0.69), y(0.4)), Pos2::new(x(0.69), y(0.57))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.69), y(0.57)), Pos2::new(x(0.78), y(0.72))],
+                stroke,
+            );
+            painter.circle_filled(Pos2::new(x(0.5), y(0.83)), rect.width() * 0.07, color);
+        }
+        UiIcon::Window => {
+            painter.rect_stroke(rect.shrink(1.0), 2, stroke, StrokeKind::Inside);
+            painter.line_segment(
+                [Pos2::new(x(0.08), y(0.3)), Pos2::new(x(0.92), y(0.3))],
+                stroke,
+            );
+            for dot in [0.2, 0.32, 0.44] {
+                painter.circle_filled(Pos2::new(x(dot), y(0.18)), rect.width() * 0.035, color);
+            }
+        }
+        UiIcon::Folder => {
+            painter.line_segment(
+                [Pos2::new(x(0.08), y(0.28)), Pos2::new(x(0.38), y(0.28))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.38), y(0.28)), Pos2::new(x(0.48), y(0.4))],
+                stroke,
+            );
+            painter.rect_stroke(
+                Rect::from_min_max(Pos2::new(x(0.08), y(0.28)), Pos2::new(x(0.92), y(0.84))),
+                2,
+                stroke,
+                StrokeKind::Inside,
+            );
+        }
+        UiIcon::Info => {
+            painter.circle_stroke(center, rect.width() * 0.42, stroke);
+            painter.circle_filled(Pos2::new(x(0.5), y(0.29)), rect.width() * 0.055, color);
+            painter.line_segment(
+                [Pos2::new(x(0.5), y(0.43)), Pos2::new(x(0.5), y(0.73))],
+                stroke,
+            );
+        }
+        UiIcon::Wrench => {
+            painter.line_segment(
+                [Pos2::new(x(0.22), y(0.8)), Pos2::new(x(0.7), y(0.32))],
+                Stroke::new(width * 2.2, color),
+            );
+            painter.circle_stroke(Pos2::new(x(0.2), y(0.82)), rect.width() * 0.11, stroke);
+            painter.line_segment(
+                [Pos2::new(x(0.65), y(0.18)), Pos2::new(x(0.82), y(0.35))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.82), y(0.35)), Pos2::new(x(0.9), y(0.18))],
                 stroke,
             );
         }
@@ -3048,6 +3274,7 @@ fn frame_image(frame: &Frame, target: [usize; 2]) -> egui::ColorImage {
     egui::ColorImage::new(target, pixels)
 }
 
+#[cfg(test)]
 fn bgra_color(value: u32) -> Color32 {
     let [b, g, r, a] = value.to_le_bytes();
     Color32::from_rgba_unmultiplied(r, g, b, a)
@@ -3358,11 +3585,11 @@ mod tests {
                     sidebar_rect.contains_rect(*rect),
                     "navigation rect escaped sidebar: {rect:?} outside {sidebar_rect:?}"
                 );
-                assert!((rect.height() - 40.0).abs() < 0.01);
+                assert!((rect.height() - 36.0).abs() < 0.01);
             }
             for pair in navigation_rects.windows(2) {
                 assert!(
-                    pair[1].top() - pair[0].bottom() >= 3.9,
+                    pair[1].top() - pair[0].bottom() >= 2.9,
                     "navigation rows overlap: {:?} and {:?}",
                     pair[0],
                     pair[1]
@@ -3370,6 +3597,71 @@ mod tests {
                 assert!(!pair[0].intersects(pair[1]));
             }
         }
+    }
+
+    #[test]
+    fn settings_switches_use_fixed_aligned_geometry_and_blue_slate_states() {
+        let first = settings_switch_geometry(Rect::from_min_size(
+            Pos2::new(10.0, 20.0),
+            egui::vec2(500.0, 52.0),
+        ));
+        let second = settings_switch_geometry(Rect::from_min_size(
+            Pos2::new(10.0, 80.0),
+            egui::vec2(500.0, 52.0),
+        ));
+        assert_eq!(first.track.size(), egui::vec2(42.0, 22.0));
+        assert_eq!(first.track.right(), second.track.right());
+        assert_eq!(first.state.right(), second.state.right());
+        assert_eq!(
+            settings_switch_colors(),
+            (SETTINGS_SWITCH_OFF, SETTINGS_BLUE)
+        );
+    }
+
+    #[test]
+    fn webcam_selector_and_refresh_share_one_bounded_row() {
+        for available in [220.0, 360.0, 520.0] {
+            let gap = 8.0;
+            let geometry = selector_utility_geometry(available, gap);
+            assert_eq!(geometry.action_width, 32.0);
+            assert!(geometry.selector_width >= 80.0);
+            assert!(geometry.selector_width + gap + geometry.action_width <= available + 0.01);
+        }
+    }
+
+    #[test]
+    fn four_settings_categories_keep_every_recovery_target_in_diagnostics() {
+        assert_eq!(SettingsTab::ALL.len(), 4);
+        for target in [
+            RestartTarget::Webcam,
+            RestartTarget::ScreenCapture,
+            RestartTarget::VirtualCamera,
+            RestartTarget::All,
+        ] {
+            assert!(
+                SETTINGS_RECOVERY_TARGETS
+                    .iter()
+                    .any(|entry| entry.3 == target)
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_route_and_refresh_icons_are_distinct() {
+        assert_ne!(UiIcon::Robot, UiIcon::Route);
+        assert_ne!(UiIcon::Robot, UiIcon::Refresh);
+        assert_ne!(UiIcon::Route, UiIcon::Refresh);
+        let counts = [UiIcon::Robot, UiIcon::Route, UiIcon::Refresh].map(|icon| {
+            let context = egui::Context::default();
+            context
+                .run_ui(egui::RawInput::default(), |ui| {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::hover());
+                    draw_icon(ui.painter(), rect, icon, Color32::WHITE, 1.5);
+                })
+                .shapes
+                .len()
+        });
+        assert!(counts.into_iter().all(|count| count > 0));
     }
 
     #[test]
@@ -3381,46 +3673,54 @@ mod tests {
             ConfigStore::new(directory.path()),
             true,
         );
-        let snapshot = AppSnapshot::default();
-        for (width, expected_side_by_side) in [(760.0, true), (560.0, false)] {
-            let context = egui::Context::default();
-            let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 900.0))),
-                ..egui::RawInput::default()
-            };
-            let mut layout = None;
-            let output = context.run_ui(input, |ui| {
-                ui.set_width(width);
-                layout = Some(app.settings_screen_reference_previews(ui, &snapshot));
-            });
-            let layout = layout.unwrap();
-            assert_eq!(layout.side_by_side, expected_side_by_side);
-            for rect in [layout.screen, layout.reference] {
-                assert!(rect.is_positive());
-                assert!(rect.left() >= -0.01 && rect.right() <= width + 0.01);
-                assert!(rect.width() <= SETTINGS_PREVIEW_WIDTH + 0.01);
-                assert!(rect.height() <= SETTINGS_PREVIEW_HEIGHT + 0.01);
-                assert!((rect.width() / rect.height() - WINDOW_ASPECT_RATIO).abs() < 0.01);
+        for kind in [
+            PreviewKind::Webcam,
+            PreviewKind::Screen,
+            PreviewKind::Reference,
+        ] {
+            for (width, expected_side_by_side) in [(760.0, true), (560.0, false)] {
+                let context = egui::Context::default();
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 900.0))),
+                    ..egui::RawInput::default()
+                };
+                let mut layout = None;
+                let output = context.run_ui(input, |ui| {
+                    ui.set_width(width);
+                    layout = Some(app.settings_preview_control_row(
+                        ui,
+                        SettingsPreview {
+                            kind,
+                            frame: None,
+                            label: "Preview",
+                            empty_message: "Missing preview",
+                            actual_output: Source::Camera,
+                        },
+                        |_, ui| {
+                            ui.label("Controls");
+                        },
+                    ));
+                });
+                let layout = layout.unwrap();
+                assert_eq!(layout.side_by_side, expected_side_by_side);
+                assert!(layout.preview.is_positive());
+                assert!(layout.controls.is_positive());
+                assert!(layout.preview.left() >= -0.01 && layout.preview.right() <= width + 0.01);
+                assert!(layout.preview.width() <= SETTINGS_PREVIEW_WIDTH + 0.01);
+                assert!(layout.preview.height() <= SETTINGS_PREVIEW_HEIGHT + 0.01);
+                assert!(
+                    (layout.preview.width() / layout.preview.height() - WINDOW_ASPECT_RATIO).abs()
+                        < 0.01
+                );
+                assert!(!layout.preview.intersects(layout.controls));
+                if expected_side_by_side {
+                    assert!(layout.controls.left() > layout.preview.right());
+                } else {
+                    assert!(layout.controls.top() > layout.preview.bottom());
+                }
+                assert!(!output.shapes.is_empty());
             }
-            assert!(!layout.screen.intersects(layout.reference));
-            if expected_side_by_side {
-                assert!((layout.screen.top() - layout.reference.top()).abs() < 0.01);
-                assert!(layout.reference.left() > layout.screen.right());
-            } else {
-                assert!(layout.reference.top() > layout.screen.bottom());
-            }
-            assert!(!output.shapes.is_empty());
         }
-
-        let context = egui::Context::default();
-        let mut swatch = Rect::NOTHING;
-        let output = context.run_ui(egui::RawInput::default(), |ui| {
-            ui.set_width(520.0);
-            swatch = fallback_color_swatch(ui, Color32::from_rgb(12, 34, 56));
-        });
-        assert!(swatch.is_positive());
-        assert!((swatch.width() / swatch.height() - WINDOW_ASPECT_RATIO).abs() < 0.01);
-        assert!(!output.shapes.is_empty());
     }
 
     #[test]
@@ -3557,7 +3857,6 @@ mod tests {
                     SettingsTab::App,
                     SettingsTab::Webcam,
                     SettingsTab::ScreenDetection,
-                    SettingsTab::VirtualCamera,
                     SettingsTab::Diagnostics,
                 ] {
                     app.settings_tab = tab;
