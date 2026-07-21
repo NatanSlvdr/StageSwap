@@ -2,15 +2,25 @@
 
 use asc_app::RuntimeHandle;
 use asc_core::{
-    AppConfig, AppSnapshot, Command, ConfigStore, DeviceState, Frame, OutputMode, RestartTarget,
-    RunState,
+    AppConfig, AppSnapshot, Command, ConfigStore, DetectionState, DeviceState, Frame, OutputMode,
+    RestartTarget, RunState, Source,
 };
-use eframe::egui::{self, Color32, RichText, Stroke, TextureHandle, TextureOptions, Vec2};
-use std::collections::HashMap;
+use eframe::egui::{
+    self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle,
+    TextureOptions, Vec2,
+};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 const WINDOW_ASPECT_RATIO: f32 = 16.0 / 9.0;
 const MIN_WINDOW_HEIGHT: f32 = 600.0;
+const LIVE_RED: Color32 = Color32::from_rgb(235, 90, 90);
+const ACTIVE_GREEN: Color32 = Color32::from_rgb(76, 205, 132);
+const TRANSITION_AMBER: Color32 = Color32::from_rgb(245, 190, 75);
+const PREVIEW_NEUTRAL: Color32 = Color32::from_rgb(42, 47, 55);
+const FPS_WINDOW: Duration = Duration::from_secs(1);
+const FPS_REFRESH: Duration = Duration::from_millis(250);
 
 mod local_log;
 mod portable_payload;
@@ -123,6 +133,144 @@ struct PreviewTexture {
     texture: TextureHandle,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum PreviewKind {
+    Webcam,
+    Screen,
+    Reference,
+    Output,
+}
+
+impl PreviewKind {
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Webcam => "webcam",
+            Self::Screen => "screen",
+            Self::Reference => "reference",
+            Self::Output => "output",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Webcam => "WEBCAM",
+            Self::Screen => "SCREEN",
+            Self::Reference => "REFERENCE",
+            Self::Output => "OUTPUT",
+        }
+    }
+
+    const fn icon(self) -> UiIcon {
+        match self {
+            Self::Webcam => UiIcon::Camera,
+            Self::Screen => UiIcon::Monitor,
+            Self::Reference => UiIcon::Image,
+            Self::Output => UiIcon::Broadcast,
+        }
+    }
+
+    const fn shows_fps(self) -> bool {
+        !matches!(self, Self::Reference)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreviewContour {
+    Neutral,
+    Active,
+    Live,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FpsReading {
+    Pending,
+    Value(u32),
+}
+
+#[derive(Default)]
+struct FpsTracker {
+    samples: VecDeque<(Instant, u64)>,
+    last_sequence: Option<u64>,
+    last_advanced_at: Option<Instant>,
+    last_display_update: Option<Instant>,
+    displayed: Option<u32>,
+}
+
+impl FpsTracker {
+    fn observe(&mut self, frame: Option<&Frame>, now: Instant) -> FpsReading {
+        if let Some(frame) = frame
+            && self.last_sequence != Some(frame.sequence)
+        {
+            if self
+                .last_sequence
+                .is_some_and(|sequence| frame.sequence <= sequence)
+            {
+                self.samples.clear();
+                self.displayed = None;
+                self.last_display_update = None;
+            }
+            self.last_sequence = Some(frame.sequence);
+            self.last_advanced_at = Some(now);
+            self.samples.push_back((frame.received_at, frame.sequence));
+            while self.samples.front().is_some_and(|(received_at, _)| {
+                frame
+                    .received_at
+                    .checked_duration_since(*received_at)
+                    .is_some_and(|age| age > FPS_WINDOW)
+            }) {
+                self.samples.pop_front();
+            }
+
+            if self
+                .last_display_update
+                .is_none_or(|updated| now.saturating_duration_since(updated) >= FPS_REFRESH)
+            {
+                self.last_display_update = Some(now);
+                if let (Some((first_time, first_sequence)), Some((last_time, last_sequence))) =
+                    (self.samples.front(), self.samples.back())
+                {
+                    let elapsed = last_time.saturating_duration_since(*first_time);
+                    let frames = last_sequence.saturating_sub(*first_sequence);
+                    if frames > 0 && !elapsed.is_zero() {
+                        self.displayed =
+                            Some(((frames as f64 / elapsed.as_secs_f64()).round() as u32).min(999));
+                    }
+                }
+            }
+        }
+
+        if self
+            .last_advanced_at
+            .is_some_and(|advanced| now.saturating_duration_since(advanced) >= FPS_WINDOW)
+        {
+            FpsReading::Value(0)
+        } else {
+            self.displayed
+                .map_or(FpsReading::Pending, FpsReading::Value)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UiIcon {
+    Automatic,
+    Broadcast,
+    Camera,
+    Capture,
+    Check,
+    Error,
+    Image,
+    Layers,
+    Monitor,
+    Play,
+    Question,
+    Refresh,
+    Settings,
+    Stop,
+    Target,
+    Unavailable,
+}
+
 struct SwitcherApp {
     config: AppConfig,
     settings_draft: AppConfig,
@@ -132,6 +280,7 @@ struct SwitcherApp {
     show_settings: bool,
     settings_tab: SettingsTab,
     textures: HashMap<&'static str, PreviewTexture>,
+    fps_trackers: HashMap<PreviewKind, FpsTracker>,
     log: LocalLog,
     last_activity: Option<String>,
     #[cfg(windows)]
@@ -161,6 +310,7 @@ impl SwitcherApp {
             show_settings: false,
             settings_tab: SettingsTab::General,
             textures: HashMap::new(),
+            fps_trackers: HashMap::new(),
             log,
             last_activity: None,
             #[cfg(windows)]
@@ -237,21 +387,6 @@ impl SwitcherApp {
 
     fn dashboard(&mut self, context: &egui::Context, ui: &mut egui::Ui) {
         let snapshot = self.runtime.snapshot();
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.heading("Automatic Screen Camera");
-                ui.label(RichText::new("Live switcher").color(Color32::GRAY));
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Settings").clicked() {
-                    self.settings_draft = self.config.clone();
-                    self.send(Command::RefreshVideoDevices);
-                    self.send(Command::Rescan);
-                    self.show_settings = true;
-                }
-            });
-        });
-        ui.add_space(10.0);
         for warning in self
             .load_warnings
             .iter()
@@ -269,193 +404,266 @@ impl SwitcherApp {
         ui.add_space(8.0);
         let available_width = ui.available_width();
         let preview_width = available_width * 0.70;
-        let preview_column_height = (ui.available_height() - 170.0).max(160.0);
+        let workspace_height = ui.available_height().max(160.0);
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
-                egui::vec2(preview_width, preview_column_height),
+                egui::vec2(preview_width, workspace_height),
                 egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_width(preview_width);
-                    ui.label(RichText::new("SIGNAL FLOW").small().color(Color32::GRAY));
-                    let spacing = ui.spacing().item_spacing.y;
-                    let cell_height = (ui.available_height() - spacing) / 2.0;
-                    let label_height = ui.text_style_height(&egui::TextStyle::Small);
-                    let cell_width = (ui.available_width() - spacing) / 2.0;
-                    let maximum_preview_height = (cell_height - label_height - spacing).max(24.0);
-                    let rendered_width = cell_width
-                        .min(maximum_preview_height * WINDOW_ASPECT_RATIO)
-                        .max(24.0 * WINDOW_ASPECT_RATIO);
-                    let rendered_height = rendered_width / WINDOW_ASPECT_RATIO;
-                    ui.horizontal(|ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(cell_width, cell_height),
-                            egui::Layout::top_down(egui::Align::Center),
-                            |ui| {
-                                self.preview_cell(
-                                    ui,
-                                    "webcam",
-                                    "WEBCAM",
-                                    snapshot.previews.webcam.as_deref(),
-                                    rendered_width,
-                                    rendered_height,
-                                );
-                            },
-                        );
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(cell_width, cell_height),
-                            egui::Layout::top_down(egui::Align::Center),
-                            |ui| {
-                                self.preview_cell(
-                                    ui,
-                                    "screen",
-                                    "SCREEN",
-                                    snapshot.previews.screen.as_deref(),
-                                    rendered_width,
-                                    rendered_height,
-                                );
-                            },
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(cell_width, cell_height),
-                            egui::Layout::top_down(egui::Align::Center),
-                            |ui| {
-                                self.preview_cell(
-                                    ui,
-                                    "reference",
-                                    "REFERENCE",
-                                    snapshot.previews.reference.as_deref(),
-                                    rendered_width,
-                                    rendered_height,
-                                );
-                            },
-                        );
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(cell_width, cell_height),
-                            egui::Layout::top_down(egui::Align::Center),
-                            |ui| {
-                                self.preview_cell(
-                                    ui,
-                                    "output",
-                                    "OUTPUT",
-                                    snapshot.previews.final_output.as_deref(),
-                                    rendered_width,
-                                    rendered_height,
-                                );
-                            },
-                        );
-                    });
-                },
+                |ui| self.preview_workspace(ui, &snapshot, preview_width, workspace_height),
             );
 
             ui.separator();
-            ui.vertical(|ui| {
-                ui.label(RichText::new("CONTROL").small().color(Color32::GRAY));
-                status_row(ui, "Webcam", snapshot.webcam_state);
-                status_row(ui, "Screen", snapshot.screen_state);
-                status_row(ui, "Output", snapshot.virtual_camera_state);
-                ui.separator();
-                detail_row(ui, "Selected", format!("{:?}", snapshot.actual_output));
-                detail_row(ui, "Detection", format!("{:?}", snapshot.detection));
-                detail_row(
-                    ui,
-                    "Screen mix",
-                    format!("{}%", (snapshot.transition.screen_mix * 100.0).round()),
-                );
-                ui.add_space(4.0);
-
-                let run_label = match snapshot.run_state {
-                    RunState::Running | RunState::Starting => "Stop automation",
-                    _ => "Start automation",
-                };
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 36.0],
-                        egui::Button::new(RichText::new(run_label).strong()),
-                    )
-                    .clicked()
-                {
-                    match snapshot.run_state {
-                        RunState::Running | RunState::Starting => self.send(Command::Stop),
-                        _ => self.send(Command::Start),
-                    }
-                }
-
-                ui.label(RichText::new("OUTPUT MODE").small().color(Color32::GRAY));
-                for (mode, label) in [
-                    (OutputMode::Automatic, "Automatic"),
-                    (OutputMode::ForceCamera, "Webcam"),
-                    (OutputMode::ForceScreen, "Screen"),
-                ] {
-                    if ui
-                        .add_sized(
-                            [ui.available_width(), 30.0],
-                            egui::Button::selectable(snapshot.mode == mode, label),
-                        )
-                        .clicked()
-                    {
-                        self.set_mode(mode);
-                    }
-                }
-                ui.add_space(2.0);
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Capture reference").clicked() {
-                        self.send(Command::CaptureReference);
-                    }
-                    if ui.button("Rescan screens").clicked() {
-                        self.send(Command::Rescan);
-                    }
-                });
-            });
+            let controls_width = ui.available_width();
+            ui.allocate_ui_with_layout(
+                egui::vec2(controls_width, workspace_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| self.controls_workspace(ui, &snapshot, controls_width, workspace_height),
+            );
         });
-
-        ui.add_space(6.0);
-        self.console(ui, &snapshot);
         self.settings_window(context);
     }
 
-    fn console(&self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
-        egui::Frame::new()
-            .fill(Color32::from_rgb(7, 9, 12))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(42, 47, 55)))
-            .corner_radius(5)
-            .inner_margin(egui::Margin::symmetric(12, 10))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("●").color(Color32::from_rgb(255, 95, 87)));
-                    ui.label(RichText::new("●").color(Color32::from_rgb(254, 188, 46)));
-                    ui.label(RichText::new("●").color(Color32::from_rgb(40, 200, 64)));
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new("runtime console")
-                            .monospace()
-                            .small()
-                            .color(Color32::from_rgb(142, 150, 163)),
+    fn preview_workspace(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        width: f32,
+        height: f32,
+    ) {
+        const FOOTER_HEIGHT: f32 = 40.0;
+        const FOOTER_GAP: f32 = 10.0;
+        ui.set_width(width);
+        let body_height = (height - FOOTER_HEIGHT - FOOTER_GAP).max(80.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, body_height),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.set_min_size(egui::vec2(width, body_height));
+                self.preview_grid(ui, snapshot, width, body_height);
+            },
+        );
+        ui.add_space(FOOTER_GAP);
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, FOOTER_HEIGHT),
+            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+            |ui| {
+                icon_text(
+                    ui,
+                    UiIcon::Camera,
+                    "Automatic Screen Camera",
+                    Color32::from_rgb(205, 211, 222),
+                    true,
+                );
+            },
+        );
+    }
+
+    fn preview_grid(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot, width: f32, height: f32) {
+        let column_gap = ui.spacing().item_spacing.x;
+        let row_gap = ui.spacing().item_spacing.y;
+        let label_height = ui.text_style_height(&egui::TextStyle::Small);
+        let cell_width = ((width - column_gap) / 2.0).max(48.0);
+        let row_budget = ((height - row_gap) / 2.0).max(48.0);
+        let maximum_preview_height = (row_budget - label_height - 24.0).max(24.0);
+        let rendered_width = cell_width
+            .min(maximum_preview_height * WINDOW_ASPECT_RATIO)
+            .max(24.0 * WINDOW_ASPECT_RATIO);
+        let rendered_height = rendered_width / WINDOW_ASPECT_RATIO;
+        let cell_height = rendered_height + 8.0 + label_height + 16.0;
+        let grid_height = cell_height * 2.0 + row_gap;
+        ui.add_space(((height - grid_height) / 2.0).max(0.0));
+
+        for row in [
+            [
+                (PreviewKind::Webcam, snapshot.previews.webcam.as_deref()),
+                (PreviewKind::Screen, snapshot.previews.screen.as_deref()),
+            ],
+            [
+                (
+                    PreviewKind::Reference,
+                    snapshot.previews.reference.as_deref(),
+                ),
+                (
+                    PreviewKind::Output,
+                    snapshot.previews.final_output.as_deref(),
+                ),
+            ],
+        ] {
+            ui.horizontal_top(|ui| {
+                for (kind, frame) in row {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(cell_width, cell_height),
+                        egui::Layout::top_down(egui::Align::Center),
+                        |ui| {
+                            self.preview_cell(
+                                ui,
+                                kind,
+                                frame,
+                                rendered_width,
+                                rendered_height,
+                                snapshot.actual_output,
+                            );
+                        },
                     );
-                });
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt("runtime-console")
-                    .max_height(112.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        if snapshot.recent_activity.is_empty() {
-                            ui.label(
-                                RichText::new("> waiting for runtime events…")
-                                    .monospace()
-                                    .color(Color32::from_rgb(112, 122, 136)),
-                            );
-                        }
-                        for activity in snapshot.recent_activity.iter().rev().take(8).rev() {
-                            ui.label(
-                                RichText::new(format!("> {activity}"))
-                                    .monospace()
-                                    .color(Color32::from_rgb(190, 205, 190)),
-                            );
-                        }
-                    });
+                }
             });
+        }
+    }
+
+    fn controls_workspace(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        width: f32,
+        height: f32,
+    ) {
+        const FOOTER_HEIGHT: f32 = 40.0;
+        const FOOTER_GAP: f32 = 10.0;
+        let body_height = (height - FOOTER_HEIGHT - FOOTER_GAP).max(80.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, body_height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_size(egui::vec2(width, body_height));
+                egui::ScrollArea::vertical()
+                    .id_salt("dashboard-controls")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.controls_body(ui, snapshot));
+            },
+        );
+        ui.add_space(FOOTER_GAP);
+        if icon_button(
+            ui,
+            UiIcon::Settings,
+            "Settings",
+            egui::vec2(width, FOOTER_HEIGHT),
+            false,
+            true,
+        )
+        .clicked()
+        {
+            self.settings_draft = self.config.clone();
+            self.send(Command::RefreshVideoDevices);
+            self.send(Command::Rescan);
+            self.show_settings = true;
+        }
+    }
+
+    fn controls_body(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
+        health_state_group(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state);
+        health_state_group(ui, UiIcon::Monitor, "Screen", snapshot.screen_state);
+        health_state_group(
+            ui,
+            UiIcon::Broadcast,
+            "Output",
+            snapshot.virtual_camera_state,
+        );
+        ui.separator();
+        selected_source_group(ui, snapshot.actual_output);
+        detection_state_group(ui, snapshot.detection);
+        screen_mix_group(ui, snapshot.transition.screen_mix);
+        ui.add_space(4.0);
+
+        let automation_running =
+            matches!(snapshot.run_state, RunState::Running | RunState::Starting);
+        let (run_icon, run_label) = if automation_running {
+            (UiIcon::Stop, "Stop automation")
+        } else {
+            (UiIcon::Play, "Start automation")
+        };
+        if icon_button(
+            ui,
+            run_icon,
+            run_label,
+            egui::vec2(ui.available_width(), 36.0),
+            false,
+            true,
+        )
+        .clicked()
+        {
+            if automation_running {
+                self.send(Command::Stop);
+            } else {
+                self.send(Command::Start);
+            }
+        }
+
+        ui.add_space(2.0);
+        icon_text(ui, UiIcon::Broadcast, "OUTPUT MODE", Color32::GRAY, false);
+        for (mode, icon, label) in [
+            (OutputMode::Automatic, UiIcon::Automatic, "Automatic"),
+            (OutputMode::ForceCamera, UiIcon::Camera, "Webcam"),
+            (OutputMode::ForceScreen, UiIcon::Monitor, "Screen"),
+        ] {
+            if icon_button(
+                ui,
+                icon,
+                label,
+                egui::vec2(ui.available_width(), 30.0),
+                snapshot.mode == mode,
+                false,
+            )
+            .clicked()
+            {
+                self.set_mode(mode);
+            }
+        }
+        ui.add_space(2.0);
+        let gap = ui.spacing().item_spacing.x;
+        if ui.available_width() >= 285.0 {
+            let action_width = (ui.available_width() - gap) / 2.0;
+            ui.horizontal(|ui| {
+                if icon_button(
+                    ui,
+                    UiIcon::Capture,
+                    "Capture reference",
+                    egui::vec2(action_width, 32.0),
+                    false,
+                    false,
+                )
+                .clicked()
+                {
+                    self.send(Command::CaptureReference);
+                }
+                if icon_button(
+                    ui,
+                    UiIcon::Refresh,
+                    "Rescan screens",
+                    egui::vec2(action_width, 32.0),
+                    false,
+                    false,
+                )
+                .clicked()
+                {
+                    self.send(Command::Rescan);
+                }
+            });
+        } else {
+            if icon_button(
+                ui,
+                UiIcon::Capture,
+                "Capture reference",
+                egui::vec2(ui.available_width(), 32.0),
+                false,
+                false,
+            )
+            .clicked()
+            {
+                self.send(Command::CaptureReference);
+            }
+            if icon_button(
+                ui,
+                UiIcon::Refresh,
+                "Rescan screens",
+                egui::vec2(ui.available_width(), 32.0),
+                false,
+                false,
+            )
+            .clicked()
+            {
+                self.send(Command::Rescan);
+            }
+        }
     }
 
     fn settings_window(&mut self, context: &egui::Context) {
@@ -689,47 +897,72 @@ impl SwitcherApp {
     fn preview_cell(
         &mut self,
         ui: &mut egui::Ui,
-        key: &'static str,
-        title: &str,
+        kind: PreviewKind,
         frame: Option<&Frame>,
         width: f32,
         height: f32,
+        actual_output: Source,
     ) {
-        ui.label(
-            RichText::new(title)
-                .small()
-                .strong()
-                .color(Color32::LIGHT_GRAY),
-        );
-        self.preview(ui, key, frame, [width, height]);
+        self.preview(ui, kind, frame, [width, height], actual_output);
+        ui.add_space(8.0);
+        preview_caption(ui, kind);
+        ui.add_space(16.0);
     }
 
     fn preview(
         &mut self,
         ui: &mut egui::Ui,
-        key: &'static str,
+        kind: PreviewKind,
         frame: Option<&Frame>,
         maximum: [f32; 2],
+        actual_output: Source,
     ) {
         let available = Vec2::new(maximum[0].min(ui.available_width()), maximum[1]);
-        egui::Frame::new()
+        let contour = preview_contour(kind, actual_output);
+        let active_amount = ui.ctx().animate_bool_with_time(
+            ui.make_persistent_id((kind.key(), "active-contour")),
+            contour == PreviewContour::Active,
+            0.14,
+        );
+        let contour_color = match contour {
+            PreviewContour::Live => LIVE_RED,
+            PreviewContour::Active | PreviewContour::Neutral => {
+                mix_color(PREVIEW_NEUTRAL, ACTIVE_GREEN, active_amount)
+            }
+        };
+        let contour_width = match contour {
+            PreviewContour::Live => 3.0,
+            PreviewContour::Active | PreviewContour::Neutral => 1.0 + 2.0 * active_amount,
+        };
+        let fps_reading = kind.shows_fps().then(|| {
+            self.fps_trackers
+                .entry(kind)
+                .or_default()
+                .observe(frame, Instant::now())
+        });
+        let inner_size = (available - egui::vec2(6.0, 6.0)).max(egui::vec2(1.0, 1.0));
+        let preview = egui::Frame::new()
             .fill(Color32::from_rgb(12, 14, 18))
+            .stroke(Stroke::new(contour_width, contour_color))
             .corner_radius(8)
+            .inner_margin(3)
             .show(ui, |ui| {
                 ui.allocate_ui_with_layout(
-                    available,
+                    inner_size,
                     egui::Layout::centered_and_justified(egui::Direction::TopDown),
                     |ui| {
                         if let Some(frame) = frame {
                             let texture =
-                                self.textures.entry(key).or_insert_with(|| PreviewTexture {
-                                    sequence: 0,
-                                    texture: ui.ctx().load_texture(
-                                        key,
-                                        frame_image(frame),
-                                        TextureOptions::LINEAR,
-                                    ),
-                                });
+                                self.textures
+                                    .entry(kind.key())
+                                    .or_insert_with(|| PreviewTexture {
+                                        sequence: 0,
+                                        texture: ui.ctx().load_texture(
+                                            kind.key(),
+                                            frame_image(frame),
+                                            TextureOptions::LINEAR,
+                                        ),
+                                    });
                             if texture.sequence != frame.sequence {
                                 texture
                                     .texture
@@ -737,7 +970,7 @@ impl SwitcherApp {
                                 texture.sequence = frame.sequence;
                             }
                             ui.add(
-                                egui::Image::new((texture.texture.id(), available))
+                                egui::Image::new((texture.texture.id(), inner_size))
                                     .maintain_aspect_ratio(true),
                             );
                         } else {
@@ -746,6 +979,9 @@ impl SwitcherApp {
                     },
                 );
             });
+        if let Some(reading) = fps_reading {
+            paint_fps_overlay(ui, preview.response.rect, reading);
+        }
     }
 }
 
@@ -878,29 +1114,642 @@ fn restart_button(ui: &mut egui::Ui, runtime: &RuntimeHandle, label: &str, targe
     }
 }
 
-fn status_row(ui: &mut egui::Ui, label: &str, state: DeviceState) {
-    let color = match state {
-        DeviceState::Ready => Color32::from_rgb(76, 205, 132),
-        DeviceState::Initializing => Color32::from_rgb(245, 190, 75),
-        DeviceState::Failed => Color32::from_rgb(235, 90, 90),
-        DeviceState::Unavailable => Color32::GRAY,
-    };
-    ui.horizontal(|ui| {
-        ui.colored_label(color, "●");
-        ui.label(label);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(format!("{state:?}"));
-        });
-    });
+const HEALTH_STATES: [DeviceState; 4] = [
+    DeviceState::Initializing,
+    DeviceState::Ready,
+    DeviceState::Unavailable,
+    DeviceState::Failed,
+];
+
+fn preview_contour(kind: PreviewKind, actual_output: Source) -> PreviewContour {
+    match kind {
+        PreviewKind::Output => PreviewContour::Live,
+        PreviewKind::Webcam if actual_output == Source::Camera => PreviewContour::Active,
+        PreviewKind::Screen if actual_output == Source::Screen => PreviewContour::Active,
+        PreviewKind::Webcam | PreviewKind::Screen | PreviewKind::Reference => {
+            PreviewContour::Neutral
+        }
+    }
 }
 
-fn detail_row(ui: &mut egui::Ui, label: &str, value: String) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(label).color(Color32::GRAY));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(value);
+fn health_state_group(ui: &mut egui::Ui, icon: UiIcon, label: &'static str, current: DeviceState) {
+    let choices = HEALTH_STATES.map(|state| IndicatorChoice {
+        icon: device_state_icon(state),
+        label: friendly_device_state(state),
+        current: state == current,
+        tone: device_state_tone(state),
+    });
+    indicator_group(ui, icon, label, None, &choices);
+}
+
+#[derive(Clone, Copy)]
+struct IndicatorChoice {
+    icon: UiIcon,
+    label: &'static str,
+    current: bool,
+    tone: IndicatorTone,
+}
+
+#[derive(Clone, Copy)]
+enum IndicatorTone {
+    Green,
+    Amber,
+    Red,
+}
+
+fn selected_source_group(ui: &mut egui::Ui, current: Source) {
+    let choices = [
+        IndicatorChoice {
+            icon: UiIcon::Camera,
+            label: "Webcam",
+            current: current == Source::Camera,
+            tone: IndicatorTone::Green,
+        },
+        IndicatorChoice {
+            icon: UiIcon::Monitor,
+            label: "Screen",
+            current: current == Source::Screen,
+            tone: IndicatorTone::Green,
+        },
+        IndicatorChoice {
+            icon: UiIcon::Image,
+            label: "Placeholder",
+            current: current == Source::Placeholder,
+            tone: IndicatorTone::Red,
+        },
+    ];
+    indicator_group(ui, UiIcon::Target, "Selected", None, &choices);
+}
+
+fn detection_state_group(ui: &mut egui::Ui, current: DetectionState) {
+    let choices = [
+        IndicatorChoice {
+            icon: UiIcon::Question,
+            label: "Unknown",
+            current: current == DetectionState::Unknown,
+            tone: IndicatorTone::Amber,
+        },
+        IndicatorChoice {
+            icon: UiIcon::Check,
+            label: "Matching",
+            current: current == DetectionState::Matching,
+            tone: IndicatorTone::Green,
+        },
+        IndicatorChoice {
+            icon: UiIcon::Error,
+            label: "Not matching",
+            current: current == DetectionState::NotMatching,
+            tone: IndicatorTone::Red,
+        },
+        IndicatorChoice {
+            icon: UiIcon::Unavailable,
+            label: "Reference missing",
+            current: current == DetectionState::ReferenceMissing,
+            tone: IndicatorTone::Red,
+        },
+    ];
+    indicator_group(ui, UiIcon::Target, "Detection", None, &choices);
+}
+
+fn screen_mix_group(ui: &mut egui::Ui, screen_mix: f64) {
+    let active = if screen_mix <= 0.01 {
+        0
+    } else if screen_mix >= 0.99 {
+        2
+    } else {
+        1
+    };
+    let choices = [
+        IndicatorChoice {
+            icon: UiIcon::Camera,
+            label: "Webcam only",
+            current: active == 0,
+            tone: IndicatorTone::Green,
+        },
+        IndicatorChoice {
+            icon: UiIcon::Layers,
+            label: "Crossfading",
+            current: active == 1,
+            tone: IndicatorTone::Amber,
+        },
+        IndicatorChoice {
+            icon: UiIcon::Monitor,
+            label: "Screen only",
+            current: active == 2,
+            tone: IndicatorTone::Green,
+        },
+    ];
+    let percentage = format!("{}%", (screen_mix * 100.0).round());
+    indicator_group(
+        ui,
+        UiIcon::Layers,
+        "Screen mix",
+        Some(&percentage),
+        &choices,
+    );
+}
+
+fn indicator_group(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    label: &'static str,
+    value: Option<&str>,
+    choices: &[IndicatorChoice],
+) {
+    indicator_heading(ui, icon, label, value);
+    ui.add_space(2.0);
+    let gap = 4.0;
+    let width = ((ui.available_width() - gap * (choices.len() as f32 - 1.0))
+        / choices.len() as f32)
+        .max(32.0);
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        ui.horizontal(|ui| {
+            for choice in choices {
+                indicator_chip(ui, label, *choice, width);
+            }
         });
     });
+    ui.add_space(6.0);
+}
+
+fn indicator_heading(ui: &mut egui::Ui, icon: UiIcon, label: &'static str, value: Option<&str>) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), Sense::hover());
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.center().y - 7.0),
+        egui::vec2(14.0, 14.0),
+    );
+    draw_icon(ui.painter(), icon_rect, icon, Color32::LIGHT_GRAY, 1.4);
+    ui.painter().text(
+        Pos2::new(icon_rect.right() + 6.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(14.0),
+        Color32::LIGHT_GRAY,
+    );
+    if let Some(value) = value {
+        ui.painter().text(
+            Pos2::new(rect.right(), rect.center().y),
+            Align2::RIGHT_CENTER,
+            value,
+            FontId::proportional(11.0),
+            Color32::GRAY,
+        );
+    }
+}
+
+fn indicator_chip(ui: &mut egui::Ui, group: &'static str, choice: IndicatorChoice, width: f32) {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 28.0), Sense::hover());
+    let amount = ui.ctx().animate_bool_with_time(
+        ui.make_persistent_id((group, choice.label)),
+        choice.current,
+        0.12,
+    );
+    let (fill, stroke_color, icon_color) = indicator_palette(choice.tone, amount);
+    ui.painter().rect_filled(rect, 5, fill);
+    ui.painter().rect_stroke(
+        rect,
+        5,
+        Stroke::new(1.0 + amount, stroke_color),
+        StrokeKind::Inside,
+    );
+    draw_icon(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), egui::vec2(15.0, 15.0)),
+        choice.icon,
+        icon_color,
+        1.55,
+    );
+    response.on_hover_text(choice.label);
+}
+
+fn indicator_palette(tone: IndicatorTone, active_amount: f32) -> (Color32, Color32, Color32) {
+    let inactive_fill = Color32::from_rgb(62, 31, 35);
+    let inactive_stroke = Color32::from_rgb(138, 58, 64);
+    let inactive_text = Color32::from_rgb(210, 125, 130);
+    let (active_fill, active_stroke) = match tone {
+        IndicatorTone::Green => (Color32::from_rgb(34, 81, 58), ACTIVE_GREEN),
+        IndicatorTone::Amber => (Color32::from_rgb(82, 67, 33), TRANSITION_AMBER),
+        IndicatorTone::Red => (Color32::from_rgb(86, 38, 42), LIVE_RED),
+    };
+    (
+        mix_color(inactive_fill, active_fill, active_amount),
+        mix_color(inactive_stroke, active_stroke, active_amount),
+        mix_color(inactive_text, Color32::WHITE, active_amount),
+    )
+}
+
+fn device_state_icon(state: DeviceState) -> UiIcon {
+    match state {
+        DeviceState::Initializing => UiIcon::Refresh,
+        DeviceState::Ready => UiIcon::Check,
+        DeviceState::Unavailable => UiIcon::Unavailable,
+        DeviceState::Failed => UiIcon::Error,
+    }
+}
+
+fn device_state_tone(state: DeviceState) -> IndicatorTone {
+    match state {
+        DeviceState::Ready => IndicatorTone::Green,
+        DeviceState::Initializing => IndicatorTone::Amber,
+        DeviceState::Unavailable | DeviceState::Failed => IndicatorTone::Red,
+    }
+}
+
+fn friendly_device_state(state: DeviceState) -> &'static str {
+    match state {
+        DeviceState::Initializing => "Initializing",
+        DeviceState::Ready => "Ready",
+        DeviceState::Unavailable => "Unavailable",
+        DeviceState::Failed => "Failed",
+    }
+}
+
+fn preview_caption(ui: &mut egui::Ui, kind: PreviewKind) {
+    let font = FontId::proportional(11.0);
+    let text_color = Color32::LIGHT_GRAY;
+    let label = ui
+        .painter()
+        .layout_no_wrap(kind.label().to_owned(), font.clone(), text_color);
+    let label_width = label.size().x;
+    let live = (kind == PreviewKind::Output).then(|| {
+        ui.painter()
+            .layout_no_wrap("LIVE".to_owned(), font.clone(), LIVE_RED)
+    });
+    let icon_size = 13.0;
+    let live_width = live.as_ref().map_or(0.0, |galley| 12.0 + galley.size().x);
+    let total_width = icon_size + 6.0 + label_width + live_width;
+    let height = label.size().y.max(icon_size);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(total_width, height), Sense::hover());
+    let painter = ui.painter();
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.center().y - icon_size / 2.0),
+        egui::vec2(icon_size, icon_size),
+    );
+    draw_icon(painter, icon_rect, kind.icon(), text_color, 1.35);
+    let label_pos = Pos2::new(
+        icon_rect.right() + 6.0,
+        rect.center().y - label.size().y / 2.0,
+    );
+    painter.galley(label_pos, label, text_color);
+    if let Some(live) = live {
+        let live_x = label_pos.x + label_width + 12.0;
+        painter.circle_filled(Pos2::new(live_x - 5.0, rect.center().y), 2.5, LIVE_RED);
+        painter.galley(
+            Pos2::new(live_x, rect.center().y - live.size().y / 2.0),
+            live,
+            LIVE_RED,
+        );
+    }
+}
+
+fn paint_fps_overlay(ui: &egui::Ui, preview_rect: Rect, reading: FpsReading) {
+    let text = match reading {
+        FpsReading::Pending => "-- FPS".to_owned(),
+        FpsReading::Value(value) => format!("{value} FPS"),
+    };
+    let font = FontId::monospace(10.5);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text, font, Color32::from_rgb(232, 235, 240));
+    let size = galley.size() + egui::vec2(10.0, 6.0);
+    let overlay_max = preview_rect.max - egui::vec2(6.0, 6.0);
+    let overlay = Rect::from_min_size(overlay_max - size, size);
+    ui.painter()
+        .rect_filled(overlay, 4, Color32::from_rgba_unmultiplied(6, 8, 12, 184));
+    ui.painter().galley(
+        overlay.min + egui::vec2(5.0, 3.0),
+        galley,
+        Color32::from_rgb(232, 235, 240),
+    );
+}
+
+fn icon_text(ui: &mut egui::Ui, icon: UiIcon, text: &str, color: Color32, strong: bool) {
+    let font = FontId::proportional(if strong { 14.0 } else { 11.0 });
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    let icon_size = if strong { 15.0 } else { 13.0 };
+    let size = egui::vec2(
+        icon_size + 6.0 + galley.size().x,
+        galley.size().y.max(icon_size),
+    );
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.center().y - icon_size / 2.0),
+        egui::vec2(icon_size, icon_size),
+    );
+    draw_icon(ui.painter(), icon_rect, icon, color, 1.4);
+    ui.painter().galley(
+        Pos2::new(
+            icon_rect.right() + 6.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
+    );
+}
+
+fn icon_button(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    text: &str,
+    desired_size: Vec2,
+    selected: bool,
+    emphasized: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
+    let visuals = ui.style().interact(&response);
+    let fill = if selected {
+        ui.visuals().selection.bg_fill
+    } else if emphasized && !response.hovered() {
+        Color32::from_rgb(38, 42, 50)
+    } else {
+        visuals.bg_fill
+    };
+    let stroke = if selected {
+        Stroke::new(1.0, ui.visuals().selection.stroke.color)
+    } else {
+        visuals.bg_stroke
+    };
+    ui.painter().rect_filled(rect, 6, fill);
+    ui.painter()
+        .rect_stroke(rect, 6, stroke, StrokeKind::Inside);
+
+    let color = if selected || emphasized || response.hovered() {
+        Color32::WHITE
+    } else {
+        visuals.fg_stroke.color
+    };
+    let font = FontId::proportional(if emphasized { 14.0 } else { 12.0 });
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    let icon_size = if emphasized { 16.0 } else { 14.0 };
+    let content_width = icon_size + 7.0 + galley.size().x;
+    let left = rect.center().x - content_width / 2.0;
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(left, rect.center().y - icon_size / 2.0),
+        egui::vec2(icon_size, icon_size),
+    );
+    draw_icon(ui.painter(), icon_rect, icon, color, 1.45);
+    ui.painter().galley(
+        Pos2::new(
+            icon_rect.right() + 7.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn draw_icon(painter: &egui::Painter, rect: Rect, icon: UiIcon, color: Color32, width: f32) {
+    let stroke = Stroke::new(width, color);
+    let center = rect.center();
+    let x = |fraction: f32| egui::lerp(rect.left()..=rect.right(), fraction);
+    let y = |fraction: f32| egui::lerp(rect.top()..=rect.bottom(), fraction);
+    match icon {
+        UiIcon::Camera => {
+            let body = Rect::from_min_max(Pos2::new(x(0.08), y(0.27)), Pos2::new(x(0.92), y(0.85)));
+            painter.rect_stroke(body, 2, stroke, StrokeKind::Inside);
+            painter.line_segment(
+                [Pos2::new(x(0.25), y(0.27)), Pos2::new(x(0.36), y(0.12))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.36), y(0.12)), Pos2::new(x(0.58), y(0.12))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.58), y(0.12)), Pos2::new(x(0.67), y(0.27))],
+                stroke,
+            );
+            painter.circle_stroke(
+                center + egui::vec2(0.0, rect.height() * 0.08),
+                rect.width() * 0.18,
+                stroke,
+            );
+        }
+        UiIcon::Monitor => {
+            painter.rect_stroke(
+                Rect::from_min_max(Pos2::new(x(0.06), y(0.12)), Pos2::new(x(0.94), y(0.72))),
+                2,
+                stroke,
+                StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.5), y(0.72)), Pos2::new(x(0.5), y(0.88))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.28), y(0.9)), Pos2::new(x(0.72), y(0.9))],
+                stroke,
+            );
+        }
+        UiIcon::Image => {
+            painter.rect_stroke(rect.shrink(1.0), 2, stroke, StrokeKind::Inside);
+            painter.circle_stroke(Pos2::new(x(0.7), y(0.3)), rect.width() * 0.08, stroke);
+            painter.line_segment(
+                [Pos2::new(x(0.12), y(0.78)), Pos2::new(x(0.38), y(0.48))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.38), y(0.48)), Pos2::new(x(0.56), y(0.67))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.56), y(0.67)), Pos2::new(x(0.72), y(0.53))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.72), y(0.53)), Pos2::new(x(0.9), y(0.78))],
+                stroke,
+            );
+        }
+        UiIcon::Broadcast => {
+            painter.circle_filled(center, rect.width() * 0.1, color);
+            painter.circle_stroke(center, rect.width() * 0.27, stroke);
+            painter.circle_stroke(center, rect.width() * 0.43, stroke);
+        }
+        UiIcon::Settings => {
+            painter.circle_stroke(center, rect.width() * 0.18, stroke);
+            painter.circle_stroke(center, rect.width() * 0.36, stroke);
+            for direction in [
+                egui::vec2(1.0, 0.0),
+                egui::vec2(-1.0, 0.0),
+                egui::vec2(0.0, 1.0),
+                egui::vec2(0.0, -1.0),
+                egui::vec2(0.7, 0.7),
+                egui::vec2(-0.7, 0.7),
+                egui::vec2(0.7, -0.7),
+                egui::vec2(-0.7, -0.7),
+            ] {
+                painter.line_segment(
+                    [
+                        center + direction * rect.width() * 0.36,
+                        center + direction * rect.width() * 0.48,
+                    ],
+                    stroke,
+                );
+            }
+        }
+        UiIcon::Play => {
+            painter.line_segment(
+                [Pos2::new(x(0.28), y(0.16)), Pos2::new(x(0.28), y(0.84))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.28), y(0.16)), Pos2::new(x(0.78), y(0.5))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.78), y(0.5)), Pos2::new(x(0.28), y(0.84))],
+                stroke,
+            );
+        }
+        UiIcon::Stop => {
+            painter.rect_filled(rect.shrink(rect.width() * 0.22), 1, color);
+        }
+        UiIcon::Automatic | UiIcon::Refresh => {
+            painter.circle_stroke(center, rect.width() * 0.35, stroke);
+            painter.line_segment(
+                [Pos2::new(x(0.72), y(0.12)), Pos2::new(x(0.9), y(0.14))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.9), y(0.14)), Pos2::new(x(0.84), y(0.32))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.28), y(0.88)), Pos2::new(x(0.1), y(0.86))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.1), y(0.86)), Pos2::new(x(0.16), y(0.68))],
+                stroke,
+            );
+        }
+        UiIcon::Capture => {
+            for (a, b) in [
+                ((0.08, 0.35), (0.08, 0.08)),
+                ((0.08, 0.08), (0.35, 0.08)),
+                ((0.65, 0.08), (0.92, 0.08)),
+                ((0.92, 0.08), (0.92, 0.35)),
+                ((0.08, 0.65), (0.08, 0.92)),
+                ((0.08, 0.92), (0.35, 0.92)),
+                ((0.65, 0.92), (0.92, 0.92)),
+                ((0.92, 0.92), (0.92, 0.65)),
+            ] {
+                painter.line_segment(
+                    [Pos2::new(x(a.0), y(a.1)), Pos2::new(x(b.0), y(b.1))],
+                    stroke,
+                );
+            }
+            painter.circle_stroke(center, rect.width() * 0.18, stroke);
+        }
+        UiIcon::Check => {
+            painter.line_segment(
+                [Pos2::new(x(0.12), y(0.52)), Pos2::new(x(0.4), y(0.78))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.4), y(0.78)), Pos2::new(x(0.9), y(0.2))],
+                stroke,
+            );
+        }
+        UiIcon::Error => {
+            painter.circle_stroke(center, rect.width() * 0.42, stroke);
+            painter.line_segment(
+                [Pos2::new(x(0.28), y(0.28)), Pos2::new(x(0.72), y(0.72))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.72), y(0.28)), Pos2::new(x(0.28), y(0.72))],
+                stroke,
+            );
+        }
+        UiIcon::Unavailable => {
+            painter.circle_stroke(center, rect.width() * 0.42, stroke);
+            painter.line_segment(
+                [Pos2::new(x(0.2), y(0.8)), Pos2::new(x(0.8), y(0.2))],
+                stroke,
+            );
+        }
+        UiIcon::Question => {
+            painter.line_segment(
+                [Pos2::new(x(0.28), y(0.28)), Pos2::new(x(0.42), y(0.14))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.42), y(0.14)), Pos2::new(x(0.68), y(0.22))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.68), y(0.22)), Pos2::new(x(0.68), y(0.42))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.68), y(0.42)), Pos2::new(x(0.5), y(0.58))],
+                stroke,
+            );
+            painter.circle_filled(Pos2::new(x(0.5), y(0.82)), rect.width() * 0.06, color);
+        }
+        UiIcon::Layers => {
+            painter.line_segment(
+                [Pos2::new(x(0.08), y(0.34)), Pos2::new(x(0.5), y(0.1))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.5), y(0.1)), Pos2::new(x(0.92), y(0.34))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.92), y(0.34)), Pos2::new(x(0.5), y(0.58))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.5), y(0.58)), Pos2::new(x(0.08), y(0.34))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.12), y(0.58)), Pos2::new(x(0.5), y(0.8))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.5), y(0.8)), Pos2::new(x(0.88), y(0.58))],
+                stroke,
+            );
+        }
+        UiIcon::Target => {
+            painter.circle_stroke(center, rect.width() * 0.4, stroke);
+            painter.circle_stroke(center, rect.width() * 0.16, stroke);
+            painter.line_segment(
+                [Pos2::new(x(0.5), y(0.0)), Pos2::new(x(0.5), y(0.24))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.5), y(0.76)), Pos2::new(x(0.5), y(1.0))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.0), y(0.5)), Pos2::new(x(0.24), y(0.5))],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(x(0.76), y(0.5)), Pos2::new(x(1.0), y(0.5))],
+                stroke,
+            );
+        }
+    }
+}
+
+fn mix_color(from: Color32, to: Color32, amount: f32) -> Color32 {
+    let amount = amount.clamp(0.0, 1.0);
+    let mix =
+        |left: u8, right: u8| (left as f32 + (right as f32 - left as f32) * amount).round() as u8;
+    Color32::from_rgba_unmultiplied(
+        mix(from.r(), to.r()),
+        mix(from.g(), to.g()),
+        mix(from.b(), to.b()),
+        mix(from.a(), to.a()),
+    )
 }
 
 fn frame_image(frame: &Frame) -> egui::ColorImage {
@@ -922,7 +1771,18 @@ fn bgra_color(value: u32) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+
+    fn frame_at(sequence: u64, received_at: Instant) -> Frame {
+        Frame::new(
+            vec![0, 0, 0, 255].into(),
+            asc_core::Size::new(1, 1),
+            4,
+            sequence,
+            0,
+            received_at,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn default_ui_fonts_are_bundled() {
@@ -966,6 +1826,131 @@ mod tests {
     }
 
     #[test]
+    fn preview_contours_mark_live_output_and_active_source() {
+        assert_eq!(
+            preview_contour(PreviewKind::Output, Source::Camera),
+            PreviewContour::Live
+        );
+        assert_eq!(
+            preview_contour(PreviewKind::Webcam, Source::Camera),
+            PreviewContour::Active
+        );
+        assert_eq!(
+            preview_contour(PreviewKind::Screen, Source::Camera),
+            PreviewContour::Neutral
+        );
+        assert_eq!(
+            preview_contour(PreviewKind::Screen, Source::Screen),
+            PreviewContour::Active
+        );
+        assert_eq!(
+            preview_contour(PreviewKind::Webcam, Source::Placeholder),
+            PreviewContour::Neutral
+        );
+        assert_eq!(
+            preview_contour(PreviewKind::Reference, Source::Screen),
+            PreviewContour::Neutral
+        );
+    }
+
+    #[test]
+    fn health_states_have_lifecycle_order_icons_and_semantic_colors() {
+        assert_eq!(
+            HEALTH_STATES,
+            [
+                DeviceState::Initializing,
+                DeviceState::Ready,
+                DeviceState::Unavailable,
+                DeviceState::Failed,
+            ]
+        );
+        assert_eq!(
+            device_state_icon(DeviceState::Initializing),
+            UiIcon::Refresh
+        );
+        assert_eq!(device_state_icon(DeviceState::Ready), UiIcon::Check);
+        assert_eq!(
+            device_state_icon(DeviceState::Unavailable),
+            UiIcon::Unavailable
+        );
+        assert_eq!(device_state_icon(DeviceState::Failed), UiIcon::Error);
+        assert_eq!(
+            indicator_palette(device_state_tone(DeviceState::Ready), 1.0).1,
+            ACTIVE_GREEN
+        );
+        assert_eq!(
+            indicator_palette(device_state_tone(DeviceState::Initializing), 1.0).1,
+            TRANSITION_AMBER
+        );
+        assert_eq!(
+            indicator_palette(device_state_tone(DeviceState::Failed), 1.0).1,
+            LIVE_RED
+        );
+        assert_eq!(
+            indicator_palette(device_state_tone(DeviceState::Unavailable), 1.0).1,
+            LIVE_RED
+        );
+        let inactive = indicator_palette(device_state_tone(DeviceState::Ready), 0.0);
+        assert_eq!(
+            inactive,
+            indicator_palette(device_state_tone(DeviceState::Failed), 0.0)
+        );
+    }
+
+    #[test]
+    fn fps_tracker_measures_steady_and_skipped_sequences() {
+        let start = Instant::now();
+        let mut steady = FpsTracker::default();
+        let mut reading = FpsReading::Pending;
+        for sequence in 1..=31 {
+            let elapsed = Duration::from_secs_f64((sequence - 1) as f64 / 30.0);
+            let frame = frame_at(sequence, start + elapsed);
+            reading = steady.observe(Some(&frame), start + elapsed);
+        }
+        assert_eq!(reading, FpsReading::Value(30));
+
+        let mut skipped = FpsTracker::default();
+        let first = frame_at(1, start);
+        assert_eq!(skipped.observe(Some(&first), start), FpsReading::Pending);
+        let later = frame_at(11, start + Duration::from_millis(333));
+        assert_eq!(
+            skipped.observe(Some(&later), start + Duration::from_millis(333)),
+            FpsReading::Value(30)
+        );
+    }
+
+    #[test]
+    fn fps_tracker_resets_and_reports_stalls() {
+        let start = Instant::now();
+        let mut tracker = FpsTracker::default();
+        let first = frame_at(10, start);
+        tracker.observe(Some(&first), start);
+        let later = frame_at(20, start + Duration::from_millis(333));
+        assert_eq!(
+            tracker.observe(Some(&later), start + Duration::from_millis(333)),
+            FpsReading::Value(30)
+        );
+
+        let reset = frame_at(1, start + Duration::from_millis(500));
+        assert_eq!(
+            tracker.observe(Some(&reset), start + Duration::from_millis(500)),
+            FpsReading::Pending
+        );
+        assert_eq!(
+            tracker.observe(Some(&reset), start + Duration::from_millis(1500)),
+            FpsReading::Value(0)
+        );
+    }
+
+    #[test]
+    fn fps_overlays_skip_the_static_reference() {
+        assert!(PreviewKind::Webcam.shows_fps());
+        assert!(PreviewKind::Screen.shows_fps());
+        assert!(PreviewKind::Output.shows_fps());
+        assert!(!PreviewKind::Reference.shows_fps());
+    }
+
+    #[test]
     fn responsive_dashboard_and_all_settings_tabs_render() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
@@ -977,7 +1962,11 @@ mod tests {
             ConfigStore::new(directory.path()),
         );
         let context = egui::Context::default();
-        for viewport in [egui::vec2(820.0, 600.0), egui::vec2(1120.0, 760.0)] {
+        for viewport in [
+            egui::vec2(820.0, 600.0),
+            egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
+            egui::vec2(1280.0, 720.0),
+        ] {
             for dpi_scale in [1.0, 1.5] {
                 for tab in [
                     SettingsTab::General,

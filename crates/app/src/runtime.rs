@@ -232,7 +232,7 @@ impl RuntimeState {
             .snapshot
             .availability
             .screen_ready
-            .then(|| self.snapshot.previews.screen.as_deref())
+            .then_some(self.snapshot.previews.screen.as_deref())
             .flatten()
             .and_then(gray_thumbnail);
         let (similarity, valid) = match (&self.reference, candidate) {

@@ -2,7 +2,7 @@ use crate::ScreenInput;
 use asc_core::{Frame, MonitorDescriptor, Size};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame as CaptureFrame;
@@ -13,6 +13,8 @@ use windows_capture::settings::{
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
 
+const SCREEN_FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 30);
+
 #[derive(Default)]
 struct Shared {
     latest: Mutex<Option<Arc<Frame>>>,
@@ -22,6 +24,7 @@ struct Shared {
 struct CaptureHandler {
     shared: Arc<Shared>,
     scratch: Vec<u8>,
+    last_frame_at: Option<Instant>,
 }
 
 impl GraphicsCaptureApiHandler for CaptureHandler {
@@ -32,6 +35,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         Ok(Self {
             shared: context.flags,
             scratch: Vec::new(),
+            last_frame_at: None,
         })
     }
 
@@ -40,6 +44,14 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         frame: &mut CaptureFrame,
         _control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
+        let now = Instant::now();
+        if self
+            .last_frame_at
+            .is_some_and(|previous| now.duration_since(previous) < SCREEN_FRAME_INTERVAL)
+        {
+            return Ok(());
+        }
+        self.last_frame_at = Some(now);
         let timestamp = frame.timestamp().map_or(0, |time| time.Duration);
         let width = frame.width();
         let height = frame.height();
@@ -52,7 +64,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             width * 4,
             sequence,
             timestamp,
-            Instant::now(),
+            now,
         )
         .map_err(|error| format!("invalid screen frame: {error:?}"))?;
         *self
