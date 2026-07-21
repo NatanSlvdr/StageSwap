@@ -119,7 +119,9 @@ impl ScreenInput for WindowsGraphicsScreenInput {
             cursor,
             DrawBorderSettings::WithoutBorder,
             SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Custom(std::time::Duration::from_millis(16)),
+            // Custom minimum update intervals are unavailable on some Windows versions.
+            // The system default keeps capture working across all supported platforms.
+            MinimumUpdateIntervalSettings::Default,
             DirtyRegionSettings::Default,
             ColorFormat::Bgra8,
             Arc::clone(&self.shared),
