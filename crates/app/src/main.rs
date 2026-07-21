@@ -261,6 +261,7 @@ enum UiIcon {
     Error,
     Image,
     Layers,
+    Loader,
     Monitor,
     Play,
     Question,
@@ -559,7 +560,6 @@ impl SwitcherApp {
             snapshot.virtual_camera_state,
         );
         ui.separator();
-        selected_source_group(ui, snapshot.actual_output);
         detection_state_group(ui, snapshot.detection);
         screen_mix_group(ui, snapshot.transition.screen_mix);
         ui.add_space(4.0);
@@ -930,10 +930,7 @@ impl SwitcherApp {
                 mix_color(PREVIEW_NEUTRAL, ACTIVE_GREEN, active_amount)
             }
         };
-        let contour_width = match contour {
-            PreviewContour::Live => 3.0,
-            PreviewContour::Active | PreviewContour::Neutral => 1.0 + 2.0 * active_amount,
-        };
+        let contour_width = 3.0;
         let fps_reading = kind.shows_fps().then(|| {
             self.fps_trackers
                 .entry(kind)
@@ -1157,30 +1154,6 @@ enum IndicatorTone {
     Red,
 }
 
-fn selected_source_group(ui: &mut egui::Ui, current: Source) {
-    let choices = [
-        IndicatorChoice {
-            icon: UiIcon::Camera,
-            label: "Webcam",
-            current: current == Source::Camera,
-            tone: IndicatorTone::Green,
-        },
-        IndicatorChoice {
-            icon: UiIcon::Monitor,
-            label: "Screen",
-            current: current == Source::Screen,
-            tone: IndicatorTone::Green,
-        },
-        IndicatorChoice {
-            icon: UiIcon::Image,
-            label: "Placeholder",
-            current: current == Source::Placeholder,
-            tone: IndicatorTone::Red,
-        },
-    ];
-    indicator_group(ui, UiIcon::Target, "Selected", None, &choices);
-}
-
 fn detection_state_group(ui: &mut egui::Ui, current: DetectionState) {
     let choices = [
         IndicatorChoice {
@@ -1256,25 +1229,31 @@ fn indicator_group(
     value: Option<&str>,
     choices: &[IndicatorChoice],
 ) {
-    indicator_heading(ui, icon, label, value);
-    ui.add_space(2.0);
     let gap = 4.0;
-    let width = ((ui.available_width() - gap * (choices.len() as f32 - 1.0))
-        / choices.len() as f32)
-        .max(32.0);
+    let chip_size = 28.0;
+    let chips_width = chip_size * choices.len() as f32 + gap * (choices.len() as f32 - 1.0);
+    let heading_width = (ui.available_width() - chips_width - gap).max(64.0);
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
-        ui.horizontal(|ui| {
+        ui.horizontal_centered(|ui| {
+            indicator_heading(ui, icon, label, value, heading_width, chip_size);
             for choice in choices {
-                indicator_chip(ui, label, *choice, width);
+                indicator_chip(ui, label, *choice, chip_size);
             }
         });
     });
     ui.add_space(6.0);
 }
 
-fn indicator_heading(ui: &mut egui::Ui, icon: UiIcon, label: &'static str, value: Option<&str>) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), Sense::hover());
+fn indicator_heading(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    label: &'static str,
+    value: Option<&str>,
+    width: f32,
+    height: f32,
+) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
     let icon_rect = Rect::from_min_size(
         Pos2::new(rect.left(), rect.center().y - 7.0),
         egui::vec2(14.0, 14.0),
@@ -1324,9 +1303,9 @@ fn indicator_chip(ui: &mut egui::Ui, group: &'static str, choice: IndicatorChoic
 }
 
 fn indicator_palette(tone: IndicatorTone, active_amount: f32) -> (Color32, Color32, Color32) {
-    let inactive_fill = Color32::from_rgb(62, 31, 35);
-    let inactive_stroke = Color32::from_rgb(138, 58, 64);
-    let inactive_text = Color32::from_rgb(210, 125, 130);
+    let inactive_fill = Color32::from_rgb(31, 34, 40);
+    let inactive_stroke = Color32::from_rgb(91, 97, 108);
+    let inactive_text = Color32::from_rgb(151, 158, 170);
     let (active_fill, active_stroke) = match tone {
         IndicatorTone::Green => (Color32::from_rgb(34, 81, 58), ACTIVE_GREEN),
         IndicatorTone::Amber => (Color32::from_rgb(82, 67, 33), TRANSITION_AMBER),
@@ -1341,7 +1320,7 @@ fn indicator_palette(tone: IndicatorTone, active_amount: f32) -> (Color32, Color
 
 fn device_state_icon(state: DeviceState) -> UiIcon {
     match state {
-        DeviceState::Initializing => UiIcon::Refresh,
+        DeviceState::Initializing => UiIcon::Loader,
         DeviceState::Ready => UiIcon::Check,
         DeviceState::Unavailable => UiIcon::Unavailable,
         DeviceState::Failed => UiIcon::Error,
@@ -1567,6 +1546,18 @@ fn draw_icon(painter: &egui::Painter, rect: Rect, icon: UiIcon, color: Color32, 
             painter.circle_filled(center, rect.width() * 0.1, color);
             painter.circle_stroke(center, rect.width() * 0.27, stroke);
             painter.circle_stroke(center, rect.width() * 0.43, stroke);
+        }
+        UiIcon::Loader => {
+            for index in 0..8 {
+                let angle = std::f32::consts::TAU * index as f32 / 8.0;
+                let direction = egui::vec2(angle.cos(), angle.sin());
+                let alpha = 70 + index * 23;
+                painter.circle_filled(
+                    center + direction * rect.width() * 0.34,
+                    rect.width() * 0.07,
+                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha as u8),
+                );
+            }
         }
         UiIcon::Settings => {
             painter.circle_stroke(center, rect.width() * 0.18, stroke);
@@ -1864,10 +1855,7 @@ mod tests {
                 DeviceState::Failed,
             ]
         );
-        assert_eq!(
-            device_state_icon(DeviceState::Initializing),
-            UiIcon::Refresh
-        );
+        assert_eq!(device_state_icon(DeviceState::Initializing), UiIcon::Loader);
         assert_eq!(device_state_icon(DeviceState::Ready), UiIcon::Check);
         assert_eq!(
             device_state_icon(DeviceState::Unavailable),
@@ -1891,6 +1879,7 @@ mod tests {
             LIVE_RED
         );
         let inactive = indicator_palette(device_state_tone(DeviceState::Ready), 0.0);
+        assert_eq!(inactive.1, Color32::from_rgb(91, 97, 108));
         assert_eq!(
             inactive,
             indicator_palette(device_state_tone(DeviceState::Failed), 0.0)
