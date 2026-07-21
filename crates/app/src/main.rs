@@ -28,6 +28,11 @@ const MAX_PREVIEW_TEXTURE_HEIGHT: u32 = 270;
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const SETTINGS_ENTRANCE_DURATION: Duration = Duration::from_millis(160);
 const SETTINGS_SECTION_DURATION: Duration = Duration::from_millis(120);
+const SETTINGS_SIDEBAR_WIDTH: f32 = 222.0;
+const SETTINGS_CONTENT_WIDTH: f32 = 760.0;
+const SETTINGS_PREVIEW_WIDTH: f32 = 480.0;
+const SETTINGS_PREVIEW_HEIGHT: f32 = 270.0;
+const SETTINGS_PREVIEW_COLUMNS_BREAKPOINT: f32 = 620.0;
 
 mod local_log;
 mod portable_payload;
@@ -131,43 +136,45 @@ fn aspect_locked_window_size(current: Vec2, previous: Option<Vec2>) -> Vec2 {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum SettingsTab {
-    General,
-    Sources,
-    Detection,
-    Output,
-    Logs,
+    App,
+    Webcam,
+    ScreenDetection,
+    VirtualCamera,
+    Diagnostics,
 }
 
 impl SettingsTab {
     const ALL: [(Self, UiIcon, &'static str); 5] = [
-        (Self::General, UiIcon::Settings, "General"),
-        (Self::Sources, UiIcon::Camera, "Sources"),
-        (Self::Detection, UiIcon::Target, "Detection"),
-        (Self::Output, UiIcon::Broadcast, "Output"),
-        (Self::Logs, UiIcon::Layers, "Logs"),
+        (Self::App, UiIcon::Settings, "App"),
+        (Self::Webcam, UiIcon::Camera, "Webcam"),
+        (Self::ScreenDetection, UiIcon::Monitor, "Screen & detection"),
+        (Self::VirtualCamera, UiIcon::Broadcast, "Virtual camera"),
+        (Self::Diagnostics, UiIcon::Layers, "Diagnostics"),
     ];
 
     const fn title(self) -> &'static str {
         match self {
-            Self::General => "General",
-            Self::Sources => "Sources",
-            Self::Detection => "Detection",
-            Self::Output => "Output",
-            Self::Logs => "Logs",
+            Self::App => "App",
+            Self::Webcam => "Webcam",
+            Self::ScreenDetection => "Screen & detection",
+            Self::VirtualCamera => "Virtual camera",
+            Self::Diagnostics => "Diagnostics",
         }
     }
 
     const fn description(self) -> &'static str {
         match self {
-            Self::General => {
-                "Choose how Automatic Screen Camera starts, closes, and keeps you informed."
+            Self::App => "Choose how the app launches, stays available, and reports problems.",
+            Self::Webcam => "Select, verify, and recover the camera used for webcam output.",
+            Self::ScreenDetection => {
+                "Choose what to capture and teach Automatic mode when to show the webcam."
             }
-            Self::Sources => "Select the video and display inputs used by the switching pipeline.",
-            Self::Detection => {
-                "Manage the reference image and decide how closely the screen must match it."
+            Self::VirtualCamera => {
+                "Verify the feed sent to other apps and configure its missing-source fallback."
             }
-            Self::Output => "Review the fixed video pipeline and configure its safe fallback.",
-            Self::Logs => "Inspect, export, or clear diagnostic data stored on this computer.",
+            Self::Diagnostics => {
+                "Inspect component health, technical details, logs, and recovery tools."
+            }
         }
     }
 }
@@ -231,6 +238,53 @@ impl PreviewKind {
 
     const fn shows_fps(self) -> bool {
         !matches!(self, Self::Reference)
+    }
+
+    const fn empty_message(self) -> &'static str {
+        match self {
+            Self::Webcam => "No webcam frame",
+            Self::Screen => "No screen frame",
+            Self::Reference => "No reference image",
+            Self::Output => "No output frame",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PreviewOptions {
+    show_fps: bool,
+    empty_message: &'static str,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SettingsPreviewPair {
+    screen: Rect,
+    reference: Rect,
+    side_by_side: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SettingsPreview<'a> {
+    kind: PreviewKind,
+    frame: Option<&'a Frame>,
+    label: &'a str,
+    empty_message: &'static str,
+    actual_output: Source,
+}
+
+impl PreviewOptions {
+    const fn dashboard(kind: PreviewKind) -> Self {
+        Self {
+            show_fps: kind.shows_fps(),
+            empty_message: kind.empty_message(),
+        }
+    }
+
+    const fn settings(empty_message: &'static str) -> Self {
+        Self {
+            show_fps: false,
+            empty_message,
+        }
     }
 }
 
@@ -341,6 +395,7 @@ struct SwitcherApp {
     view: AppView,
     settings_tab: SettingsTab,
     settings_save_state: SettingsSaveState,
+    confirm_clear_logs: bool,
     awaiting_video_device_id: Option<String>,
     settings_opened_at: Option<Instant>,
     settings_section_changed_at: Option<Instant>,
@@ -378,8 +433,9 @@ impl SwitcherApp {
             store,
             load_warnings,
             view: AppView::Dashboard,
-            settings_tab: SettingsTab::General,
+            settings_tab: SettingsTab::App,
             settings_save_state: SettingsSaveState::Saved,
+            confirm_clear_logs: false,
             awaiting_video_device_id: None,
             settings_opened_at: None,
             settings_section_changed_at: None,
@@ -445,6 +501,7 @@ impl SwitcherApp {
     fn close_settings(&mut self) {
         self.flush_settings();
         self.view = AppView::Dashboard;
+        self.confirm_clear_logs = false;
         self.settings_opened_at = None;
         self.settings_section_changed_at = None;
     }
@@ -490,6 +547,21 @@ impl SwitcherApp {
             Err(error) => self
                 .load_warnings
                 .push(format!("Could not clear logs: {error}")),
+        }
+    }
+
+    fn request_log_clear(&mut self) {
+        self.confirm_clear_logs = true;
+    }
+
+    fn cancel_log_clear(&mut self) {
+        self.confirm_clear_logs = false;
+    }
+
+    fn confirm_log_clear(&mut self) {
+        if self.confirm_clear_logs {
+            self.clear_logs();
+            self.confirm_clear_logs = false;
         }
     }
 
@@ -916,36 +988,13 @@ impl SwitcherApp {
     fn settings_workspace(&mut self, ui: &mut egui::Ui) {
         let workspace_height = ui.available_height().max(0.0);
         ui.horizontal_top(|ui| {
-            egui::Frame::new()
-                .fill(Color32::from_rgb(20, 22, 27))
-                .inner_margin(egui::Margin::symmetric(12, 18))
-                .show(ui, |ui| {
-                    ui.set_width(198.0);
-                    ui.set_min_height((workspace_height - 36.0).max(0.0));
-                    ui.label(
-                        RichText::new("PREFERENCES")
-                            .size(10.0)
-                            .strong()
-                            .color(Color32::from_rgb(112, 120, 134)),
-                    );
-                    ui.add_space(10.0);
-                    for (tab, icon, label) in SettingsTab::ALL {
-                        if settings_nav_button(ui, tab, icon, label, self.settings_tab).clicked()
-                            && self.settings_tab != tab
-                        {
-                            self.settings_tab = tab;
-                            self.settings_section_changed_at = Some(Instant::now());
-                        }
-                        ui.add_space(4.0);
-                    }
-                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                        ui.label(
-                            RichText::new("Changes save automatically")
-                                .size(10.5)
-                                .color(Color32::from_rgb(112, 120, 134)),
-                        );
-                    });
-                });
+            ui.allocate_ui_with_layout(
+                egui::vec2(SETTINGS_SIDEBAR_WIDTH, workspace_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    self.settings_sidebar(ui, workspace_height);
+                },
+            );
 
             ui.separator();
             ui.allocate_ui_with_layout(
@@ -956,6 +1005,43 @@ impl SwitcherApp {
         });
     }
 
+    fn settings_sidebar(&mut self, ui: &mut egui::Ui, height: f32) -> Vec<Rect> {
+        egui::Frame::new()
+            .fill(Color32::from_rgb(20, 22, 27))
+            .inner_margin(egui::Margin::symmetric(12, 18))
+            .show(ui, |ui| {
+                ui.set_width(SETTINGS_SIDEBAR_WIDTH - 24.0);
+                ui.set_min_height((height - 36.0).max(0.0));
+                ui.label(
+                    RichText::new("PREFERENCES")
+                        .size(10.0)
+                        .strong()
+                        .color(Color32::from_rgb(112, 120, 134)),
+                );
+                ui.add_space(10.0);
+                let mut navigation_rects = Vec::with_capacity(SettingsTab::ALL.len());
+                for (tab, icon, label) in SettingsTab::ALL {
+                    let response = settings_nav_button(ui, tab, icon, label, self.settings_tab);
+                    navigation_rects.push(response.rect);
+                    if response.clicked() && self.settings_tab != tab {
+                        self.settings_tab = tab;
+                        self.confirm_clear_logs = false;
+                        self.settings_section_changed_at = Some(Instant::now());
+                    }
+                    ui.add_space(4.0);
+                }
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.label(
+                        RichText::new("Changes save automatically")
+                            .size(10.5)
+                            .color(Color32::from_rgb(112, 120, 134)),
+                    );
+                });
+                navigation_rects
+            })
+            .inner
+    }
+
     fn settings_content(&mut self, ui: &mut egui::Ui) {
         let section_progress =
             animation_progress(self.settings_section_changed_at, SETTINGS_SECTION_DURATION);
@@ -964,46 +1050,48 @@ impl SwitcherApp {
         }
         let before = self.config.clone();
         egui::ScrollArea::vertical()
-            .id_salt("settings-content")
+            .id_salt(("settings-content", self.settings_tab))
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let content_width = ui.available_width().min(760.0);
-                let left_gutter = ((ui.available_width() - content_width) / 2.0).max(22.0);
-                ui.horizontal_top(|ui| {
-                    ui.add_space(left_gutter);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(
-                            content_width.min(ui.available_width()),
-                            ui.available_height(),
-                        ),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui.set_opacity(0.62 + section_progress * 0.38);
-                            ui.add_space(28.0 + (1.0 - section_progress) * 5.0);
-                            ui.label(
-                                RichText::new(self.settings_tab.title())
-                                    .size(26.0)
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            );
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(self.settings_tab.description())
-                                    .size(13.0)
-                                    .color(Color32::from_rgb(154, 161, 174)),
-                            );
-                            ui.add_space(28.0);
-                            match self.settings_tab {
-                                SettingsTab::General => self.general_settings(ui),
-                                SettingsTab::Sources => self.source_settings(ui),
-                                SettingsTab::Detection => self.detection_settings(ui),
-                                SettingsTab::Output => self.output_settings(ui),
-                                SettingsTab::Logs => self.log_settings(ui),
-                            }
-                            ui.add_space(32.0);
-                        },
-                    );
-                });
+                let available_width = ui.available_width();
+                let content_width = (available_width - 44.0).min(SETTINGS_CONTENT_WIDTH);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(available_width, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(content_width.max(1.0), ui.available_height()),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_opacity(0.62 + section_progress * 0.38);
+                                ui.add_space(28.0 + (1.0 - section_progress) * 5.0);
+                                ui.label(
+                                    RichText::new(self.settings_tab.title())
+                                        .size(26.0)
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                );
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(self.settings_tab.description())
+                                        .size(13.0)
+                                        .color(Color32::from_rgb(154, 161, 174)),
+                                );
+                                ui.add_space(28.0);
+                                match self.settings_tab {
+                                    SettingsTab::App => self.app_settings(ui),
+                                    SettingsTab::Webcam => self.webcam_settings(ui),
+                                    SettingsTab::ScreenDetection => {
+                                        self.screen_detection_settings(ui)
+                                    }
+                                    SettingsTab::VirtualCamera => self.virtual_camera_settings(ui),
+                                    SettingsTab::Diagnostics => self.diagnostics_settings(ui),
+                                }
+                                ui.add_space(32.0);
+                            },
+                        );
+                    },
+                );
             });
         if self.config != before {
             if self.config.selected_video_device_id != before.selected_video_device_id {
@@ -1013,62 +1101,81 @@ impl SwitcherApp {
         }
     }
 
-    fn general_settings(&mut self, ui: &mut egui::Ui) {
+    fn app_settings(&mut self, ui: &mut egui::Ui) {
         settings_section_heading(
             ui,
-            "Launch",
-            "Control what happens when the application starts.",
-        );
-        settings_toggle_row(
-            ui,
-            &mut self.config.start_automatically,
-            "Start automation on launch",
-            "Begin monitoring and switching as soon as the app is ready.",
+            "Startup",
+            "These choices take effect the next time Windows or the app starts.",
         );
         settings_toggle_row(
             ui,
             &mut self.config.start_with_windows,
             "Start with Windows",
-            "Launch automatically when you sign in.",
+            "Launch automatically after you sign in to Windows.",
         );
         settings_toggle_row(
             ui,
             &mut self.config.start_minimized,
             "Start minimized",
-            "Open quietly in the system tray.",
+            "Open in the system tray instead of showing the main window.",
+        );
+        settings_toggle_row(
+            ui,
+            &mut self.config.start_automatically,
+            "Start automation on launch",
+            "Begin monitoring and switching after the app is ready.",
         );
 
         settings_section_heading(
             ui,
-            "Window and notifications",
-            "Choose how the app closes and reports status.",
+            "Window behavior",
+            "Control what happens when you close or fully exit the app.",
         );
         settings_toggle_row(
             ui,
             &mut self.config.close_to_tray,
             "Close window to tray",
-            "Keep the camera pipeline running when the window closes.",
+            "Keep capture and virtual-camera output running after closing the window.",
         );
         settings_toggle_row(
             ui,
             &mut self.config.confirm_exit,
             "Confirm before exit",
-            "Ask before fully stopping the application.",
+            "Ask before stopping the app and its active capture pipeline.",
+        );
+
+        settings_section_heading(
+            ui,
+            "Notifications",
+            "Choose whether Windows should surface important app warnings.",
         );
         settings_toggle_row(
             ui,
             &mut self.config.show_notifications,
             "Show status notifications",
-            "Display Windows notifications for important warnings.",
+            "Display a Windows notification when a component needs attention.",
         );
     }
 
-    fn source_settings(&mut self, ui: &mut egui::Ui) {
+    fn webcam_settings(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.runtime.snapshot();
+        settings_device_status(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state);
+        ui.add_space(14.0);
+        self.settings_single_preview(
+            ui,
+            SettingsPreview {
+                kind: PreviewKind::Webcam,
+                frame: snapshot.previews.webcam.as_deref(),
+                label: "Selected webcam",
+                empty_message: "No webcam frame — select, refresh, or restart the camera below.",
+                actual_output: snapshot.actual_output,
+            },
+        );
+
         settings_section_heading(
             ui,
-            "Webcam input",
-            "Choose the camera used when webcam output is active.",
+            "Camera input",
+            "Choose the camera used whenever webcam output is active.",
         );
         let selected_name = snapshot
             .video_devices
@@ -1077,90 +1184,84 @@ impl SwitcherApp {
             .map(|device| device.name.clone())
             .unwrap_or_else(|| {
                 if self.config.selected_video_device_id.is_empty() {
-                    "No video input selected".into()
+                    "No camera selected".into()
                 } else {
-                    "Unavailable saved source".into()
+                    "Saved camera is unavailable".into()
                 }
             });
-        settings_control_row(
-            ui,
-            "Camera",
-            "RGB32 1280×720 at 30 fps is preferred.",
-            |ui| {
-                egui::ComboBox::from_id_salt("webcam-selector")
-                    .width(260.0)
-                    .selected_text(selected_name)
-                    .show_ui(ui, |ui| {
+        settings_control_row(ui, "Camera", "Changes apply automatically.", |ui| {
+            egui::ComboBox::from_id_salt("webcam-selector")
+                .width(260.0)
+                .selected_text(selected_name)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.config.selected_video_device_id,
+                        String::new(),
+                        "No camera selected",
+                    );
+                    for device in snapshot.video_devices.iter() {
                         ui.selectable_value(
                             &mut self.config.selected_video_device_id,
-                            String::new(),
-                            "No video input selected",
+                            device.id.clone(),
+                            &device.name,
                         );
-                        for device in snapshot.video_devices.iter() {
-                            ui.selectable_value(
-                                &mut self.config.selected_video_device_id,
-                                device.id.clone(),
-                                &device.name,
-                            );
-                        }
-                    });
-            },
-        );
-        ui.collapsing("Video source details", |ui| {
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new(if self.config.selected_video_device_id.is_empty() {
-                    "No symbolic link selected"
-                } else {
-                    &self.config.selected_video_device_id
-                })
-                .monospace()
-                .size(10.5)
-                .color(Color32::from_rgb(143, 150, 163)),
-            );
-            ui.label(
-                RichText::new("NV12 720p remains available as a compatibility fallback.")
-                    .size(11.0)
-                    .color(Color32::from_rgb(143, 150, 163)),
-            );
+                    }
+                });
         });
-        ui.add_space(12.0);
         settings_action_row(
             ui,
-            "Restart webcam",
-            "Reconnect the selected camera without restarting the app.",
-            |ui| restart_button(ui, &self.runtime, "Restart webcam", RestartTarget::Webcam),
+            "Camera connection",
+            "Refresh the device list or reconnect the selected camera.",
+            |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Refresh devices").clicked() {
+                        self.send(Command::RefreshVideoDevices);
+                    }
+                    restart_button(ui, &self.runtime, "Restart webcam", RestartTarget::Webcam);
+                });
+            },
+        );
+    }
+
+    fn screen_detection_settings(&mut self, ui: &mut egui::Ui) {
+        let snapshot = self.runtime.snapshot();
+        ui.horizontal_wrapped(|ui| {
+            settings_device_status(ui, UiIcon::Monitor, "Screen capture", snapshot.screen_state);
+            ui.separator();
+            settings_reference_status(ui, snapshot.previews.reference.is_some());
+            ui.separator();
+            settings_detection_status(ui, snapshot.detection);
+        });
+        ui.add_space(14.0);
+        let preview_layout = self.settings_screen_reference_previews(ui, &snapshot);
+        debug_assert!(preview_layout.screen.is_positive());
+        debug_assert!(preview_layout.reference.is_positive());
+        debug_assert_eq!(
+            preview_layout.side_by_side,
+            ui.available_width() >= SETTINGS_PREVIEW_COLUMNS_BREAKPOINT
         );
 
         settings_section_heading(
             ui,
             "Screen capture",
-            "Choose the display and what appears in captured frames.",
-        );
-        settings_toggle_row(
-            ui,
-            &mut self.config.cursor_visible,
-            "Include mouse cursor",
-            "Show the pointer in screen output and reference captures.",
+            "Choose the display Automatic mode watches and what its frames include.",
         );
         let selected_monitor = snapshot
             .selected_monitor
             .as_ref()
-            .map_or("No monitor selected", |monitor| monitor.label.as_str());
+            .map_or("No display selected", |monitor| monitor.label.as_str());
         settings_control_row(
             ui,
             "Display",
-            "The display currently tracked for matching and output.",
+            "Used for screen output, reference capture, and matching.",
             |ui| {
                 egui::ComboBox::from_id_salt("monitor-selector")
                     .width(260.0)
                     .selected_text(selected_monitor)
                     .show_ui(ui, |ui| {
                         for monitor in snapshot.monitors.iter() {
-                            let label = format!(
-                                "{} — {}×{} at ({}, {})",
-                                monitor.label, monitor.width, monitor.height, monitor.x, monitor.y
-                            );
+                            let label =
+                                format!("{} — {}×{}", monitor.label, monitor.width, monitor.height);
                             if ui
                                 .selectable_label(
                                     snapshot.selected_monitor.as_ref() == Some(monitor),
@@ -1174,31 +1275,22 @@ impl SwitcherApp {
                     });
             },
         );
-        settings_action_row(
+        settings_toggle_row(
             ui,
-            "Restart screen capture",
-            "Reconnect the display capture session.",
-            |ui| {
-                restart_button(
-                    ui,
-                    &self.runtime,
-                    "Restart screen capture",
-                    RestartTarget::ScreenCapture,
-                );
-            },
+            &mut self.config.cursor_visible,
+            "Include mouse cursor",
+            "Show the pointer in screen output and newly captured references.",
         );
-    }
 
-    fn detection_settings(&mut self, ui: &mut egui::Ui) {
         settings_section_heading(
             ui,
-            "Reference image",
-            "This image keeps the webcam active when Automatic mode finds a match.",
+            "Reference and matching",
+            "Automatic mode shows the webcam while the screen resembles this reference.",
         );
         settings_action_row(
             ui,
-            "Reference",
-            "Capture the current screen or import an image from disk.",
+            "Reference image",
+            "Use the current screen or import an image from disk.",
             |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Set current screen").clicked() {
@@ -1210,86 +1302,76 @@ impl SwitcherApp {
                 });
             },
         );
-        ui.label(
-            RichText::new(format!("Stored at {}", self.config.reference_image_path))
-                .monospace()
-                .size(10.5)
-                .color(Color32::from_rgb(128, 136, 150)),
-        );
-
-        settings_section_heading(
-            ui,
-            "Similarity",
-            "Set how closely the live screen must resemble the reference.",
-        );
+        let strictness = format!("{:.0}%", self.config.similarity_threshold * 100.0);
         settings_control_row(
             ui,
-            "Match threshold",
-            "Higher values require a closer visual match.",
+            "Match strictness",
+            "Higher values require the live screen to look more like the reference.",
             |ui| {
-                ui.add_sized(
-                    [260.0, 24.0],
-                    egui::Slider::new(&mut self.config.similarity_threshold, 0.50..=1.0)
-                        .fixed_decimals(3),
-                );
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [142.0, 24.0],
+                        egui::Slider::new(&mut self.config.similarity_threshold, 0.50..=1.0)
+                            .show_value(false),
+                    );
+                    ui.label(RichText::new(strictness).monospace());
+                    if ui.small_button("Reset 98%").clicked() {
+                        self.config.similarity_threshold = 0.98;
+                    }
+                });
             },
         );
-        ui.label(
-            RichText::new(
-                "Checks every 250 ms · 5 matches · 3 mismatches · full scan every 30 seconds",
-            )
-            .size(11.0)
-            .color(Color32::from_rgb(128, 136, 150)),
-        );
-        ui.add_space(12.0);
         settings_action_row(
             ui,
-            "Refresh displays",
-            "Run a full display scan immediately.",
+            "Capture recovery",
+            "Rescan displays or reconnect the selected display capture.",
             |ui| {
-                if ui.button("Rescan screens now").clicked() {
-                    self.send(Command::Rescan);
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("Rescan displays").clicked() {
+                        self.send(Command::Rescan);
+                    }
+                    restart_button(
+                        ui,
+                        &self.runtime,
+                        "Restart capture",
+                        RestartTarget::ScreenCapture,
+                    );
+                });
             },
         );
     }
 
-    fn output_settings(&mut self, ui: &mut egui::Ui) {
-        settings_section_heading(
+    fn virtual_camera_settings(&mut self, ui: &mut egui::Ui) {
+        let snapshot = self.runtime.snapshot();
+        settings_device_status(
             ui,
-            "Frame pipeline",
-            "Output remains predictable across camera applications.",
-        );
-        settings_info_row(ui, "Format", "CPU BGRA · 1280×720 · 30 fps");
-        settings_info_row(ui, "Scaling", "Aspect fit with black letterboxing");
-        settings_info_row(
-            ui,
-            "Transitions",
-            "Reversible 500 ms fade using the live screen frame",
-        );
-        settings_action_row(
-            ui,
+            UiIcon::Broadcast,
             "Virtual camera",
-            "Restart the registered camera publisher if output is unavailable.",
-            |ui| {
-                restart_button(
-                    ui,
-                    &self.runtime,
-                    "Restart virtual camera",
-                    RestartTarget::VirtualCamera,
-                );
+            snapshot.virtual_camera_state,
+        );
+        ui.add_space(14.0);
+        self.settings_single_preview(
+            ui,
+            SettingsPreview {
+                kind: PreviewKind::Output,
+                frame: snapshot.previews.final_output.as_deref(),
+                label: "Current virtual-camera output",
+                empty_message: "No output frame — restart the virtual camera below.",
+                actual_output: snapshot.actual_output,
             },
         );
 
         settings_section_heading(
             ui,
-            "Safe fallback",
-            "Shown when no current video frame is available.",
+            "Missing-source appearance",
+            "This color appears when automation is running but its selected source is unavailable.",
         );
+        fallback_color_swatch(ui, bgra_color(self.config.placeholder_color_bgra));
+        ui.add_space(10.0);
         settings_control_row(
             ui,
-            "Missing-source fallback color",
-            "Used while automation is running but its selected source is unavailable.",
+            "Fallback color",
+            "The preview above updates before the change is saved.",
             |ui| {
                 let mut color = bgra_color(self.config.placeholder_color_bgra);
                 if ui.color_edit_button_srgba(&mut color).changed() {
@@ -1300,51 +1382,262 @@ impl SwitcherApp {
         );
         settings_action_row(
             ui,
-            "Restart pipeline",
-            "Reconnect all capture and output components.",
+            "Virtual-camera recovery",
+            "Reconnect the feed exposed to camera applications.",
+            |ui| {
+                restart_button(
+                    ui,
+                    &self.runtime,
+                    "Restart virtual camera",
+                    RestartTarget::VirtualCamera,
+                );
+            },
+        );
+    }
+
+    fn diagnostics_settings(&mut self, ui: &mut egui::Ui) {
+        let snapshot = self.runtime.snapshot();
+        settings_section_heading(
+            ui,
+            "Component health",
+            "Use these states to identify which part of the pipeline needs attention.",
+        );
+        settings_device_status(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state);
+        settings_device_status(ui, UiIcon::Monitor, "Screen capture", snapshot.screen_state);
+        settings_device_status(
+            ui,
+            UiIcon::Broadcast,
+            "Virtual camera",
+            snapshot.virtual_camera_state,
+        );
+        settings_detection_status(ui, snapshot.detection);
+
+        settings_section_heading(
+            ui,
+            "Technical details",
+            "Identifiers, formats, and timing used by the active pipeline.",
+        );
+        settings_info_row(
+            ui,
+            "Webcam device ID",
+            if self.config.selected_video_device_id.is_empty() {
+                "No camera selected"
+            } else {
+                &self.config.selected_video_device_id
+            },
+        );
+        let display_details = snapshot.selected_monitor.as_ref().map_or_else(
+            || "No display selected".to_owned(),
+            |monitor| {
+                format!(
+                    "{} · {}×{} at ({}, {}) · {}",
+                    monitor.label,
+                    monitor.width,
+                    monitor.height,
+                    monitor.x,
+                    monitor.y,
+                    monitor.display_name
+                )
+            },
+        );
+        settings_info_row(ui, "Display", &display_details);
+        settings_info_row(
+            ui,
+            "Webcam format",
+            "RGB32 1280×720 at 30 fps · NV12 720p fallback",
+        );
+        settings_info_row(
+            ui,
+            "Output pipeline",
+            "CPU BGRA 1280×720 at 30 fps · aspect fit · black letterboxing",
+        );
+        settings_info_row(
+            ui,
+            "Transitions",
+            "Reversible 500 ms fade using the live screen frame",
+        );
+        settings_info_row(
+            ui,
+            "Detection timing",
+            "Every 250 ms · 5 matches · 3 mismatches · full scan every 30 seconds",
+        );
+
+        settings_section_heading(
+            ui,
+            "Storage and logs",
+            "Configuration, reference images, and logs remain on this computer.",
+        );
+        settings_info_row(
+            ui,
+            "Configuration",
+            &self.store.config_path().display().to_string(),
+        );
+        settings_info_row(ui, "Reference image", &self.config.reference_image_path);
+        settings_info_row(
+            ui,
+            "Log directory",
+            &self.log.directory().display().to_string(),
+        );
+        settings_action_row(
+            ui,
+            "Diagnostic logs",
+            "Logs are retained for 14 days.",
+            |ui| {
+                ui.horizontal(|ui| {
+                    if self.confirm_clear_logs {
+                        if ui.button("Cancel").clicked() {
+                            self.cancel_log_clear();
+                        }
+                        if ui
+                            .button(
+                                RichText::new("Clear logs").color(Color32::from_rgb(244, 133, 133)),
+                            )
+                            .clicked()
+                        {
+                            self.confirm_log_clear();
+                        }
+                    } else {
+                        if ui.button("Open folder").clicked() {
+                            self.open_log_directory();
+                        }
+                        if ui.button("Export…").clicked() {
+                            self.export_logs();
+                        }
+                        if ui.button("Clear…").clicked() {
+                            self.request_log_clear();
+                        }
+                    }
+                });
+            },
+        );
+        settings_action_row(
+            ui,
+            "Full pipeline recovery",
+            "Reconnect the webcam, screen capture, and virtual camera.",
             |ui| {
                 restart_button(
                     ui,
                     &self.runtime,
                     "Restart all components",
                     RestartTarget::All,
-                )
+                );
             },
         );
     }
 
-    fn log_settings(&mut self, ui: &mut egui::Ui) {
-        settings_section_heading(
-            ui,
-            "Diagnostic logs",
-            "Logs stay on this computer and are retained for 14 days.",
-        );
-        settings_info_row(ui, "Directory", &self.log.directory().display().to_string());
-        settings_action_row(
-            ui,
-            "Log files",
-            "Open, export, or clear the local diagnostic history.",
+    fn settings_single_preview(&mut self, ui: &mut egui::Ui, preview: SettingsPreview<'_>) -> Rect {
+        let width = ui.available_width().min(SETTINGS_PREVIEW_WIDTH);
+        let mut preview_rect = Rect::NOTHING;
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), width / WINDOW_ASPECT_RATIO + 26.0),
+            egui::Layout::top_down(egui::Align::Center),
             |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("Open folder").clicked() {
-                        self.open_log_directory();
-                    }
-                    if ui.button("Export…").clicked() {
-                        self.export_logs();
-                    }
-                    if ui.button("Clear").clicked() {
-                        self.clear_logs();
-                    }
-                });
+                preview_rect = self.settings_preview_panel(ui, preview, width);
             },
         );
+        preview_rect
+    }
 
-        settings_section_heading(
-            ui,
-            "Configuration",
-            "The active preferences file used at launch.",
-        );
-        settings_info_row(ui, "File", &self.store.config_path().display().to_string());
+    fn settings_preview_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        preview: SettingsPreview<'_>,
+        width: f32,
+    ) -> Rect {
+        let height = (width / WINDOW_ASPECT_RATIO).min(SETTINGS_PREVIEW_HEIGHT);
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, height + 26.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                let rect = self.preview(
+                    ui,
+                    preview.kind,
+                    preview.frame,
+                    [width, height],
+                    preview.actual_output,
+                    PreviewOptions::settings(preview.empty_message),
+                );
+                ui.add_space(7.0);
+                icon_text(
+                    ui,
+                    preview.kind.icon(),
+                    preview.label,
+                    Color32::from_rgb(181, 188, 200),
+                    false,
+                );
+                rect
+            },
+        )
+        .inner
+    }
+
+    fn settings_screen_reference_previews(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+    ) -> SettingsPreviewPair {
+        let available = ui.available_width();
+        let side_by_side = available >= SETTINGS_PREVIEW_COLUMNS_BREAKPOINT;
+        let mut screen = Rect::NOTHING;
+        let mut reference = Rect::NOTHING;
+        if side_by_side {
+            let gap = 16.0;
+            let width = ((available - gap) / 2.0).min(SETTINGS_PREVIEW_WIDTH);
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.horizontal_top(|ui| {
+                    screen = self.settings_preview_panel(
+                        ui,
+                        SettingsPreview {
+                            kind: PreviewKind::Screen,
+                            frame: snapshot.previews.screen.as_deref(),
+                            label: "Live screen",
+                            empty_message: "No screen frame — rescan or restart capture below.",
+                            actual_output: snapshot.actual_output,
+                        },
+                        width,
+                    );
+                    reference = self.settings_preview_panel(
+                        ui,
+                        SettingsPreview {
+                            kind: PreviewKind::Reference,
+                            frame: snapshot.previews.reference.as_deref(),
+                            label: "Reference image",
+                            empty_message: "No reference image — capture or import one below.",
+                            actual_output: snapshot.actual_output,
+                        },
+                        width,
+                    );
+                });
+            });
+        } else {
+            screen = self.settings_single_preview(
+                ui,
+                SettingsPreview {
+                    kind: PreviewKind::Screen,
+                    frame: snapshot.previews.screen.as_deref(),
+                    label: "Live screen",
+                    empty_message: "No screen frame — rescan or restart capture below.",
+                    actual_output: snapshot.actual_output,
+                },
+            );
+            ui.add_space(14.0);
+            reference = self.settings_single_preview(
+                ui,
+                SettingsPreview {
+                    kind: PreviewKind::Reference,
+                    frame: snapshot.previews.reference.as_deref(),
+                    label: "Reference image",
+                    empty_message: "No reference image — capture or import one below.",
+                    actual_output: snapshot.actual_output,
+                },
+            );
+        }
+        SettingsPreviewPair {
+            screen,
+            reference,
+            side_by_side,
+        }
     }
 
     fn exit_confirmation(&mut self, context: &egui::Context) {
@@ -1379,7 +1672,14 @@ impl SwitcherApp {
         height: f32,
         actual_output: Source,
     ) {
-        self.preview(ui, kind, frame, [width, height], actual_output);
+        self.preview(
+            ui,
+            kind,
+            frame,
+            [width, height],
+            actual_output,
+            PreviewOptions::dashboard(kind),
+        );
         ui.add_space(8.0);
         preview_caption(ui, kind);
         ui.add_space(16.0);
@@ -1392,7 +1692,8 @@ impl SwitcherApp {
         frame: Option<&Frame>,
         maximum: [f32; 2],
         actual_output: Source,
-    ) {
+        options: PreviewOptions,
+    ) -> Rect {
         let available = Vec2::new(maximum[0].min(ui.available_width()), maximum[1]);
         let contour = preview_contour(kind, actual_output);
         let active_amount = ui.ctx().animate_bool_with_time(
@@ -1407,7 +1708,7 @@ impl SwitcherApp {
             }
         };
         let contour_width = 3.0;
-        let fps_reading = kind.shows_fps().then(|| {
+        let fps_reading = options.show_fps.then(|| {
             self.fps_trackers
                 .entry(kind)
                 .or_default()
@@ -1457,7 +1758,11 @@ impl SwitcherApp {
                                 .maintain_aspect_ratio(true),
                         );
                     } else {
-                        ui.label(RichText::new("No frame").color(Color32::DARK_GRAY));
+                        ui.label(
+                            RichText::new(options.empty_message)
+                                .size(12.0)
+                                .color(Color32::from_rgb(112, 120, 134)),
+                        );
                     }
                 },
             );
@@ -1465,6 +1770,7 @@ impl SwitcherApp {
         if let Some(reading) = fps_reading {
             paint_fps_overlay(ui, preview.response.rect, reading);
         }
+        preview.response.rect
     }
 }
 
@@ -1746,6 +2052,79 @@ fn settings_info_row(ui: &mut egui::Ui, title: &str, value: &str) {
             .wrap(),
         );
     });
+}
+
+fn settings_device_status(ui: &mut egui::Ui, icon: UiIcon, label: &str, state: DeviceState) {
+    let (status_icon, color) = match state {
+        DeviceState::Initializing => (UiIcon::Loader, TRANSITION_AMBER),
+        DeviceState::Ready => (UiIcon::Check, ACTIVE_GREEN),
+        DeviceState::Unavailable => (UiIcon::Unavailable, LIVE_RED),
+        DeviceState::Failed => (UiIcon::Error, LIVE_RED),
+    };
+    settings_status_item(
+        ui,
+        icon,
+        label,
+        status_icon,
+        friendly_device_state(state),
+        color,
+    );
+}
+
+fn settings_reference_status(ui: &mut egui::Ui, available: bool) {
+    let (icon, status, color) = if available {
+        (UiIcon::Check, "Ready", ACTIVE_GREEN)
+    } else {
+        (UiIcon::Unavailable, "Missing", LIVE_RED)
+    };
+    settings_status_item(ui, UiIcon::Image, "Reference", icon, status, color);
+}
+
+fn settings_detection_status(ui: &mut egui::Ui, state: DetectionState) {
+    let (icon, status, color) = match state {
+        DetectionState::Unknown => (UiIcon::Question, "Waiting", TRANSITION_AMBER),
+        DetectionState::Matching => (UiIcon::Check, "Matching", ACTIVE_GREEN),
+        DetectionState::NotMatching => (UiIcon::Error, "Not matching", LIVE_RED),
+        DetectionState::ReferenceMissing => (UiIcon::Unavailable, "Reference missing", LIVE_RED),
+    };
+    settings_status_item(ui, UiIcon::Target, "Detection", icon, status, color);
+}
+
+fn settings_status_item(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    label: &str,
+    status_icon: UiIcon,
+    status: &str,
+    color: Color32,
+) {
+    ui.horizontal(|ui| {
+        icon_text(ui, icon, label, Color32::from_rgb(183, 190, 202), false);
+        ui.add_space(3.0);
+        icon_text(ui, status_icon, status, color, false);
+    });
+}
+
+fn fallback_color_swatch(ui: &mut egui::Ui, color: Color32) -> Rect {
+    let width = ui.available_width().min(240.0);
+    let height = width / WINDOW_ASPECT_RATIO;
+    let mut rect = Rect::NOTHING;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), height),
+        egui::Layout::top_down(egui::Align::Center),
+        |ui| {
+            let (allocated, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+            ui.painter().rect_filled(allocated, 8, color);
+            ui.painter().rect_stroke(
+                allocated,
+                8,
+                Stroke::new(2.0, Color32::from_rgb(70, 76, 88)),
+                StrokeKind::Inside,
+            );
+            rect = allocated;
+        },
+    );
+    rect
 }
 
 fn restart_button(ui: &mut egui::Ui, runtime: &RuntimeHandle, label: &str, target: RestartTarget) {
@@ -2726,6 +3105,8 @@ mod tests {
         assert!(PreviewKind::Screen.shows_fps());
         assert!(PreviewKind::Output.shows_fps());
         assert!(!PreviewKind::Reference.shows_fps());
+        assert!(!PreviewOptions::settings("missing").show_fps);
+        assert!(PreviewOptions::dashboard(PreviewKind::Webcam).show_fps);
     }
 
     #[test]
@@ -2751,6 +3132,155 @@ mod tests {
                 rect.height()
             );
         });
+    }
+
+    #[test]
+    fn settings_sidebar_navigation_is_vertical_and_non_overlapping() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            AppConfig::default(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+            true,
+        );
+        let context = egui::Context::default();
+        for (viewport, dpi_scale) in [
+            (egui::vec2(820.0, 600.0), 1.0),
+            (
+                egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
+                1.5,
+            ),
+            (egui::vec2(1280.0, 720.0), 1.5),
+        ] {
+            let mut input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
+                ..egui::RawInput::default()
+            };
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .native_pixels_per_point = Some(dpi_scale);
+            let mut sidebar_rect = Rect::NOTHING;
+            let mut navigation_rects = Vec::new();
+            let _ = context.run_ui(input, |ui| {
+                let sidebar = ui.allocate_ui_with_layout(
+                    egui::vec2(SETTINGS_SIDEBAR_WIDTH, viewport.y),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| app.settings_sidebar(ui, viewport.y),
+                );
+                sidebar_rect = sidebar.response.rect;
+                navigation_rects = sidebar.inner;
+            });
+
+            assert_eq!(navigation_rects.len(), SettingsTab::ALL.len());
+            for rect in &navigation_rects {
+                assert!(rect.is_positive(), "invalid navigation rect: {rect:?}");
+                assert!(
+                    sidebar_rect.contains_rect(*rect),
+                    "navigation rect escaped sidebar: {rect:?} outside {sidebar_rect:?}"
+                );
+                assert!((rect.height() - 40.0).abs() < 0.01);
+            }
+            for pair in navigation_rects.windows(2) {
+                assert!(
+                    pair[1].top() - pair[0].bottom() >= 3.9,
+                    "navigation rows overlap: {:?} and {:?}",
+                    pair[0],
+                    pair[1]
+                );
+                assert!(!pair[0].intersects(pair[1]));
+            }
+        }
+    }
+
+    #[test]
+    fn settings_previews_are_bounded_and_responsive() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            AppConfig::default(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+            true,
+        );
+        let snapshot = AppSnapshot::default();
+        for (width, expected_side_by_side) in [(760.0, true), (560.0, false)] {
+            let context = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 900.0))),
+                ..egui::RawInput::default()
+            };
+            let mut layout = None;
+            let output = context.run_ui(input, |ui| {
+                ui.set_width(width);
+                layout = Some(app.settings_screen_reference_previews(ui, &snapshot));
+            });
+            let layout = layout.unwrap();
+            assert_eq!(layout.side_by_side, expected_side_by_side);
+            for rect in [layout.screen, layout.reference] {
+                assert!(rect.is_positive());
+                assert!(rect.left() >= -0.01 && rect.right() <= width + 0.01);
+                assert!(rect.width() <= SETTINGS_PREVIEW_WIDTH + 0.01);
+                assert!(rect.height() <= SETTINGS_PREVIEW_HEIGHT + 0.01);
+                assert!((rect.width() / rect.height() - WINDOW_ASPECT_RATIO).abs() < 0.01);
+            }
+            assert!(!layout.screen.intersects(layout.reference));
+            if expected_side_by_side {
+                assert!((layout.screen.top() - layout.reference.top()).abs() < 0.01);
+                assert!(layout.reference.left() > layout.screen.right());
+            } else {
+                assert!(layout.reference.top() > layout.screen.bottom());
+            }
+            assert!(!output.shapes.is_empty());
+        }
+
+        let context = egui::Context::default();
+        let mut swatch = Rect::NOTHING;
+        let output = context.run_ui(egui::RawInput::default(), |ui| {
+            ui.set_width(520.0);
+            swatch = fallback_color_swatch(ui, Color32::from_rgb(12, 34, 56));
+        });
+        assert!(swatch.is_positive());
+        assert!((swatch.width() / swatch.height() - WINDOW_ASPECT_RATIO).abs() < 0.01);
+        assert!(!output.shapes.is_empty());
+    }
+
+    #[test]
+    fn clearing_logs_requires_explicit_confirmation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            AppConfig::default(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+            true,
+        );
+        app.log.write("info", "test", "KEEP", "keep this entry");
+        let before = directory.path().join("before.jsonl");
+
+        app.confirm_log_clear();
+        app.log.export_to(&before).unwrap();
+        assert!(std::fs::read_to_string(&before).unwrap().contains("KEEP"));
+
+        app.request_log_clear();
+        assert!(app.confirm_clear_logs);
+        app.cancel_log_clear();
+        assert!(!app.confirm_clear_logs);
+        let after_cancel = directory.path().join("after-cancel.jsonl");
+        app.log.export_to(&after_cancel).unwrap();
+        assert!(
+            std::fs::read_to_string(&after_cancel)
+                .unwrap()
+                .contains("KEEP")
+        );
+
+        app.request_log_clear();
+        app.confirm_log_clear();
+        assert!(!app.confirm_clear_logs);
+        let after_clear = directory.path().join("after-clear.jsonl");
+        app.log.export_to(&after_clear).unwrap();
+        let contents = std::fs::read_to_string(&after_clear).unwrap();
+        assert!(!contents.contains("KEEP"));
+        assert!(contents.contains("LOGS_CLEARED"));
     }
 
     #[test]
@@ -2846,11 +3376,11 @@ mod tests {
                 assert!(!dashboard_output.shapes.is_empty());
 
                 for tab in [
-                    SettingsTab::General,
-                    SettingsTab::Sources,
-                    SettingsTab::Detection,
-                    SettingsTab::Output,
-                    SettingsTab::Logs,
+                    SettingsTab::App,
+                    SettingsTab::Webcam,
+                    SettingsTab::ScreenDetection,
+                    SettingsTab::VirtualCamera,
+                    SettingsTab::Diagnostics,
                 ] {
                     app.settings_tab = tab;
                     app.view = AppView::Settings;
