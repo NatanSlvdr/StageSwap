@@ -23,6 +23,8 @@ const FPS_WINDOW: Duration = Duration::from_secs(1);
 const FPS_REFRESH: Duration = Duration::from_millis(250);
 const PREVIEW_REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 30);
 const HIDDEN_REFRESH: Duration = Duration::from_millis(250);
+const MAX_PREVIEW_TEXTURE_WIDTH: u32 = 480;
+const MAX_PREVIEW_TEXTURE_HEIGHT: u32 = 270;
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const SETTINGS_ENTRANCE_DURATION: Duration = Duration::from_millis(160);
 const SETTINGS_SECTION_DURATION: Duration = Duration::from_millis(120);
@@ -1287,7 +1289,7 @@ impl SwitcherApp {
         settings_control_row(
             ui,
             "Missing-source fallback color",
-            "Used by the virtual camera when the publisher stops.",
+            "Used while automation is running but its selected source is unavailable.",
             |ui| {
                 let mut color = bgra_color(self.config.placeholder_color_bgra);
                 if ui.color_edit_button_srgba(&mut color).changed() {
@@ -2483,8 +2485,10 @@ fn mix_color(from: Color32, to: Color32, amount: f32) -> Color32 {
 }
 
 fn preview_texture_size(frame: &Frame, maximum: Vec2, pixels_per_point: f32) -> [usize; 2] {
-    let maximum_width = (maximum.x * pixels_per_point).round().max(1.0) as u32;
-    let maximum_height = (maximum.y * pixels_per_point).round().max(1.0) as u32;
+    let maximum_width =
+        ((maximum.x * pixels_per_point).round().max(1.0) as u32).min(MAX_PREVIEW_TEXTURE_WIDTH);
+    let maximum_height =
+        ((maximum.y * pixels_per_point).round().max(1.0) as u32).min(MAX_PREVIEW_TEXTURE_HEIGHT);
     let scale = f64::min(
         f64::min(
             f64::from(maximum_width) / f64::from(frame.size.width),
@@ -2499,12 +2503,16 @@ fn preview_texture_size(frame: &Frame, maximum: Vec2, pixels_per_point: f32) -> 
 }
 
 fn frame_image(frame: &Frame, target: [usize; 2]) -> egui::ColorImage {
+    let source_x = (0..target[0])
+        .map(|x| x * frame.size.width as usize / target[0] * 4)
+        .collect::<Vec<_>>();
+    let source_rows = (0..target[1])
+        .map(|y| y * frame.size.height as usize / target[1] * frame.stride as usize)
+        .collect::<Vec<_>>();
     let mut pixels = Vec::with_capacity(target[0] * target[1]);
-    for y in 0..target[1] {
-        let source_y = y * frame.size.height as usize / target[1];
-        for x in 0..target[0] {
-            let source_x = x * frame.size.width as usize / target[0];
-            let offset = source_y * frame.stride as usize + source_x * 4;
+    for source_row in source_rows {
+        for &source_x in &source_x {
+            let offset = source_row + source_x;
             pixels.push(Color32::from_rgba_unmultiplied(
                 frame.pixels()[offset + 2],
                 frame.pixels()[offset + 1],
@@ -2572,6 +2580,9 @@ mod tests {
         let image = frame_image(&frame, size);
         assert_eq!(image.size, size);
         assert_eq!(image.pixels[0], Color32::from_rgb(3, 2, 1));
+
+        let high_dpi = preview_texture_size(&frame, egui::vec2(640.0, 360.0), 2.0);
+        assert_eq!(high_dpi, [480, 270]);
     }
 
     #[test]

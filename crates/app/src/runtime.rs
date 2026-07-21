@@ -212,6 +212,7 @@ impl RuntimeState {
 
     fn tick(&mut self, now: Instant) {
         if self.snapshot.run_state != RunState::Running {
+            self.show_off_output(now);
             return;
         }
         let decision = decide(
@@ -944,9 +945,6 @@ impl Platform {
     }
 
     fn publish(&self, state: &mut RuntimeState) {
-        if state.snapshot.run_state != RunState::Running {
-            return;
-        }
         let Some(frame) = state.snapshot.previews.final_output.as_deref() else {
             return;
         };
@@ -1092,6 +1090,36 @@ mod tests {
             stopped_output.pixels(),
             asc_core::off_frame_pixels().as_ref()
         );
+    }
+
+    #[test]
+    fn stopped_runtime_keeps_the_off_output_clock_running() {
+        let runtime = RuntimeHandle::spawn(AppConfig {
+            start_automatically: false,
+            ..AppConfig::default()
+        });
+        let first = runtime
+            .snapshot()
+            .previews
+            .final_output
+            .expect("initial off frame is present");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let later = loop {
+            let output = runtime
+                .snapshot()
+                .previews
+                .final_output
+                .expect("off frame remains present");
+            if output.sequence > first.sequence {
+                break output;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "stopped output clock did not advance"
+            );
+            thread::yield_now();
+        };
+        assert_eq!(later.pixels(), asc_core::off_frame_pixels().as_ref());
     }
 
     #[test]

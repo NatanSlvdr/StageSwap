@@ -111,6 +111,7 @@ checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 name = "asc-core"
 version = "0.1.6"
 dependencies = [
+ "image",
  "serde",
  "serde_json",
  "tempfile",

@@ -6,9 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-
