@@ -18,9 +18,7 @@ fn main() -> Result<()> {
             arguments.next().map(PathBuf::from),
         ),
         Some(command) => bail!("unknown xtask command: {command}"),
-        None => bail!(
-            "usage: cargo xtask <validate-pe PATH x64|arm64 | portable x64|arm64 [OUTPUT_DIR]>"
-        ),
+        None => bail!("usage: cargo xtask <validate-pe PATH x64 | portable x64 [OUTPUT_DIR]>"),
     }
 }
 
@@ -28,17 +26,9 @@ fn portable(architecture: String, output: Option<PathBuf>) -> Result<()> {
     let windows_sdk = selected_windows_sdk()?;
     let (target, artifact) = match architecture.as_str() {
         "x64" => ("x86_64-pc-windows-msvc", "windows-x64-portable.exe"),
-        "arm64" => ("aarch64-pc-windows-msvc", "windows-arm64-portable.exe"),
-        _ => bail!("architecture must be x64 or arm64"),
+        _ => bail!("architecture must be x64"),
     };
-    run(Command::new("cargo").args([
-        "build",
-        "-p",
-        "asc-media-source",
-        "--release",
-        "--target",
-        target,
-    ]))?;
+    run(&mut cargo_build("asc-media-source", target, None))?;
     let dll = PathBuf::from("target")
         .join(target)
         .join("release")
@@ -47,22 +37,14 @@ fn portable(architecture: String, output: Option<PathBuf>) -> Result<()> {
         bail!("media-source build did not produce {}", dll.display());
     }
     validate_pe_path(&dll, &architecture)?;
-    let mut build = Command::new("cargo");
-    build
-        .env(
-            "ASC_MEDIA_SOURCE_DLL",
-            dll.canonicalize()
-                .context("canonicalize media-source DLL")?,
-        )
-        .args([
-            "build",
-            "-p",
-            "automatic-screen-camera",
-            "--release",
-            "--target",
-            target,
-        ]);
-    run(&mut build)?;
+    let embedded_dll = dll
+        .canonicalize()
+        .context("canonicalize media-source DLL")?;
+    run(&mut cargo_build(
+        "automatic-screen-camera",
+        target,
+        Some(&embedded_dll),
+    ))?;
     let executable = PathBuf::from("target")
         .join(target)
         .join("release")
@@ -89,6 +71,20 @@ fn portable(architecture: String, output: Option<PathBuf>) -> Result<()> {
     fs::write(output.join(format!("{artifact}.sha256")), checksum)?;
     println!("packaged {}", destination.display());
     Ok(())
+}
+
+fn cargo_build(package: &str, target: &str, embedded_dll: Option<&Path>) -> Command {
+    let mut command = Command::new("cargo");
+    if env::var_os("ASC_USE_CARGO_XWIN").is_some() {
+        command.args(["xwin", "build"]);
+    } else {
+        command.arg("build");
+    }
+    command.args(["-p", package, "--release", "--target", target]);
+    if let Some(dll) = embedded_dll {
+        command.env("ASC_MEDIA_SOURCE_DLL", dll);
+    }
+    command
 }
 
 fn selected_windows_sdk() -> Result<String> {
@@ -168,8 +164,7 @@ fn validate_pe_path(path: &Path, architecture: &str) -> Result<()> {
     );
     let expected = match architecture {
         "x64" => 0x8664,
-        "arm64" => 0xaa64,
-        _ => bail!("architecture must be x64 or arm64"),
+        _ => bail!("architecture must be x64"),
     };
     if machine != expected {
         bail!("PE machine 0x{machine:04x} does not match {architecture}");

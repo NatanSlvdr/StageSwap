@@ -1,8 +1,7 @@
-name: Build and publish release
+name: Publish Windows x64 release
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,38 +12,25 @@ permissions:
 
 jobs:
   package:
-    name: Package Windows ${{ matrix.architecture }}
+    name: Package Windows x64
     runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        architecture: [x64, arm64]
-        include:
-          - architecture: x64
-            target: x86_64-pc-windows-msvc
-            msvc-arch: amd64
-          - architecture: arm64
-            target: aarch64-pc-windows-msvc
-            msvc-arch: amd64_arm64
     steps:
       - uses: actions/checkout@v6
       - name: Select Windows SDK 10.0.22621.0
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: ${{ matrix.msvc-arch }}
+          arch: amd64
           sdk: 10.0.22621.0
-      - name: Test x64 and package
+      - name: Test and package x64
         shell: pwsh
         run: |
-          if ('${{ matrix.architecture }}' -eq 'x64') {
-            cargo test --workspace --all-targets --target ${{ matrix.target }}
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          cargo run -p xtask -- portable ${{ matrix.architecture }} dist
+          cargo test --workspace --all-targets --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run -p xtask -- portable x64 dist
       - name: Upload unsigned portable artifact
         uses: actions/upload-artifact@v7
         with:
-          name: AutomaticScreenCamera-windows-${{ matrix.architecture }}-unsigned
+          name: AutomaticScreenCamera-windows-x64-unsigned
           path: |
             dist/*.exe
             dist/*.sha256
@@ -60,8 +46,7 @@ jobs:
       - name: Download portable artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: AutomaticScreenCamera-windows-*-unsigned
-          merge-multiple: true
+          name: AutomaticScreenCamera-windows-x64-unsigned
           path: release-assets
       - name: Publish release and checksums
         env:
@@ -69,9 +54,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           short_sha="${GITHUB_SHA::7}"
-          gh release create "main-$short_sha" \
-            release-assets/*.exe \
-            release-assets/*.sha256 \
-            --target "$GITHUB_SHA" \
-            --title "Main build $short_sha" \
-            --generate-notes
+          release_tag="build-$short_sha"
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release upload "$release_tag" \
+              release-assets/*.exe \
+              release-assets/*.sha256 \
+              --clobber
+          else
+            gh release create "$release_tag" \
+              release-assets/*.exe \
+              release-assets/*.sha256 \
+              --target "$GITHUB_SHA" \
+              --title "Automatic Screen Camera $short_sha" \
+              --generate-notes
+          fi

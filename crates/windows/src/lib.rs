@@ -1,5 +1,8 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 
+#[cfg(all(windows, not(target_arch = "x86_64")))]
+compile_error!("Automatic Screen Camera supports only x64 Windows");
+
 use asc_core::{Frame, MonitorDescriptor};
 use std::sync::Arc;
 

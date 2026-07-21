@@ -2,10 +2,7 @@
 
 Automatic Screen Camera is a local-only Windows 11 virtual camera written in Rust. Automatic mode shows the webcam while a saved visual reference matches a monitor and otherwise shows that monitor. Force Webcam and Force Screen are manual overrides; changes use a reversible 500 ms fade.
 
-Download the executable matching the computer's native architecture:
-
-- `windows-x64-portable.exe`
-- `windows-arm64-portable.exe`
+Download `windows-x64-portable.exe` for an x64 Windows 11 computer.
 
 Each EXE embeds its same-architecture Rust Media Foundation DLL. First launch requests elevation only to extract and register the DLL under `%ProgramFiles%\Automatic Screen Camera Rust Portable`; later launches run unelevated. Before deleting the EXE, exit the tray application and run:
 
@@ -13,11 +10,11 @@ Each EXE embeds its same-architecture Rust Media Foundation DLL. First launch re
 .\windows-x64-portable.exe --cleanup-portable
 ```
 
-Use the ARM64 artifact on ARM64 Windows. On every launch, the app removes any legacy portable registration and files before verifying the current embedded camera source. User configuration, references, and logs are left intact.
+On every launch, the app removes any legacy portable registration and files before verifying the current embedded camera source. User configuration, references, and logs are left intact.
 
 ## Product contract
 
-- Windows 11, native x64 or ARM64.
+- Windows 11 x64.
 - Immutable CPU BGRA frames and output fixed at 1280×720, 30 fps.
 - Media Foundation webcam input, Windows Graphics Capture screen input, synchronous bounded channels, and no Tokio.
 - Reference detection every 250 ms with 5-match/3-mismatch debounce; monitor discovery at startup, every 30 seconds, and on Rescan requires the same winner twice.
@@ -40,47 +37,56 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
-cargo clippy --workspace --all-targets --target aarch64-pc-windows-msvc -- -D warnings
 ```
 
-Every push to `main` runs the [Windows workflow](https://github.com/NatanSlvdr/WebcamSwitcher/actions/workflows/windows.yml).
-It executes the x64 Windows tests, packages native x64 and ARM64 builds, and
-automatically creates a GitHub release tagged with the commit's short SHA. The
-release contains both unsigned portable executables and their checksums; no manual
-approval or version tag is required.
+When a development build is ready to publish, manually run the
+[Windows workflow](https://github.com/NatanSlvdr/WebcamSwitcher/actions/workflows/windows.yml)
+from GitHub Actions. It executes the x64 Windows tests, packages the x64 build,
+and creates a GitHub release tagged with the commit's short SHA. Running it again
+for the same commit replaces the release assets. The release contains the unsigned
+portable executable and its checksum; pushes do not build or publish releases.
 
 GitHub-hosted runners cannot validate an interactive desktop, a physical webcam, or
-virtual-camera enumeration. For that final smoke test on an Apple-silicon Mac, create
-a Windows 11 ARM VM and run `windows-arm64-portable.exe`. Microsoft provides an
-[official Windows 11 ARM64 ISO](https://learn.microsoft.com/windows/arm/iso).
-Parallels is the most suitable VM option for this project because it exposes the
-Mac's built-in or external webcam to Windows; its
-[camera setup is documented here](https://docs.parallels.com/landing/pdfm-ug/v20-en-us/parallels-desktop-for-mac-20-users-guide/use-windows-on-your-mac/using-the-built-in-or-external-webcam).
-UTM is a free alternative for screen, tray, deployment, and virtual-camera testing,
-but it cannot pass the built-in Apple webcam through to Windows.
+virtual-camera enumeration. Run the final smoke test on a physical x64 Windows 11
+computer or an x64 Windows 11 VM. An Apple-silicon Mac cannot virtualize x64 Windows
+natively, so use an x64 Windows machine for acceptance testing.
+
+For fast incremental x64 builds on an Apple-silicon Mac, install the native
+cross-compilation tools once and run the packaging wrapper:
+
+```bash
+brew install llvm
+cargo install --locked cargo-xwin
+./scripts/package-x64-macos.sh
+```
+
+The wrapper cross-compiles with the x64 Windows MSVC target, pins the Windows SDK,
+embeds the matching DLL and Windows resources, validates the generated PE files and
+payload, and writes the executable and checksum to `dist`. Cached Rust and SDK files
+make subsequent builds faster. GitHub Actions remains the authoritative release
+builder, and the resulting executable cannot be run or hardware-tested on macOS.
 
 In the VM, use the short smoke pass below:
 
-1. Launch the ARM64 portable executable and approve first-run registration.
+1. Launch the x64 portable executable and approve first-run registration.
 2. Confirm that Windows Camera lists **Automatic Screen Camera**.
 3. Verify screen capture, Force Screen, and the placeholder output.
 4. Verify webcam capture and Force Webcam if the VM exposes a camera.
 5. Verify Automatic mode, tray/close behavior, restart actions, and cleanup.
 
-This gives strong day-to-day coverage, but it does not replace the physical x64 and
-ARM64 release smoke tests listed in [the acceptance tests](docs/ACCEPTANCE_TESTS.md).
+This gives strong day-to-day coverage, but it does not replace the physical x64
+release smoke test listed in [the acceptance tests](docs/ACCEPTANCE_TESTS.md).
 
 Install Rust 1.97.1 and Visual Studio 2022 Build Tools with Windows SDK 10.0.22621.0. The pinned toolchain file selects the Rust version. Run packaging from a Developer PowerShell where `WindowsSDKVersion` is `10.0.22621.0\\`; `xtask` rejects any missing or different SDK instead of writing misleading artifact metadata.
 
 ```powershell
-rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+rustup target add x86_64-pc-windows-msvc
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo test --workspace --all-targets --target x86_64-pc-windows-msvc
 cargo run -p xtask -- portable x64 dist
-cargo run -p xtask -- portable arm64 dist
 ```
 
-`xtask` builds and validates the DLL first, embeds it into the matching EXE, validates both PE machine types and the embedded payload, and emits each EXE with a SHA-256 sidecar. Windows builds also embed an `asInvoker`, Per-Monitor-V2 manifest and executable version metadata.
+`xtask` builds and validates the x64 DLL first, embeds it into the EXE, validates the PE machine type and embedded payload, and emits the EXE with a SHA-256 sidecar. Windows builds also embed an `asInvoker`, Per-Monitor-V2 manifest and executable version metadata.
 
 See [architecture](docs/ARCHITECTURE.md), [acceptance tests](docs/ACCEPTANCE_TESTS.md), [release gates](docs/RELEASE_GATES.md), and [rewrite scope](docs/RUST_REWRITE_SCOPE.md).

@@ -8,14 +8,6 @@
       "interactive_windows_tests_passed": false,
       "vm_acceptance_passed": false,
       "physical_smoke_passed": false
-    },
-    "arm64": {
-      "debug_tests_passed": false,
-      "release_tests_passed": false,
-      "package_validation_passed": false,
-      "interactive_windows_tests_passed": false,
-      "vm_acceptance_passed": false,
-      "physical_smoke_passed": false
     }
   },
   "reference_screenshots_100_150_captured": false,

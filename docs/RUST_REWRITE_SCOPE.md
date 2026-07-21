@@ -4,7 +4,7 @@ This scope replaced the former production application directly. The repository n
 
 ## Product contract to preserve
 
-- One self-contained Windows 11 application for x64 and ARM64. The portable executable may embed and deploy its matching camera-source DLL; users install neither OBS nor another runtime application.
+- One self-contained Windows 11 x64 application. The portable executable may embed and deploy its matching camera-source DLL; users install neither OBS nor another runtime application.
 - One webcam input. Store its identifier, open it at startup, and use a fixed internal BGRA/RGB32 1280×720 at 30 fps contract.
 - One screen capture selected by the saved visual reference. Compare a 160×90 grayscale image every 250 ms, with five matches and three mismatches. Scan displays at startup, every 30 seconds, and on explicit Rescan only to locate that reference.
 - Automatic, Force Webcam, and Force Screen modes, with the current 500 ms reversible fade and placeholder fallbacks.
@@ -30,7 +30,7 @@ This is a new installation with source CLSID `{402EB87C-123B-4765-9FF7-6E11CC7DA
 | Need | Recommended boundary | Decision |
 |---|---|---|
 | Windows APIs and COM | [`windows`](https://github.com/microsoft/windows-rs), with only required namespace features | Adopt. It is the official Rust projection and exposes `MFCreateVirtualCamera` plus COM implementation support. |
-| Screen capture | [`windows-capture`](https://github.com/NiiightmareXD/windows-capture) 2.0.0 | Adopted after warning-clean x64 and ARM64 target builds. Native 300-frame execution remains an explicit release-machine test. |
+| Screen capture | [`windows-capture`](https://github.com/NiiightmareXD/windows-capture) 2.0.0 | Adopted after a warning-clean x64 target build. Native 300-frame execution remains an explicit release-machine test. |
 | Webcam capture | Direct Media Foundation source reader through `windows` | Adopted instead of `nokhwa`, keeping symbolic-link enumeration, fixed RGB32 negotiation, callbacks, and COM ownership inside the Windows adapter. Native webcam execution remains a release-machine test. |
 | Configuration | [`serde`](https://serde.rs/) and [`serde_json`](https://docs.rs/serde_json/latest/serde_json/) | Adopt a new typed `schema_version: 1`, atomic replacement, backup recovery, and defaults-with-warning when both files are invalid. No old-schema migration. |
 | Reference import and CPU image operations | [`image`](https://docs.rs/image/latest/image/) with only PNG, JPEG, and BMP features | Adopted for decoding. The grayscale comparison, BGRA blend, and letterbox remain in the repository with unit tests. NV12 is intentionally absent until consumer evidence requires it. |
@@ -38,7 +38,7 @@ This is a new installation with source CLSID `{402EB87C-123B-4765-9FF7-6E11CC7DA
 | Tray | `tray-icon` 0.24 | Adopt with close-to-tray, notifications, and the retained lifecycle actions. |
 | Virtual-camera media source | No production-ready drop-in crate found | Implement in the Rust DLL with `windows`. Reuse the current protocol and behavior; do not invent a new driver architecture. |
 
-Do not make the screen/webcam wrappers mandatory until the two-architecture prototype passes. Falling back to direct `windows` bindings is acceptable and still produces a fully Rust codebase. It would confine unsafe/COM code to platform modules rather than spreading it through the application.
+Do not make the screen/webcam wrappers mandatory until the x64 prototype passes. Falling back to direct `windows` bindings is acceptable and still produces a fully Rust codebase. It would confine unsafe/COM code to platform modules rather than spreading it through the application.
 
 ## Why the virtual-camera DLL remains special
 
@@ -69,7 +69,6 @@ automatic-screen-camera/
 1. Run format, Clippy, unit tests, dependency audit, and Debug/Release builds.
 2. Build the Media Foundation DLL first, validate its PE architecture, embed it in the matching application, then validate the EXE and generate its SHA-256 sidecar.
 3. Execute COM/source-state, capture start/stop, stale-frame, restart, deployment, cleanup, UI, and workflow tests on Windows 11 x64.
-4. Repeat native execution gates on Windows 11 ARM64 hardware or a native ARM64 VM.
-5. Verify RGB32 1280×720 at 30 fps in Windows Camera and Zoom. Add only NV12 720p if those results prove it necessary.
+4. Verify RGB32 1280×720 at 30 fps in Windows Camera and Zoom. Add only NV12 720p if those results prove it necessary.
 
 Consumer compatibility is the irreducible release risk; cross-compilation alone does not satisfy the native Windows acceptance gates.

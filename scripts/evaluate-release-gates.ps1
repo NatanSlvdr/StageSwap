@@ -7,7 +7,7 @@ $results = [Collections.Generic.List[object]]::new()
 function Add-Gate([string]$Name, [bool]$Passed, [string]$Evidence) {
     $script:results.Add([ordered]@{ name = $Name; passed = $Passed; evidence = $Evidence })
 }
-foreach ($architecture in @('x64', 'arm64')) {
+foreach ($architecture in @('x64')) {
     $entry = $manifest.architectures.$architecture
     Add-Gate "$architecture Debug build and tests" ([bool]$entry.debug_tests_passed) "passed=$($entry.debug_tests_passed)"
     Add-Gate "$architecture Release build and tests" ([bool]$entry.release_tests_passed) "passed=$($entry.release_tests_passed)"

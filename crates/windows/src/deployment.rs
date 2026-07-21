@@ -16,10 +16,7 @@ use windows::Win32::System::Registry::{
     REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW,
     RegGetValueW, RegOpenKeyExW, RegSetValueExW,
 };
-#[cfg(target_arch = "x86_64")]
 use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_AMD64;
-#[cfg(target_arch = "aarch64")]
-use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_ARM64;
 use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetExitCodeProcess, INFINITE, IsWow64Process2, WaitForSingleObject,
@@ -241,10 +238,7 @@ fn validate_embedded_source(payload: &[u8]) -> Result<(), String> {
         .and_then(|bytes| bytes.try_into().ok())
         .map(u16::from_le_bytes)
         .ok_or_else(|| "embedded camera-source COFF header is truncated".to_string())?;
-    #[cfg(target_arch = "x86_64")]
     let expected = IMAGE_FILE_MACHINE_AMD64.0;
-    #[cfg(target_arch = "aarch64")]
-    let expected = IMAGE_FILE_MACHINE_ARM64.0;
     if machine != expected {
         return Err(format!(
             "embedded camera-source architecture 0x{machine:04x} does not match this executable"
@@ -265,10 +259,7 @@ fn validate_native_architecture() -> Result<(), String> {
         )
     }
     .map_err(|error| format!("could not validate native package architecture: {error}"))?;
-    #[cfg(target_arch = "x86_64")]
     let package_machine = IMAGE_FILE_MACHINE_AMD64;
-    #[cfg(target_arch = "aarch64")]
-    let package_machine = IMAGE_FILE_MACHINE_ARM64;
     if native_machine != package_machine || process_machine != IMAGE_FILE_MACHINE_UNKNOWN {
         return Err(
             "this portable executable must run on matching native Windows architecture".into(),
