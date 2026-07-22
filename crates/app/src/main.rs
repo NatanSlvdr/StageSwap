@@ -113,14 +113,22 @@ fn main() -> eframe::Result {
             });
             let app = SwitcherApp::new(loaded.config, loaded.warnings, store);
             #[cfg(windows)]
-            if !start_visible && app.tray.is_none() {
+            if let Some(visible) = initial_visibility_override(start_visible, app.tray.is_some()) {
+                // eframe shows the root window after its first render even when the
+                // viewport builder starts hidden. A viewport command is applied
+                // afterwards, so reassert tray-hidden startup here.
                 context
                     .egui_ctx
-                    .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    .send_viewport_cmd(egui::ViewportCommand::Visible(visible));
             }
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(any(windows, test))]
+fn initial_visibility_override(start_visible: bool, tray_available: bool) -> Option<bool> {
+    (!start_visible).then_some(!tray_available)
 }
 
 fn local_data_directory() -> PathBuf {
@@ -1125,11 +1133,11 @@ impl SwitcherApp {
 
                 let brand_icon = ui
                     .allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), 128.0),
+                        egui::vec2(ui.available_width(), 96.0),
                         egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                         |ui| {
                             let (rect, _) =
-                                ui.allocate_exact_size(egui::vec2(128.0, 128.0), Sense::hover());
+                                ui.allocate_exact_size(egui::vec2(96.0, 96.0), Sense::hover());
                             ui.painter().image(
                                 app_icon_texture,
                                 rect,
@@ -1887,7 +1895,7 @@ impl SwitcherApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(context, |ui| {
-                ui.label("The virtual camera will remain registered and show the crossed-camera off screen when the publisher stops.");
+                ui.label("The virtual camera will remain registered and show the branded off screen when the publisher stops.");
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
                         self.show_exit_confirmation = false;
@@ -2342,9 +2350,33 @@ fn settings_section_gap(ui: &mut egui::Ui) {
     ui.add_space(24.0);
 }
 
-fn settings_toggle_row(ui: &mut egui::Ui, value: &mut bool, title: &str, description: &str) {
-    let (row, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), Sense::click());
+fn settings_toggle_row(
+    ui: &mut egui::Ui,
+    value: &mut bool,
+    title: &str,
+    description: &str,
+) -> SettingsToggleLayout {
+    const TEXT_CONTROL_GAP: f32 = 12.0;
+    const CONTROL_WIDTH: f32 = 83.0;
+    const VERTICAL_PADDING: f32 = 7.0;
+    const TEXT_GAP: f32 = 3.0;
+    let width = ui.available_width();
+    let text_width = (width - CONTROL_WIDTH - TEXT_CONTROL_GAP).max(80.0);
+    let title_color = Color32::from_rgb(224, 228, 235);
+    let description_color = Color32::from_rgb(126, 134, 148);
+    let title_galley =
+        ui.painter()
+            .layout_no_wrap(title.to_owned(), FontId::proportional(12.5), title_color);
+    let description_galley = ui.painter().layout(
+        description.to_owned(),
+        FontId::proportional(10.0),
+        description_color,
+        text_width,
+    );
+    let title_height = title_galley.size().y;
+    let text_height = title_height + TEXT_GAP + description_galley.size().y;
+    let row_height = (text_height + VERTICAL_PADDING * 2.0).max(52.0);
+    let (row, response) = ui.allocate_exact_size(egui::vec2(width, row_height), Sense::click());
     if response.clicked() {
         *value = !*value;
     }
@@ -2357,21 +2389,14 @@ fn settings_toggle_row(ui: &mut egui::Ui, value: &mut bool, title: &str, descrip
         ui.ctx().request_repaint();
     }
     let geometry = settings_switch_geometry(row);
-    let title_pos = Pos2::new(row.left(), row.center().y - 7.0);
-    ui.painter().text(
-        title_pos,
-        Align2::LEFT_BOTTOM,
-        title,
-        FontId::proportional(12.5),
-        Color32::from_rgb(224, 228, 235),
-    );
-    ui.painter().text(
-        Pos2::new(row.left(), row.center().y + 4.0),
-        Align2::LEFT_TOP,
-        description,
-        FontId::proportional(10.0),
-        Color32::from_rgb(126, 134, 148),
-    );
+    let text_top = row.center().y - text_height / 2.0;
+    let title_position = Pos2::new(row.left(), text_top);
+    ui.painter()
+        .galley(title_position, title_galley, title_color);
+    let description_position = Pos2::new(row.left(), text_top + title_height + TEXT_GAP);
+    let description_rect = Rect::from_min_size(description_position, description_galley.size());
+    ui.painter()
+        .galley(description_position, description_galley, description_color);
     let (off, on) = settings_switch_colors();
     ui.painter().rect_filled(
         geometry.track,
@@ -2409,6 +2434,21 @@ fn settings_toggle_row(ui: &mut egui::Ui, value: &mut bool, title: &str, descrip
     });
     response.on_hover_cursor(egui::CursorIcon::PointingHand);
     ui.separator();
+    SettingsToggleLayout {
+        row,
+        description: description_rect,
+        state: geometry.state,
+        track: geometry.track,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+struct SettingsToggleLayout {
+    row: Rect,
+    description: Rect,
+    state: Rect,
+    track: Rect,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3595,6 +3635,13 @@ mod tests {
     }
 
     #[test]
+    fn minimized_start_is_reasserted_after_eframe_initialization() {
+        assert_eq!(initial_visibility_override(true, true), None);
+        assert_eq!(initial_visibility_override(false, true), Some(false));
+        assert_eq!(initial_visibility_override(false, false), Some(true));
+    }
+
+    #[test]
     fn visible_ui_and_hidden_logic_use_distinct_repaint_cadences() {
         assert_eq!(repaint_interval(true), VISIBLE_REFRESH);
         assert_eq!(repaint_interval(false), HIDDEN_REFRESH);
@@ -3908,8 +3955,8 @@ mod tests {
                 assert!(rect.is_positive());
                 assert!(sidebar_rect.contains_rect(rect));
             }
-            assert!((sidebar_layout.brand_icon.width() - 128.0).abs() < 0.01);
-            assert!((sidebar_layout.brand_icon.height() - 128.0).abs() < 0.01);
+            assert!((sidebar_layout.brand_icon.width() - 96.0).abs() < 0.01);
+            assert!((sidebar_layout.brand_icon.height() - 96.0).abs() < 0.01);
             assert!(sidebar_layout.brand_icon.bottom() < sidebar_layout.brand_title.top());
             assert!(sidebar_layout.brand_title.bottom() < sidebar_layout.brand_separator.top());
             assert!(sidebar_layout.brand_separator.bottom() < sidebar_layout.back.top());
@@ -3987,6 +4034,33 @@ mod tests {
             settings_switch_colors(),
             (SETTINGS_SWITCH_OFF, SETTINGS_BLUE)
         );
+    }
+
+    #[test]
+    fn long_settings_toggle_descriptions_wrap_clear_of_the_switch() {
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(300.0, 160.0))),
+            ..egui::RawInput::default()
+        };
+        let mut layout = None;
+        let _ = context.run_ui(input, |ui| {
+            ui.set_width(300.0);
+            let mut enabled = true;
+            layout = Some(settings_toggle_row(
+                ui,
+                &mut enabled,
+                "Automatic display rescans",
+                "Find the reference display at startup, after reference changes, and every 30 seconds. Manual Rescan remains available.",
+            ));
+        });
+        let layout = layout.unwrap();
+        assert!(layout.row.height() > 52.0);
+        assert!(layout.description.height() > 12.0);
+        assert!(layout.row.contains_rect(layout.description));
+        assert!(layout.description.right() < layout.state.left());
+        assert!(!layout.description.intersects(layout.state));
+        assert!(!layout.description.intersects(layout.track));
     }
 
     #[test]

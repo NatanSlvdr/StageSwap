@@ -7,7 +7,7 @@ This scope replaced the former production application directly. The repository n
 - One self-contained Windows 11 x64 application. The executable may embed and deploy its matching camera-source DLL; users install neither OBS nor another runtime application.
 - One webcam input. Store its identifier, open it at startup, and use a fixed internal BGRA/RGB32 1280×720 at 30 fps contract.
 - One screen capture restored by its saved friendly label, with secondary-monitor fallback and optional reference-based replacement. Compare a 160×90 grayscale image every 250 ms, with five matches and three mismatches. Automatic display rescans run at startup, every 30 seconds, and after reference changes by default, can be disabled, and never disable explicit Rescan.
-- Automatic, Force Webcam, and Force Screen modes, with the current 500 ms reversible fade, configurable missing-source fallback, and fixed crossed-camera off screen.
+- Automatic, Force Webcam, and Force Screen modes, with the current 500 ms reversible fade, configurable missing-source fallback, and fixed branded off screen.
 - One per-user frame transport from the application to a Media Foundation custom source DLL.
 - Virtual-camera output prefers RGB32 1280×720 at 30 fps and retains selectable NV12 720p for Windows Camera and Zoom compatibility; do not restore 1080p without evidence.
 - Local configuration, reference image, previews, tray/main UI, startup preference, and bounded diagnostic logs.

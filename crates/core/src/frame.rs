@@ -1,4 +1,5 @@
 use crate::Size;
+use image::imageops::FilterType;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -34,20 +35,25 @@ pub fn off_frame_pixels() -> Arc<[u8]> {
 }
 
 fn render_off_frame() -> Arc<[u8]> {
-    let image = image::load_from_memory(include_bytes!("../assets/offline-camera.png"))
-        .expect("embedded offline-camera asset is a valid image")
+    const ICON_SIZE: u32 = 256;
+    let icon = image::load_from_memory(include_bytes!("../../app/assets/app-icon.png"))
+        .expect("embedded StageSwap app icon is a valid image")
+        .resize_exact(ICON_SIZE, ICON_SIZE, FilterType::Lanczos3)
         .to_rgba8();
-    assert_eq!(
-        image.dimensions(),
-        (PIPELINE_SIZE.width, PIPELINE_SIZE.height),
-        "offline-camera asset must match the fixed pipeline"
-    );
-    let mut image = image.into_raw();
-    for pixel in image.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-        pixel[3] = 0xff;
+    let mut frame = vec![0; PIPELINE_SIZE.width as usize * PIPELINE_SIZE.height as usize * 4];
+    for alpha in frame.iter_mut().skip(3).step_by(4) {
+        *alpha = 0xff;
     }
-    image.into()
+    let x_offset = (PIPELINE_SIZE.width - ICON_SIZE) / 2;
+    let y_offset = (PIPELINE_SIZE.height - ICON_SIZE) / 2;
+    for (x, y, pixel) in icon.enumerate_pixels() {
+        let destination = (((y + y_offset) * PIPELINE_SIZE.width + x + x_offset) * 4) as usize;
+        let alpha = u16::from(pixel[3]);
+        frame[destination] = ((u16::from(pixel[2]) * alpha + 127) / 255) as u8;
+        frame[destination + 1] = ((u16::from(pixel[1]) * alpha + 127) / 255) as u8;
+        frame[destination + 2] = ((u16::from(pixel[0]) * alpha + 127) / 255) as u8;
+    }
+    frame.into()
 }
 
 #[derive(Clone, Debug)]
@@ -407,7 +413,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn off_frame_is_deterministic_black_with_a_filled_red_camera() {
+    fn off_frame_is_deterministic_black_with_a_centered_stageswap_icon() {
         let now = Instant::now();
         let first = off_frame(FrameMetadata {
             sequence: 7,
@@ -431,14 +437,26 @@ mod tests {
             assert!(corner[..3].iter().all(|channel| *channel <= 8));
             assert_eq!(corner[3], 0xff);
         }
-        let red_pixels = first
-            .pixels()
-            .chunks_exact(4)
-            .filter(|pixel| pixel[2] > 150 && pixel[2] > pixel[1].saturating_add(50))
-            .count();
+        const ICON_LEFT: usize = (1280 - 256) / 2;
+        const ICON_TOP: usize = (720 - 256) / 2;
+        let mut branded_pixels = 0;
+        for y in 0..720 {
+            for x in 0..1280 {
+                let pixel = pixel(x, y);
+                let inside_icon = (ICON_LEFT..ICON_LEFT + 256).contains(&x)
+                    && (ICON_TOP..ICON_TOP + 256).contains(&y);
+                if pixel[..3].iter().any(|channel| *channel > 8) {
+                    assert!(
+                        inside_icon,
+                        "branded pixel escaped the centered icon at ({x}, {y})"
+                    );
+                    branded_pixels += 1;
+                }
+            }
+        }
         assert!(
-            red_pixels > 40_000,
-            "filled icon has only {red_pixels} red pixels"
+            branded_pixels > 30_000,
+            "centered app icon has only {branded_pixels} visible pixels"
         );
         assert!(first.pixels().chunks_exact(4).all(|pixel| pixel[3] == 0xff));
     }
