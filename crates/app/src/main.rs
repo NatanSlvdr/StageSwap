@@ -36,6 +36,7 @@ const SETTINGS_PREVIEW_WIDTH: f32 = 480.0;
 const SETTINGS_PREVIEW_HEIGHT: f32 = 270.0;
 const SETTINGS_PREVIEW_COLUMNS_BREAKPOINT: f32 = 700.0;
 
+mod app_icon;
 mod local_log;
 mod portable_payload;
 #[cfg(windows)]
@@ -73,12 +74,18 @@ fn main() -> eframe::Result {
     let store = ConfigStore::new(local_data_directory());
     let loaded = store.load();
     let start_visible = !loaded.config.start_minimized;
+    let app_icon = app_icon::load(None).expect("embedded app icon should decode");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Automatic Screen Camera")
             .with_inner_size([1280.0, 720.0])
             .with_min_inner_size([MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT])
-            .with_visible(start_visible),
+            .with_visible(start_visible)
+            .with_icon(egui::IconData {
+                rgba: app_icon.rgba,
+                width: app_icon.width,
+                height: app_icon.height,
+            }),
         ..eframe::NativeOptions::default()
     };
     eframe::run_native(
@@ -488,6 +495,7 @@ struct SwitcherApp {
     awaiting_video_device_id: Option<String>,
     settings_opened_at: Option<Instant>,
     settings_section_changed_at: Option<Instant>,
+    app_icon_texture: Option<TextureHandle>,
     textures: HashMap<&'static str, PreviewTexture>,
     preview_converters: HashMap<PreviewKind, PreviewConverter>,
     log: LocalLog,
@@ -522,6 +530,7 @@ impl SwitcherApp {
             awaiting_video_device_id: None,
             settings_opened_at: None,
             settings_section_changed_at: None,
+            app_icon_texture: None,
             textures: HashMap::new(),
             preview_converters: HashMap::new(),
             log,
@@ -541,8 +550,12 @@ impl SwitcherApp {
     }
 
     fn set_mode(&mut self, mode: OutputMode) {
+        if self.config.output_mode == mode {
+            return;
+        }
         self.config.output_mode = mode;
         self.send(Command::SetMode(mode));
+        self.queue_settings_save();
     }
 
     fn queue_settings_save(&mut self) {
@@ -711,6 +724,7 @@ impl SwitcherApp {
     ) {
         const FOOTER_HEIGHT: f32 = 40.0;
         const FOOTER_GAP: f32 = 10.0;
+        let app_icon_texture = self.app_icon_texture(ui.ctx());
         ui.allocate_ui_with_layout(
             egui::vec2(width, height),
             egui::Layout::bottom_up(egui::Align::Center),
@@ -719,13 +733,7 @@ impl SwitcherApp {
                     egui::vec2(width, FOOTER_HEIGHT),
                     egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                     |ui| {
-                        icon_text(
-                            ui,
-                            UiIcon::Camera,
-                            "Automatic Screen Camera",
-                            Color32::from_rgb(205, 211, 222),
-                            true,
-                        );
+                        app_title(ui, app_icon_texture);
                     },
                 );
                 ui.add_space(FOOTER_GAP);
@@ -739,6 +747,19 @@ impl SwitcherApp {
                 );
             },
         );
+    }
+
+    fn app_icon_texture(&mut self, context: &egui::Context) -> egui::TextureId {
+        self.app_icon_texture
+            .get_or_insert_with(|| {
+                let icon = app_icon::load(Some(64)).expect("embedded app icon should decode");
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [icon.width as usize, icon.height as usize],
+                    &icon.rgba,
+                );
+                context.load_texture("app-icon", image, TextureOptions::LINEAR)
+            })
+            .id()
     }
 
     fn preview_grid(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot, width: f32, height: f32) {
@@ -1947,17 +1968,36 @@ impl eframe::App for SwitcherApp {
             self.last_notified_warning = None;
         }
         #[cfg(windows)]
+        if let Some(tray) = self.tray.as_ref() {
+            tray.sync(&snapshot);
+        }
+        #[cfg(windows)]
         if let Some(action) = self.tray.as_ref().and_then(tray::Tray::poll) {
             match action {
                 tray::TrayAction::Show => {
                     context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     context.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
-                tray::TrayAction::Command(command) => self.send(command),
+                tray::TrayAction::OpenSettings => {
+                    self.open_settings();
+                    context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                tray::TrayAction::ToggleAutomation => {
+                    if matches!(snapshot.run_state, RunState::Running | RunState::Starting) {
+                        self.send(Command::Stop);
+                    } else {
+                        self.send(Command::Start);
+                    }
+                }
+                tray::TrayAction::SetMode(mode) => self.set_mode(mode),
                 tray::TrayAction::Exit => {
                     if self.config.confirm_exit {
                         self.show_exit_confirmation = true;
                         context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                         context.send_viewport_cmd(egui::ViewportCommand::Focus);
                     } else {
                         self.exit_requested = true;
@@ -2722,6 +2762,40 @@ fn paint_fps_overlay(ui: &egui::Ui, preview_rect: Rect, fps: Option<u32>) {
         overlay.min + egui::vec2(5.0, 3.0),
         galley,
         Color32::from_rgb(232, 235, 240),
+    );
+}
+
+fn app_title(ui: &mut egui::Ui, texture: egui::TextureId) {
+    const ICON_SIZE: f32 = 22.0;
+    const GAP: f32 = 7.0;
+    let color = Color32::from_rgb(205, 211, 222);
+    let galley = ui.painter().layout_no_wrap(
+        "Automatic Screen Camera".to_owned(),
+        FontId::proportional(14.0),
+        color,
+    );
+    let size = egui::vec2(
+        ICON_SIZE + GAP + galley.size().x,
+        galley.size().y.max(ICON_SIZE),
+    );
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.center().y - ICON_SIZE / 2.0),
+        egui::vec2(ICON_SIZE, ICON_SIZE),
+    );
+    ui.painter().image(
+        texture,
+        icon_rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    ui.painter().galley(
+        Pos2::new(
+            icon_rect.right() + GAP,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
     );
 }
 

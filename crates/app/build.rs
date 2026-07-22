@@ -5,6 +5,7 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-env-changed=ASC_MEDIA_SOURCE_DLL");
     println!("cargo:rerun-if-env-changed=ASC_CROSS_COMPILE_RESOURCES");
+    println!("cargo:rerun-if-changed=assets/app-icon.ico");
     let destination = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set"))
         .join("AutomaticScreenCameraSource.dll");
     if let Some(source) = env::var_os("ASC_MEDIA_SOURCE_DLL") {
@@ -41,6 +42,7 @@ fn main() {
 </assembly>"#;
         winresource::WindowsResource::new()
             .set_manifest(manifest)
+            .set_icon("assets/app-icon.ico")
             .compile()
             .expect("could not compile Windows manifest and version resources");
     }
