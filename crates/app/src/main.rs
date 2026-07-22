@@ -793,31 +793,38 @@ impl SwitcherApp {
         snapshot: &AppSnapshot,
         width: f32,
         height: f32,
-    ) {
+    ) -> Rect {
         const FOOTER_HEIGHT: f32 = 40.0;
         const FOOTER_GAP: f32 = 10.0;
-        let body_height = (height - FOOTER_HEIGHT - FOOTER_GAP).max(80.0);
         ui.allocate_ui_with_layout(
-            egui::vec2(width, body_height),
-            egui::Layout::top_down(egui::Align::Min),
+            egui::vec2(width, height),
+            egui::Layout::bottom_up(egui::Align::Center),
             |ui| {
-                ui.set_min_size(egui::vec2(width, body_height));
-                self.controls_body(ui, snapshot);
+                let settings = icon_button(
+                    ui,
+                    UiIcon::Settings,
+                    "Settings",
+                    egui::vec2(width, FOOTER_HEIGHT),
+                    false,
+                    true,
+                );
+                if settings.clicked() {
+                    self.open_settings();
+                }
+                ui.add_space(FOOTER_GAP);
+                let body_height = ui.available_height().max(80.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(width, body_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_size(egui::vec2(width, body_height));
+                        self.controls_body(ui, snapshot);
+                    },
+                );
+                settings.rect
             },
-        );
-        ui.add_space(FOOTER_GAP);
-        if icon_button(
-            ui,
-            UiIcon::Settings,
-            "Settings",
-            egui::vec2(width, FOOTER_HEIGHT),
-            false,
-            true,
         )
-        .clicked()
-        {
-            self.open_settings();
-        }
+        .inner
     }
 
     fn controls_body(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
@@ -1314,6 +1321,13 @@ impl SwitcherApp {
                         .size(10.5)
                         .color(Color32::from_rgb(126, 134, 148)),
                 );
+                ui.add_space(8.0);
+                settings_toggle_row(
+                    ui,
+                    &mut app.config.crop_webcam_to_16_9,
+                    "Crop webcam to 16:9",
+                    "Zoom and center the camera image so it fills the 16:9 frame.",
+                );
             },
         );
     }
@@ -1452,10 +1466,10 @@ impl SwitcherApp {
                     ui.available_width(),
                     ui.spacing().item_spacing.x,
                 );
-                ui.add_sized(
-                    [geometry.slider_width, 24.0],
-                    egui::Slider::new(&mut app.config.similarity_threshold, 0.50..=1.0)
-                        .show_value(false),
+                match_strictness_slider(
+                    ui,
+                    &mut app.config.similarity_threshold,
+                    geometry.slider_width,
                 );
             },
         );
@@ -2213,6 +2227,14 @@ fn reference_control_geometry(available: f32, gap: f32) -> ReferenceControlGeome
     }
 }
 
+fn match_strictness_slider(ui: &mut egui::Ui, value: &mut f64, width: f32) -> egui::Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().slider_width = width.max(1.0);
+        ui.add(egui::Slider::new(value, 0.50..=1.0).show_value(false))
+    })
+    .inner
+}
+
 fn selector_utility_geometry(available: f32, gap: f32) -> SelectorUtilityGeometry {
     let action_width = 32.0;
     SelectorUtilityGeometry {
@@ -2327,13 +2349,17 @@ fn settings_reference_status(ui: &mut egui::Ui, available: bool) {
 }
 
 fn settings_detection_status(ui: &mut egui::Ui, state: DetectionState) {
-    let (icon, status, color) = match state {
+    let (icon, status, color) = settings_detection_style(state);
+    settings_status_item(ui, UiIcon::Target, "Detection", icon, status, color);
+}
+
+fn settings_detection_style(state: DetectionState) -> (UiIcon, &'static str, Color32) {
+    match state {
         DetectionState::Unknown => (UiIcon::Question, "Waiting", TRANSITION_AMBER),
         DetectionState::Matching => (UiIcon::Check, "Matching", ACTIVE_GREEN),
-        DetectionState::NotMatching => (UiIcon::Error, "Not matching", LIVE_RED),
+        DetectionState::NotMatching => (UiIcon::Error, "Not matching", TRANSITION_AMBER),
         DetectionState::ReferenceMissing => (UiIcon::Unavailable, "Reference missing", LIVE_RED),
-    };
-    settings_status_item(ui, UiIcon::Target, "Detection", icon, status, color);
+    }
 }
 
 fn settings_status_item(
@@ -2389,7 +2415,7 @@ struct IndicatorChoice {
     span: u8,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IndicatorTone {
     Green,
     Amber,
@@ -2402,32 +2428,40 @@ fn detection_state_group(ui: &mut egui::Ui, current: DetectionState) {
             icon: UiIcon::Question,
             label: "Unknown",
             current: current == DetectionState::Unknown,
-            tone: IndicatorTone::Amber,
+            tone: detection_indicator_tone(DetectionState::Unknown),
             span: 1,
         },
         IndicatorChoice {
             icon: UiIcon::Check,
             label: "Matching",
             current: current == DetectionState::Matching,
-            tone: IndicatorTone::Green,
+            tone: detection_indicator_tone(DetectionState::Matching),
             span: 1,
         },
         IndicatorChoice {
             icon: UiIcon::Error,
             label: "Not matching",
             current: current == DetectionState::NotMatching,
-            tone: IndicatorTone::Red,
+            tone: detection_indicator_tone(DetectionState::NotMatching),
             span: 1,
         },
         IndicatorChoice {
             icon: UiIcon::Unavailable,
             label: "Reference missing",
             current: current == DetectionState::ReferenceMissing,
-            tone: IndicatorTone::Red,
+            tone: detection_indicator_tone(DetectionState::ReferenceMissing),
             span: 1,
         },
     ];
     indicator_group(ui, UiIcon::Target, "Detection", &choices, None);
+}
+
+fn detection_indicator_tone(state: DetectionState) -> IndicatorTone {
+    match state {
+        DetectionState::Unknown | DetectionState::NotMatching => IndicatorTone::Amber,
+        DetectionState::Matching => IndicatorTone::Green,
+        DetectionState::ReferenceMissing => IndicatorTone::Red,
+    }
 }
 
 fn screen_mix_group(ui: &mut egui::Ui, screen_mix: f64) {
@@ -2813,6 +2847,31 @@ fn icon_button_impl(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+fn draw_arc_arrow(
+    painter: &egui::Painter,
+    center: Pos2,
+    radius: f32,
+    start_angle: f32,
+    end_angle: f32,
+    stroke: Stroke,
+) {
+    const SEGMENTS: usize = 12;
+    let points = (0..=SEGMENTS)
+        .map(|step| {
+            let angle = egui::lerp(start_angle..=end_angle, step as f32 / SEGMENTS as f32);
+            center + egui::vec2(angle.cos(), angle.sin()) * radius
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, stroke));
+
+    let tip = center + egui::vec2(end_angle.cos(), end_angle.sin()) * radius;
+    let direction = egui::vec2(-end_angle.sin(), end_angle.cos());
+    let back = -direction * radius * 0.48;
+    let wing = egui::vec2(-direction.y, direction.x) * radius * 0.24;
+    painter.line_segment([tip, tip + back + wing], stroke);
+    painter.line_segment([tip, tip + back - wing], stroke);
+}
+
 fn draw_icon(painter: &egui::Painter, rect: Rect, icon: UiIcon, color: Color32, width: f32) {
     let stroke = Stroke::new(width, color);
     let center = rect.center();
@@ -2999,21 +3058,21 @@ fn draw_icon(painter: &egui::Painter, rect: Rect, icon: UiIcon, color: Color32, 
             painter.rect_filled(rect.shrink(rect.width() * 0.22), 1, color);
         }
         UiIcon::Refresh => {
-            painter.circle_stroke(center, rect.width() * 0.35, stroke);
-            painter.line_segment(
-                [Pos2::new(x(0.72), y(0.12)), Pos2::new(x(0.9), y(0.14))],
+            let radius = rect.width() * 0.34;
+            draw_arc_arrow(
+                painter,
+                center,
+                radius,
+                195.0_f32.to_radians(),
+                345.0_f32.to_radians(),
                 stroke,
             );
-            painter.line_segment(
-                [Pos2::new(x(0.9), y(0.14)), Pos2::new(x(0.84), y(0.32))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.28), y(0.88)), Pos2::new(x(0.1), y(0.86))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.1), y(0.86)), Pos2::new(x(0.16), y(0.68))],
+            draw_arc_arrow(
+                painter,
+                center,
+                radius,
+                15.0_f32.to_radians(),
+                165.0_f32.to_radians(),
                 stroke,
             );
         }
@@ -3478,6 +3537,26 @@ mod tests {
     }
 
     #[test]
+    fn not_matching_is_warning_amber_but_missing_reference_is_error_red() {
+        assert_eq!(
+            detection_indicator_tone(DetectionState::NotMatching),
+            IndicatorTone::Amber
+        );
+        assert_eq!(
+            settings_detection_style(DetectionState::NotMatching).2,
+            TRANSITION_AMBER
+        );
+        assert_eq!(
+            detection_indicator_tone(DetectionState::ReferenceMissing),
+            IndicatorTone::Red
+        );
+        assert_eq!(
+            settings_detection_style(DetectionState::ReferenceMissing).2,
+            LIVE_RED
+        );
+    }
+
+    #[test]
     fn fps_overlays_use_runtime_metrics_for_all_live_pipelines() {
         assert!(PreviewKind::Webcam.shows_fps());
         assert!(PreviewKind::Screen.shows_fps());
@@ -3616,6 +3695,26 @@ mod tests {
     }
 
     #[test]
+    fn match_strictness_slider_uses_the_full_control_width() {
+        for width in [220.0, 360.0, 520.0] {
+            let context = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 80.0))),
+                ..egui::RawInput::default()
+            };
+            let mut slider_rect = Rect::NOTHING;
+            let _ = context.run_ui(input, |ui| {
+                ui.set_width(width);
+                let mut value = 0.98;
+                slider_rect = match_strictness_slider(ui, &mut value, width).rect;
+                assert_eq!(value, 0.98);
+            });
+            assert!((slider_rect.width() - width).abs() < 0.01);
+        }
+        assert_eq!(AppConfig::default().similarity_threshold, 0.98);
+    }
+
+    #[test]
     fn settings_category_divider_is_full_width_and_between_sections() {
         let context = egui::Context::default();
         let mut first = Rect::NOTHING;
@@ -3665,6 +3764,41 @@ mod tests {
                 .len()
         });
         assert!(counts.into_iter().all(|count| count > 0));
+        assert_eq!(
+            counts[2], 6,
+            "refresh should draw two arcs and four arrowhead lines"
+        );
+    }
+
+    #[test]
+    fn settings_footer_stays_inside_the_dashboard_at_supported_dpi() {
+        for dpi_scale in [1.0, 1.5] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut app = SwitcherApp::new(
+                AppConfig::default(),
+                Vec::new(),
+                ConfigStore::new(directory.path()),
+            );
+            let context = egui::Context::default();
+            let viewport = egui::vec2(320.0, MIN_WINDOW_HEIGHT);
+            let mut input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
+                ..egui::RawInput::default()
+            };
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .native_pixels_per_point = Some(dpi_scale);
+            let snapshot = app.runtime.snapshot();
+            let mut footer = Rect::NOTHING;
+            let _ = context.run_ui(input, |ui| {
+                footer = app.controls_workspace(ui, &snapshot, viewport.x, viewport.y);
+            });
+            assert!(footer.is_positive());
+            assert!(footer.left() >= 0.0 && footer.right() <= viewport.x + 0.01);
+            assert!(footer.top() >= 0.0 && footer.bottom() <= viewport.y + 0.01);
+        }
     }
 
     #[test]

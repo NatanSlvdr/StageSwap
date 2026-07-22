@@ -11,6 +11,7 @@ const SCHEMA_VERSION: u32 = 1;
 pub struct AppConfig {
     pub schema_version: u32,
     pub selected_video_device_id: String,
+    pub crop_webcam_to_16_9: bool,
     pub reference_image_path: String,
     pub similarity_threshold: f64,
     pub cursor_visible: bool,
@@ -30,6 +31,7 @@ impl Default for AppConfig {
         Self {
             schema_version: SCHEMA_VERSION,
             selected_video_device_id: String::new(),
+            crop_webcam_to_16_9: true,
             reference_image_path: String::new(),
             similarity_threshold: 0.98,
             cursor_visible: false,
@@ -194,6 +196,7 @@ mod tests {
     fn schema_one_round_trips() {
         let config = AppConfig {
             selected_video_device_id: "camera\\id\"one".into(),
+            crop_webcam_to_16_9: false,
             output_mode: OutputMode::ForceScreen,
             ..AppConfig::default()
         };
@@ -202,6 +205,12 @@ mod tests {
         assert_eq!(ConfigStore::parse("{}").unwrap(), AppConfig::default());
         let invalid_schema = serde_json::json!({ "schema_version": 2 }).to_string();
         assert!(ConfigStore::parse(&invalid_schema).is_err());
+    }
+
+    #[test]
+    fn legacy_schema_defaults_webcam_crop_to_enabled() {
+        let config = ConfigStore::parse(r#"{"schema_version":1}"#).unwrap();
+        assert!(config.crop_webcam_to_16_9);
     }
 
     #[test]
