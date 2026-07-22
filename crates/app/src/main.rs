@@ -426,9 +426,16 @@ struct SettingsSidebarLayout {
 #[allow(dead_code)]
 struct DashboardControlsLayout {
     sections: [Rect; 3],
+    section_headings: [Rect; 3],
     health_indicators: [Rect; 5],
     section_dividers: [Rect; 2],
     other_actions: [Rect; 2],
+}
+
+#[derive(Debug)]
+struct ControlsWorkspaceLayout {
+    body: DashboardControlsLayout,
+    footer: Rect,
 }
 
 #[derive(Clone, Copy)]
@@ -624,12 +631,30 @@ impl SwitcherApp {
         }
     }
 
+    fn sync_selected_monitor_preference(&mut self, snapshot: &AppSnapshot) {
+        let Some(monitor) = snapshot.selected_monitor.as_ref() else {
+            return;
+        };
+        if self.config.selected_monitor_label == monitor.label {
+            return;
+        }
+        self.config
+            .selected_monitor_label
+            .clone_from(&monitor.label);
+        if let Err(error) = save_config(&self.store, &self.config) {
+            self.load_warnings
+                .push(format!("Could not save monitor selection: {error}"));
+        }
+    }
+
     fn open_settings(&mut self) {
         self.view = AppView::Settings;
         self.settings_opened_at = Some(Instant::now());
         self.settings_section_changed_at = Some(Instant::now());
         self.send(Command::RefreshVideoDevices);
-        self.send(Command::Rescan);
+        if self.config.automatic_monitor_rescans {
+            self.send(Command::Rescan);
+        }
     }
 
     fn close_settings(&mut self) {
@@ -746,11 +771,13 @@ impl SwitcherApp {
 
             ui.separator();
             let controls_width = ui.available_width();
-            ui.allocate_ui_with_layout(
+            let controls = ui.allocate_ui_with_layout(
                 egui::vec2(controls_width, workspace_height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| self.controls_workspace(ui, &snapshot, controls_width, workspace_height),
             );
+            debug_assert!(controls.inner.footer.is_positive());
+            debug_assert!(controls.inner.body.sections.iter().all(Rect::is_positive));
         });
     }
 
@@ -853,7 +880,7 @@ impl SwitcherApp {
         snapshot: &AppSnapshot,
         width: f32,
         height: f32,
-    ) -> Rect {
+    ) -> ControlsWorkspaceLayout {
         const FOOTER_HEIGHT: f32 = 40.0;
         const FOOTER_GAP: f32 = 10.0;
         ui.allocate_ui_with_layout(
@@ -873,15 +900,18 @@ impl SwitcherApp {
                 }
                 ui.add_space(FOOTER_GAP);
                 let body_height = ui.available_height().max(80.0);
-                ui.allocate_ui_with_layout(
+                let body = ui.allocate_ui_with_layout(
                     egui::vec2(width, body_height),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.set_min_size(egui::vec2(width, body_height));
-                        self.controls_body(ui, snapshot);
+                        self.controls_body(ui, snapshot)
                     },
                 );
-                settings.rect
+                ControlsWorkspaceLayout {
+                    body: body.inner,
+                    footer: settings.rect,
+                }
             },
         )
         .inner
@@ -892,7 +922,7 @@ impl SwitcherApp {
         ui: &mut egui::Ui,
         snapshot: &AppSnapshot,
     ) -> DashboardControlsLayout {
-        let health_heading = controls_section_heading(ui, "Components health");
+        let health_heading = controls_section_heading(ui, UiIcon::Check, "Components health");
         let health_indicators = [
             health_state_group(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state),
             health_state_group(ui, UiIcon::Monitor, "Screen", snapshot.screen_state),
@@ -908,7 +938,7 @@ impl SwitcherApp {
         let health_section = health_heading.union(health_indicators[4]);
         let first_divider = controls_section_divider(ui);
 
-        let main_heading = controls_section_heading(ui, "Main controls");
+        let main_heading = controls_section_heading(ui, UiIcon::Route, "Main controls");
         let automation_running =
             matches!(snapshot.run_state, RunState::Running | RunState::Starting);
         let (run_icon, run_label, run_accent) = if automation_running {
@@ -996,7 +1026,7 @@ impl SwitcherApp {
         let main_section = main_heading.union(output_mode);
         let second_divider = controls_section_divider(ui);
 
-        let other_heading = controls_section_heading(ui, "Other");
+        let other_heading = controls_section_heading(ui, UiIcon::Wrench, "Other");
         let capture = icon_button(
             ui,
             UiIcon::Capture,
@@ -1024,6 +1054,7 @@ impl SwitcherApp {
 
         DashboardControlsLayout {
             sections: [health_section, main_section, other_section],
+            section_headings: [health_heading, main_heading, other_heading],
             health_indicators,
             section_dividers: [first_divider, second_divider],
             other_actions,
@@ -1094,11 +1125,11 @@ impl SwitcherApp {
 
                 let brand_icon = ui
                     .allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), 160.0),
+                        egui::vec2(ui.available_width(), 128.0),
                         egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                         |ui| {
                             let (rect, _) =
-                                ui.allocate_exact_size(egui::vec2(160.0, 160.0), Sense::hover());
+                                ui.allocate_exact_size(egui::vec2(128.0, 128.0), Sense::hover());
                             ui.painter().image(
                                 app_icon_texture,
                                 rect,
@@ -1130,7 +1161,7 @@ impl SwitcherApp {
                 ui.add_space(8.0);
                 let back = settings_back_button(ui);
                 let go_back = back.clicked();
-                ui.add_space(14.0);
+                ui.add_space(10.0);
                 ui.label(
                     RichText::new("PREFERENCES")
                         .size(10.0)
@@ -1139,7 +1170,7 @@ impl SwitcherApp {
                 );
                 ui.add_space(8.0);
                 let mut primary_navigation = Vec::with_capacity(SettingsTab::PRIMARY.len());
-                for (tab, icon, label) in SettingsTab::PRIMARY {
+                for (index, (tab, icon, label)) in SettingsTab::PRIMARY.into_iter().enumerate() {
                     let response = settings_nav_button(ui, tab, icon, label, self.settings_tab);
                     primary_navigation.push(response.rect);
                     if response.clicked() && self.settings_tab != tab {
@@ -1147,7 +1178,9 @@ impl SwitcherApp {
                         self.confirm_clear_logs = false;
                         self.settings_section_changed_at = Some(Instant::now());
                     }
-                    ui.add_space(3.0);
+                    if index + 1 < SettingsTab::PRIMARY.len() {
+                        ui.add_space(3.0);
+                    }
                 }
 
                 let (diagnostics, save_status) = ui
@@ -1481,6 +1514,12 @@ impl SwitcherApp {
                     &mut app.config.cursor_visible,
                     "Include mouse cursor",
                     "Also add it to new references.",
+                );
+                settings_toggle_row(
+                    ui,
+                    &mut app.config.automatic_monitor_rescans,
+                    "Automatic display rescans",
+                    "Find the reference display at startup, after reference changes, and every 30 seconds. Manual Rescan remains available.",
                 );
             },
         );
@@ -2012,6 +2051,7 @@ impl eframe::App for SwitcherApp {
                 ));
             }
         }
+        self.sync_selected_monitor_preference(&snapshot);
         if self.settings_save_due(Instant::now()) {
             self.flush_settings();
         }
@@ -2157,21 +2197,31 @@ fn animation_progress(started_at: Option<Instant>, duration: Duration) -> f32 {
     })
 }
 
-fn controls_section_heading(ui: &mut egui::Ui, title: &str) -> Rect {
-    let heading = ui.label(
-        RichText::new(title)
-            .size(11.0)
-            .strong()
-            .color(Color32::from_rgb(151, 158, 171)),
-    );
+fn controls_section_heading(ui: &mut egui::Ui, icon: UiIcon, title: &str) -> Rect {
+    let heading = ui.horizontal(|ui| {
+        let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+        draw_icon(
+            ui.painter(),
+            icon_rect,
+            icon,
+            Color32::from_rgb(119, 164, 247),
+            1.4,
+        );
+        ui.label(
+            RichText::new(title)
+                .size(11.0)
+                .strong()
+                .color(Color32::from_rgb(151, 158, 171)),
+        );
+    });
     ui.add_space(6.0);
-    heading.rect
+    heading.response.rect
 }
 
 fn controls_section_divider(ui: &mut egui::Ui) -> Rect {
-    ui.add_space(10.0);
+    ui.add_space(2.0);
     let divider = ui.separator().rect;
-    ui.add_space(10.0);
+    ui.add_space(2.0);
     divider
 }
 
@@ -3818,6 +3868,8 @@ mod tests {
         );
         let context = egui::Context::default();
         for (viewport, dpi_scale) in [
+            (egui::vec2(820.0, 540.0), 1.0),
+            (egui::vec2(820.0, 540.0), 1.5),
             (egui::vec2(820.0, 600.0), 1.0),
             (
                 egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
@@ -3856,8 +3908,8 @@ mod tests {
                 assert!(rect.is_positive());
                 assert!(sidebar_rect.contains_rect(rect));
             }
-            assert!((sidebar_layout.brand_icon.width() - 160.0).abs() < 0.01);
-            assert!((sidebar_layout.brand_icon.height() - 160.0).abs() < 0.01);
+            assert!((sidebar_layout.brand_icon.width() - 128.0).abs() < 0.01);
+            assert!((sidebar_layout.brand_icon.height() - 128.0).abs() < 0.01);
             assert!(sidebar_layout.brand_icon.bottom() < sidebar_layout.brand_title.top());
             assert!(sidebar_layout.brand_title.bottom() < sidebar_layout.brand_separator.top());
             assert!(sidebar_layout.brand_separator.bottom() < sidebar_layout.back.top());
@@ -3885,7 +3937,10 @@ mod tests {
             assert!(sidebar_layout.back.bottom() < sidebar_layout.primary_navigation[0].top());
             assert!(
                 sidebar_layout.primary_navigation.last().unwrap().bottom()
-                    < sidebar_layout.diagnostics.top()
+                    < sidebar_layout.diagnostics.top(),
+                "primary navigation overlaps Diagnostics: primary={:?}, diagnostics={:?}",
+                sidebar_layout.primary_navigation.last().unwrap(),
+                sidebar_layout.diagnostics
             );
             assert!(sidebar_layout.diagnostics.bottom() < sidebar_layout.save_status.top());
             assert!(sidebar_rect.contains_rect(sidebar_layout.diagnostics));
@@ -4053,7 +4108,9 @@ mod tests {
             let snapshot = app.runtime.snapshot();
             let mut footer = Rect::NOTHING;
             let _ = context.run_ui(input, |ui| {
-                footer = app.controls_workspace(ui, &snapshot, viewport.x, viewport.y);
+                footer = app
+                    .controls_workspace(ui, &snapshot, viewport.x, viewport.y)
+                    .footer;
             });
             assert!(footer.is_positive());
             assert!(footer.left() >= 0.0 && footer.right() <= viewport.x + 0.01);
@@ -4071,19 +4128,23 @@ mod tests {
         );
         let context = egui::Context::default();
         let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 560.0))),
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 530.0))),
             ..egui::RawInput::default()
         };
         let snapshot = app.runtime.snapshot();
-        let mut layout = None;
+        let mut workspace = None;
         let mut available_width = 0.0;
         let _ = context.run_ui(input, |ui| {
             available_width = ui.available_width();
-            layout = Some(app.controls_body(ui, &snapshot));
+            workspace = Some(app.controls_workspace(ui, &snapshot, 320.0, 530.0));
         });
-        let layout = layout.unwrap();
+        let workspace = workspace.unwrap();
+        let layout = workspace.body;
 
         for rect in layout.sections {
+            assert!(rect.is_positive());
+        }
+        for rect in layout.section_headings {
             assert!(rect.is_positive());
         }
         for pair in layout.sections.windows(2) {
@@ -4103,6 +4164,7 @@ mod tests {
         for action in layout.other_actions {
             assert!((action.width() - available_width).abs() < 0.01);
         }
+        assert!(layout.sections[2].bottom() < workspace.footer.top());
     }
 
     #[test]
@@ -4237,6 +4299,64 @@ mod tests {
             );
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn accepted_monitor_selection_is_persisted_by_label() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store.clone());
+        let snapshot = AppSnapshot {
+            selected_monitor: Some(stageswap_core::MonitorDescriptor {
+                display_name: r"\\.\DISPLAY2".into(),
+                label: "Stage Display".into(),
+                ..stageswap_core::MonitorDescriptor::default()
+            }),
+            ..AppSnapshot::default()
+        };
+
+        app.sync_selected_monitor_preference(&snapshot);
+
+        assert_eq!(app.config.selected_monitor_label, "Stage Display");
+        assert_eq!(store.load().config.selected_monitor_label, "Stage Display");
+    }
+
+    #[test]
+    fn opening_settings_does_not_rescan_when_automatic_rescans_are_disabled() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            AppConfig {
+                automatic_monitor_rescans: false,
+                ..AppConfig::default()
+            },
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        );
+
+        app.open_settings();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let snapshot = loop {
+            let snapshot = app.runtime.snapshot();
+            if snapshot
+                .recent_activity
+                .iter()
+                .any(|activity| activity == "Video device list refreshed")
+            {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not process the settings refresh"
+            );
+            std::thread::yield_now();
+        };
+        assert!(
+            snapshot
+                .recent_activity
+                .iter()
+                .all(|activity| activity != "Monitor rescan requested")
+        );
     }
 
     #[test]

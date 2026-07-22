@@ -10,6 +10,8 @@ use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[cfg(any(windows, test))]
+use stageswap_core::MonitorDescriptor;
 #[cfg(windows)]
 use stageswap_core::{MonitorScore, MonitorTracker, MonitorTrackerSettings, RestartTarget};
 #[cfg(windows)]
@@ -276,10 +278,7 @@ impl RuntimeState {
                 let _ = path;
                 self.record("Reference import requested");
             }
-            Command::SelectMonitor(monitor) => {
-                self.snapshot.selected_monitor = Some(monitor);
-                self.record("Tracked monitor selected");
-            }
+            Command::SelectMonitor(_) => self.record("Tracked monitor selection requested"),
             Command::RefreshVideoDevices => self.record("Video device list refreshed"),
             Command::Rescan => self.record("Monitor rescan requested"),
             Command::Restart(target) => self.record(format!("Restart requested: {target:?}")),
@@ -585,6 +584,19 @@ fn run(config: AppConfig, commands: Receiver<Command>, shared: Arc<RwLock<AppSna
     }
 }
 
+#[cfg(any(windows, test))]
+fn choose_initial_monitor(
+    saved_label: &str,
+    monitors: &[MonitorDescriptor],
+) -> Option<MonitorDescriptor> {
+    monitors
+        .iter()
+        .find(|monitor| monitor.label == saved_label)
+        .or_else(|| monitors.get(1))
+        .or_else(|| monitors.first())
+        .cloned()
+}
+
 #[cfg(windows)]
 struct MonitorScanRequest {
     generation: u64,
@@ -606,6 +618,7 @@ struct MonitorScanWorker {
     worker: Option<JoinHandle<()>>,
     stop: Arc<AtomicBool>,
     in_flight: bool,
+    pending: Option<MonitorScanRequest>,
 }
 
 #[cfg(windows)]
@@ -635,12 +648,14 @@ impl MonitorScanWorker {
             worker: Some(worker),
             stop,
             in_flight: false,
+            pending: None,
         })
     }
 
     fn request(&mut self, request: MonitorScanRequest) -> bool {
         if self.in_flight {
-            return false;
+            self.pending = Some(request);
+            return true;
         }
         let sent = self
             .requests
@@ -653,7 +668,17 @@ impl MonitorScanWorker {
     fn poll(&mut self) -> Option<MonitorScanResult> {
         let result = self.results.as_ref()?.try_recv().ok()?;
         self.in_flight = false;
+        if let Some(request) = self.pending.take() {
+            self.in_flight = self
+                .requests
+                .as_ref()
+                .is_some_and(|sender| sender.try_send(request).is_ok());
+        }
         Some(result)
+    }
+
+    fn clear_pending(&mut self) {
+        self.pending = None;
     }
 }
 
@@ -724,7 +749,7 @@ struct Platform {
     pipe_name: Option<String>,
     webcam: MediaFoundationVideoInput,
     screen: WindowsGraphicsScreenInput,
-    selected_monitor: Option<stageswap_core::MonitorDescriptor>,
+    selected_monitor: Option<MonitorDescriptor>,
     monitor_tracker: MonitorTracker,
     last_monitor_scan: Instant,
     monitor_scan_generation: u64,
@@ -825,8 +850,8 @@ impl Platform {
         let selected_monitor = match screen.enumerate() {
             Ok(monitors) => {
                 state.snapshot.monitors = monitors.clone().into();
-                monitors.into_iter().next().and_then(|monitor| {
-                    match screen.start(&monitor, state.config.cursor_visible) {
+                choose_initial_monitor(&state.config.selected_monitor_label, &monitors).and_then(
+                    |monitor| match screen.start(&monitor, state.config.cursor_visible) {
                         Ok(()) => {
                             state.snapshot.screen_state = DeviceState::Ready;
                             state.record(format!("Screen capture initialized: {}", monitor.label));
@@ -837,8 +862,8 @@ impl Platform {
                             state.record(format!("Screen capture failed: {error}"));
                             None
                         }
-                    }
-                })
+                    },
+                )
             }
             Err(error) => {
                 state.snapshot.screen_state = DeviceState::Failed;
@@ -851,6 +876,12 @@ impl Platform {
         });
         if let Some(monitor) = selected_monitor.clone() {
             monitor_tracker.select(monitor);
+        }
+        if let Some(monitor) = selected_monitor.as_ref() {
+            state
+                .config
+                .selected_monitor_label
+                .clone_from(&monitor.label);
         }
         state.snapshot.selected_monitor = selected_monitor.clone();
         let monitor_scan_worker = match MonitorScanWorker::start() {
@@ -868,11 +899,13 @@ impl Platform {
             screen,
             selected_monitor,
             monitor_tracker,
-            last_monitor_scan: Instant::now() - Duration::from_secs(30),
+            last_monitor_scan: Instant::now(),
             monitor_scan_generation: 1,
             monitor_scan_worker,
         };
-        platform.request_monitor_scan(state);
+        if state.config.automatic_monitor_rescans {
+            platform.request_monitor_scan(state, state.config.cursor_visible);
+        }
         platform
     }
 
@@ -896,24 +929,22 @@ impl Platform {
                         }
                     }
                 }
-                if config.cursor_visible != state.config.cursor_visible {
+                let cursor_changed = config.cursor_visible != state.config.cursor_visible;
+                let threshold_changed =
+                    config.similarity_threshold != state.config.similarity_threshold;
+                let automatic_rescans_changed =
+                    config.automatic_monitor_rescans != state.config.automatic_monitor_rescans;
+                if cursor_changed {
                     let old = state.config.cursor_visible;
                     state.config.cursor_visible = config.cursor_visible;
                     self.restart_screen(state);
                     state.config.cursor_visible = old;
-                    self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
-                    self.last_monitor_scan = Instant::now() - Duration::from_secs(30);
                 }
-                if config.similarity_threshold != state.config.similarity_threshold {
-                    let mut tracker = MonitorTracker::new(MonitorTrackerSettings {
-                        match_threshold: config.similarity_threshold,
-                    });
-                    if let Some(monitor) = self.selected_monitor.clone() {
-                        tracker.select(monitor);
+                if cursor_changed || threshold_changed || automatic_rescans_changed {
+                    self.invalidate_monitor_scans(config.similarity_threshold);
+                    if config.automatic_monitor_rescans {
+                        self.request_monitor_scan(state, config.cursor_visible);
                     }
-                    self.monitor_tracker = tracker;
-                    self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
-                    self.last_monitor_scan = Instant::now() - Duration::from_secs(30);
                 }
             }
             Command::CaptureReference => {
@@ -926,8 +957,10 @@ impl Platform {
                                 "Reference captured for this session but could not be saved: {error}"
                             )),
                         }
-                        self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
-                        self.request_monitor_scan(state);
+                        self.invalidate_monitor_scans(state.config.similarity_threshold);
+                        if state.config.automatic_monitor_rescans {
+                            self.request_monitor_scan(state, state.config.cursor_visible);
+                        }
                     } else {
                         state.record("Reference capture failed: invalid screen frame");
                     }
@@ -940,8 +973,10 @@ impl Platform {
                     Ok((reference, preview)) => {
                         state.install_reference(reference, &preview, Instant::now());
                         state.record("Reference imported into local storage");
-                        self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
-                        self.request_monitor_scan(state);
+                        self.invalidate_monitor_scans(state.config.similarity_threshold);
+                        if state.config.automatic_monitor_rescans {
+                            self.request_monitor_scan(state, state.config.cursor_visible);
+                        }
                     }
                     Err(error) => state.record(format!("Reference import failed: {error}")),
                 }
@@ -955,6 +990,13 @@ impl Platform {
                     self.selected_monitor = Some(monitor.clone());
                     self.monitor_tracker.select(monitor.clone());
                     self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
+                    if let Some(worker) = self.monitor_scan_worker.as_mut() {
+                        worker.clear_pending();
+                    }
+                    state
+                        .config
+                        .selected_monitor_label
+                        .clone_from(&monitor.label);
                     state.snapshot.selected_monitor = Some(monitor);
                     self.restart_screen(state);
                 } else {
@@ -975,7 +1017,9 @@ impl Platform {
                 }
                 Err(error) => state.record(format!("Video device refresh failed: {error}")),
             },
-            Command::Rescan => self.request_monitor_scan(state),
+            Command::Rescan => {
+                self.request_monitor_scan(state, state.config.cursor_visible);
+            }
             Command::Stop => {
                 if let Some(publisher) = &self.publisher {
                     let _ = publisher.invalidate();
@@ -1043,8 +1087,10 @@ impl Platform {
     fn refresh_inputs(&mut self, state: &mut RuntimeState) {
         let now = Instant::now();
         self.refresh_monitor_scan(state);
-        if now.duration_since(self.last_monitor_scan) >= Duration::from_secs(30) {
-            self.request_monitor_scan(state);
+        if state.config.automatic_monitor_rescans
+            && now.duration_since(self.last_monitor_scan) >= Duration::from_secs(30)
+        {
+            self.request_monitor_scan(state, state.config.cursor_visible);
         }
         let webcam = self.webcam.latest_frame();
         state.snapshot.availability.camera_ready = webcam.is_some();
@@ -1089,14 +1135,26 @@ impl Platform {
         }
     }
 
-    fn request_monitor_scan(&mut self, state: &RuntimeState) {
+    fn invalidate_monitor_scans(&mut self, match_threshold: f64) {
+        self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
+        if let Some(worker) = self.monitor_scan_worker.as_mut() {
+            worker.clear_pending();
+        }
+        let mut tracker = MonitorTracker::new(MonitorTrackerSettings { match_threshold });
+        if let Some(monitor) = self.selected_monitor.clone() {
+            tracker.select(monitor);
+        }
+        self.monitor_tracker = tracker;
+    }
+
+    fn request_monitor_scan(&mut self, state: &RuntimeState, cursor_visible: bool) {
         let Some(worker) = &mut self.monitor_scan_worker else {
             return;
         };
         if worker.request(MonitorScanRequest {
             generation: self.monitor_scan_generation,
             reference: state.reference.clone(),
-            cursor_visible: state.config.cursor_visible,
+            cursor_visible,
         }) {
             self.last_monitor_scan = Instant::now();
         }
@@ -1111,7 +1169,6 @@ impl Platform {
             return;
         };
         if result.generation != self.monitor_scan_generation {
-            self.request_monitor_scan(state);
             return;
         }
         state.snapshot.monitors = result.monitors.into();
@@ -1120,7 +1177,7 @@ impl Platform {
         }
         let tracking = self.monitor_tracker.apply_scan(&result.scores);
         if tracking.confirmation_pending {
-            self.request_monitor_scan(state);
+            self.request_monitor_scan(state, state.config.cursor_visible);
             return;
         }
         if let Some(monitor) = tracking.tracked
@@ -1128,6 +1185,12 @@ impl Platform {
         {
             self.selected_monitor = Some(monitor);
             state.snapshot.selected_monitor = self.selected_monitor.clone();
+            if let Some(monitor) = self.selected_monitor.as_ref() {
+                state
+                    .config
+                    .selected_monitor_label
+                    .clone_from(&monitor.label);
+            }
             self.restart_screen(state);
             state.record("Reference monitor changed after two scans");
         }
@@ -1180,6 +1243,58 @@ impl Platform {
 mod tests {
     use super::*;
     use stageswap_core::OutputMode;
+
+    fn monitor(display_name: &str, label: &str) -> MonitorDescriptor {
+        MonitorDescriptor {
+            display_name: display_name.into(),
+            label: label.into(),
+            ..MonitorDescriptor::default()
+        }
+    }
+
+    #[test]
+    fn initial_monitor_prefers_saved_label_then_secondary() {
+        let monitors = [
+            monitor("primary", "Desk"),
+            monitor("secondary", "Stage"),
+            monitor("third", "Stage"),
+        ];
+
+        assert_eq!(
+            choose_initial_monitor("Desk", &monitors)
+                .unwrap()
+                .display_name,
+            "primary"
+        );
+        assert_eq!(
+            choose_initial_monitor("Stage", &monitors)
+                .unwrap()
+                .display_name,
+            "secondary"
+        );
+        assert_eq!(
+            choose_initial_monitor("Missing", &monitors)
+                .unwrap()
+                .display_name,
+            "secondary"
+        );
+        assert_eq!(
+            choose_initial_monitor("", &monitors).unwrap().display_name,
+            "secondary"
+        );
+    }
+
+    #[test]
+    fn initial_monitor_uses_sole_primary_or_none() {
+        let primary = [monitor("primary", "Desk")];
+        assert_eq!(
+            choose_initial_monitor("Missing", &primary)
+                .unwrap()
+                .display_name,
+            "primary"
+        );
+        assert!(choose_initial_monitor("Missing", &[]).is_none());
+    }
 
     #[test]
     fn output_fps_tracker_measures_generated_output_independently_of_ui() {

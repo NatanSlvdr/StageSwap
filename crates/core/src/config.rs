@@ -12,9 +12,11 @@ pub struct AppConfig {
     pub schema_version: u32,
     pub selected_video_device_id: String,
     pub crop_webcam_to_16_9: bool,
+    pub selected_monitor_label: String,
     pub reference_image_path: String,
     pub similarity_threshold: f64,
     pub cursor_visible: bool,
+    pub automatic_monitor_rescans: bool,
     pub start_with_windows: bool,
     pub start_minimized: bool,
     pub start_automatically: bool,
@@ -32,9 +34,11 @@ impl Default for AppConfig {
             schema_version: SCHEMA_VERSION,
             selected_video_device_id: String::new(),
             crop_webcam_to_16_9: true,
+            selected_monitor_label: String::new(),
             reference_image_path: String::new(),
             similarity_threshold: 0.98,
             cursor_visible: false,
+            automatic_monitor_rescans: true,
             start_with_windows: false,
             start_minimized: true,
             start_automatically: true,
@@ -197,6 +201,8 @@ mod tests {
         let config = AppConfig {
             selected_video_device_id: "camera\\id\"one".into(),
             crop_webcam_to_16_9: false,
+            selected_monitor_label: "Studio Display".into(),
+            automatic_monitor_rescans: false,
             output_mode: OutputMode::ForceScreen,
             ..AppConfig::default()
         };
@@ -211,6 +217,8 @@ mod tests {
     fn legacy_schema_defaults_webcam_crop_to_enabled() {
         let config = ConfigStore::parse(r#"{"schema_version":1}"#).unwrap();
         assert!(config.crop_webcam_to_16_9);
+        assert!(config.selected_monitor_label.is_empty());
+        assert!(config.automatic_monitor_rescans);
     }
 
     #[test]

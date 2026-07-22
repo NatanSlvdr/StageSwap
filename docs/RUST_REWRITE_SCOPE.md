@@ -6,7 +6,7 @@ This scope replaced the former production application directly. The repository n
 
 - One self-contained Windows 11 x64 application. The executable may embed and deploy its matching camera-source DLL; users install neither OBS nor another runtime application.
 - One webcam input. Store its identifier, open it at startup, and use a fixed internal BGRA/RGB32 1280×720 at 30 fps contract.
-- One screen capture selected by the saved visual reference. Compare a 160×90 grayscale image every 250 ms, with five matches and three mismatches. Scan displays at startup, every 30 seconds, and on explicit Rescan only to locate that reference.
+- One screen capture restored by its saved friendly label, with secondary-monitor fallback and optional reference-based replacement. Compare a 160×90 grayscale image every 250 ms, with five matches and three mismatches. Automatic display rescans run at startup, every 30 seconds, and after reference changes by default, can be disabled, and never disable explicit Rescan.
 - Automatic, Force Webcam, and Force Screen modes, with the current 500 ms reversible fade, configurable missing-source fallback, and fixed crossed-camera off screen.
 - One per-user frame transport from the application to a Media Foundation custom source DLL.
 - Virtual-camera output prefers RGB32 1280×720 at 30 fps and retains selectable NV12 720p for Windows Camera and Zoom compatibility; do not restore 1080p without evidence.
@@ -22,7 +22,7 @@ This is a new installation with source CLSID `{4ABA794D-7B23-449C-8467-CE74A41C2
 - No sleep/resume, docking, display-reordering, D3D-device-loss, camera-contention, or vendor-driver recovery guarantees.
 - No input format matrix. Request one internal format and let the capture backend perform the conversion.
 - No GPU compositor, zero-copy pipeline, encoder, audio, recording, network service, OBS integration, kernel driver, or plugin system.
-- No persisted EDID or physical-monitor identity. Display scanning exists only to find the saved visual reference.
+- Persist only the selected monitor's friendly label; do not persist EDID or physical-monitor identity. Display scanning exists only to find the saved visual reference and can be disabled outside explicit rescans.
 - Do not preserve `WM_DEVICECHANGE`/`WM_DPICHANGED` restart behavior merely because the current Win32 window happens to contain it.
 
 ## Dependency boundary

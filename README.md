@@ -19,7 +19,7 @@ StageSwap has independent storage, startup, IPC, COM, virtual-camera, and deploy
 - Windows 11 x64.
 - Immutable CPU BGRA frames and output fixed at 1280×720, 30 fps.
 - Media Foundation webcam input with optional centered 16:9 cropping, Windows Graphics Capture screen input, synchronous bounded channels, and no Tokio. Cropping feeds both preview and output.
-- Reference detection every 250 ms with 5-match/3-mismatch debounce; asynchronous monitor discovery at startup, every 30 seconds, and on Rescan requires the same winner twice without pausing output.
+- Reference detection every 250 ms with 5-match/3-mismatch debounce; the selected monitor is restored by friendly label with secondary fallback. Asynchronous discovery requires the same winner twice without pausing output, runs automatically at startup, after reference changes, and every 30 seconds by default, and can be limited to explicit Rescan.
 - CPU aspect-fit, black letterboxing, configurable missing-source fallback, and reversible 500 ms blend.
 - The virtual camera prefers RGB32 1280×720 at 30 fps and retains selectable NV12 720p for Windows Camera and Zoom compatibility; 1080p is excluded.
 - Output uses deadline-based 30 fps pacing. Visible dashboard previews use latest-only conversion workers and display-sized textures. FPS remains runtime-owned and meaningful while the dashboard is hidden.
