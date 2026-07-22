@@ -21,7 +21,9 @@ pub use video_input::{MediaFoundationVideoInput, enumerate_video_devices};
 #[cfg(windows)]
 mod deployment;
 #[cfg(windows)]
-pub use deployment::{configure_startup, deployment_startup};
+pub use deployment::{
+    cleanup_deployment, configure_startup, deployment_startup, uninstall_deployment,
+};
 #[cfg(windows)]
 mod notification;
 #[cfg(windows)]
@@ -31,11 +33,25 @@ mod shell_ui;
 #[cfg(windows)]
 pub use shell_ui::{open_directory, pick_log_export_path, pick_reference_image};
 #[cfg(windows)]
+mod instance_control;
+#[cfg(windows)]
+mod portable_install;
+#[cfg(windows)]
 mod screen_input;
 #[cfg(windows)]
 mod single_instance;
 #[cfg(windows)]
 pub use deployment::save_config_atomic;
+#[cfg(windows)]
+pub use instance_control::{
+    InstanceCommand, InstanceControl, InstanceReadiness, InstanceStatus, instance_status,
+    send_instance_command,
+};
+#[cfg(windows)]
+pub use portable_install::{
+    BootstrapResult, LaunchContext, PortableMode, bootstrap as portable_bootstrap,
+    managed_executable_path, request_install,
+};
 #[cfg(windows)]
 pub use screen_input::WindowsGraphicsScreenInput;
 #[cfg(windows)]

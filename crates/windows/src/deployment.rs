@@ -35,6 +35,7 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "StageSwap";
 
 pub fn configure_startup(enabled: bool) -> Result<(), String> {
+    let executable = enabled.then(crate::managed_executable_path).transpose()?;
     let path: Vec<u16> = RUN_KEY.encode_utf16().chain([0]).collect();
     let value_name: Vec<u16> = RUN_VALUE.encode_utf16().chain([0]).collect();
     let mut key = HKEY::default();
@@ -56,8 +57,11 @@ pub fn configure_startup(enabled: bool) -> Result<(), String> {
         return Err(format!("could not open Windows startup key: {status:?}"));
     }
     let result = if enabled {
-        let executable =
-            env::current_exe().map_err(|error| format!("could not locate executable: {error}"))?;
+        let executable = executable.expect("enabled startup has a managed executable path");
+        if !executable.is_file() {
+            let _ = unsafe { RegCloseKey(key) };
+            return Err("Start with Windows requires the managed StageSwap installation".into());
+        }
         let command = format!("\"{}\" --startup", executable.display());
         let command: Vec<u16> = command.encode_utf16().chain([0]).collect();
         // SAFETY: the key and both buffers are live for the call.
@@ -85,6 +89,19 @@ pub fn configure_startup(enabled: bool) -> Result<(), String> {
             "could not update Windows startup preference: {result:?}"
         ))
     }
+}
+
+pub fn cleanup_deployment() -> Result<(), String> {
+    run_elevated("--cleanup-elevated")
+}
+
+pub fn uninstall_deployment() -> Result<(), String> {
+    run_elevated("--uninstall-elevated")
+}
+
+pub(crate) fn validate_release(payload: &[u8]) -> Result<(), String> {
+    validate_native_architecture()?;
+    validate_embedded_source(payload)
 }
 
 pub fn save_config_atomic(store: &ConfigStore, config: &AppConfig) -> std::io::Result<()> {
@@ -119,11 +136,16 @@ pub fn deployment_startup(payload: &[u8]) -> Result<bool, String> {
             cleanup()?;
             Ok(true)
         }
+        Some("--uninstall-elevated") => {
+            cleanup()?;
+            crate::portable_install::remove_managed_files()?;
+            Ok(true)
+        }
         Some("--cleanup") => {
             run_elevated("--cleanup-elevated")?;
             Ok(true)
         }
-        Some("--startup") => {
+        Some("--startup" | "--show" | "--post-install" | "--post-update" | "--rollback") => {
             ensure_deployment(payload)?;
             Ok(false)
         }

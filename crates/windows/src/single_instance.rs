@@ -18,6 +18,10 @@ impl SingleInstance {
         }
         Ok(Some(Self(handle)))
     }
+
+    pub fn exists() -> Result<bool, String> {
+        Ok(Self::acquire()?.is_none())
+    }
 }
 
 impl Drop for SingleInstance {

@@ -1,99 +1,173 @@
-# StageSwap
+<p align="center">
+  <img src="crates/app/assets/app-icon.png" width="132" alt="StageSwap app icon">
+</p>
 
-StageSwap is a local-only Windows 11 virtual camera for hybrid meetings. Automatic mode shows the speaker camera while a saved idle-screen reference matches a display, then switches to displayed content when that screen changes. Force Webcam and Force Screen are manual overrides; changes use a reversible 500 ms fade.
+<h1 align="center">StageSwap</h1>
 
-Automatic camera-to-screen switching for hybrid meetings.
+<p align="center">
+  <strong>Stay present while you present.</strong><br>
+  StageSwap automatically switches your virtual camera between you and your screen during hybrid meetings.
+</p>
 
-Download `StageSwap_win64_vX.Y.Z.exe` for an x64 Windows 11 computer.
+<p align="center">
+  <a href="https://github.com/NatanSlvdr/StageSwap/releases/latest"><strong>Download for Windows 11</strong></a>
+  ·
+  <a href="#how-automatic-mode-works">How it works</a>
+  ·
+  <a href="DEV.md">Developer guide</a>
+</p>
 
-StageSwap is distributed as a portable, self-deploying executable. Each EXE embeds its same-architecture Rust Media Foundation DLL. First launch requests elevation only to extract and register the DLL under `%ProgramFiles%\StageSwap`; later launches run unelevated. Payloads use content-versioned filenames, so an upgrade can register its new DLL even while a camera application still has the previous DLL loaded. Locked old copies are scheduled for deletion at reboot. Before deleting the EXE, exit the tray application and run:
+---
+
+## One camera that knows when you are presenting
+
+StageSwap combines **one webcam** and **one display** into a single virtual camera. Choose **StageSwap** as the camera in your meeting app and leave it selected: StageSwap decides whether that camera feed should currently show you or your presentation.
+
+When your chosen display shows its saved idle view, people see your webcam. Change the display to your presentation and they see the screen. Return to the idle view and StageSwap brings you back on camera.
+
+> [!IMPORTANT]
+> StageSwap sends the display through a virtual **camera** at 1280×720 and 30 fps. It does not start your meeting app's native screen-sharing mode and it does not send audio.
+
+## How Automatic mode works
+
+### 1. You choose an idle view
+
+Show something recognizable on your presentation display: a holding slide, event graphic, desktop wallpaper, or any screen you use when you want the audience to see you. Select **Capture reference** to save that view. You can also import an existing image.
+
+The reference is simply a visual signal. StageSwap does not read slide titles, app names, or window content.
+
+### 2. StageSwap watches for a change
+
+While automation is running, StageSwap compares the selected display with the reference four times per second.
+
+| What StageSwap detects | What it does |
+|:---|:---|
+| The display matches the reference | Shows the **webcam** |
+| The display no longer matches | Shows the **screen** |
+| The reference appears again | Returns to the **webcam** |
+
+StageSwap waits for several matching or different checks before changing the output. With the default settings, a changed screen is recognized in about **0.75 seconds**, while a returned reference is confirmed in about **1.25 seconds**. This avoids rapid switching caused by a cursor, animation, or one unusual frame.
+
+The **Match strictness** setting controls how closely the screen must resemble the saved image. A higher value requires a closer match.
+
+### 3. The output changes smoothly
+
+Every switch uses a half-second fade instead of a hard cut. The fade is reversible: if the detected state changes while a transition is still happening, StageSwap smoothly turns back from its current position.
+
+The final output keeps its 16:9 shape. Sources that do not fit are scaled without stretching and may receive black bars. The webcam can optionally be cropped and centered to fill 16:9.
+
+## Three output modes
+
+The selected mode controls the output while automation is running.
+
+| Mode | Behavior |
+|:---|:---|
+| **Automatic** | Uses the saved reference to choose between the webcam and screen |
+| **Webcam** | Keeps the webcam visible, ignoring reference changes |
+| **Screen** | Keeps the selected display visible, ignoring reference changes |
+
+The Webcam and Screen modes are manual overrides. They remain active until you select another mode, and they use the same smooth fade as Automatic mode.
+
+## What happens when something is unavailable?
+
+StageSwap favors predictable, private behavior rather than showing an unexpected source.
+
+| Situation | Output behavior |
+|:---|:---|
+| No usable reference | Automatic mode stays on the **webcam** |
+| Selected display is unavailable | StageSwap falls back to the **webcam** when possible |
+| Webcam is unavailable when requested | StageSwap shows a safe placeholder instead of another screen |
+| Automation is stopped | The virtual camera shows a black branded StageSwap screen |
+| StageSwap is fully exited | Camera apps still receive the black branded StageSwap screen |
+
+If a webcam or display is unplugged, reconnected, or affected by sleep, reselect it or use the restart controls in **Settings → Diagnostics**. StageSwap does not silently replace a missing webcam with a different camera.
+
+## Displays, references, and rescanning
+
+StageSwap remembers the selected display by its Windows name. If that display is no longer available at launch, it prefers another secondary display and uses the main display only when it is the sole option.
+
+By default, StageSwap looks for the saved reference at startup, after the reference changes, and every 30 seconds. It only moves to the best-matching display after confirming the result twice, without pausing the camera output. You can disable automatic display rescans or start one at any time with **Rescan screens**.
+
+You can decide whether the mouse cursor is included in the captured screen and in newly captured references.
+
+## Features at a glance
+
+- **Automatic camera-to-screen switching** based on a reference image you control
+- **Webcam and Screen overrides** available from the dashboard and system tray
+- **Smooth, reversible transitions** between live sources
+- **Four live previews** for the webcam, display, saved reference, and final audience output
+- **Component health indicators** for the webcam, screen capture, matching, and virtual camera
+- **Display rediscovery** when the reference moves to another monitor
+- **Optional 16:9 webcam crop** and optional mouse cursor capture
+- **Close to system tray** while capture and output continue running
+- **Flexible startup** with start minimized, start automatically, and start with Windows options
+- **Built-in recovery controls** to restart the webcam, screen capture, virtual camera, or everything
+- **Local diagnostic logs** retained for 14 days, with open, export, and clear actions
+- **Local-only processing** with no frame recording or upload
+
+## Everyday app behavior
+
+- **Start automation** makes the selected mode live through the virtual camera.
+- **Stop automation** keeps the virtual camera available but replaces its content with the branded off screen.
+- Closing the window can leave StageSwap running in the system tray, so the meeting output continues.
+- Fully exiting StageSwap stops capture and processing. The registered virtual camera remains available and shows the branded off screen.
+- Opening the installed app again brings the existing dashboard back instead of starting a second copy.
+- Opening a newer downloaded build offers to update the installed copy while keeping settings and the saved reference.
+
+## Get started
+
+### What you need
+
+- A 64-bit Windows 11 computer
+- A webcam
+- The display you want to present
+
+### Set up StageSwap
+
+1. Download the latest `StageSwap_win64_vX.Y.Z.exe` from the [official releases page](https://github.com/NatanSlvdr/StageSwap/releases/latest).
+2. Open it and choose **Install StageSwap** for the recommended setup, or **Run once** to try it without copying the app to your computer.
+3. Approve the Windows administrator prompt on first launch. StageSwap only needs it to add its virtual camera; normal launches do not require administrator access.
+4. In StageSwap, choose your webcam and the display you want it to watch.
+5. Show your preferred idle view and select **Capture reference**.
+6. In your meeting app, choose **StageSwap** as your camera, then select **Start automation**.
+
+> [!NOTE]
+> Current releases are unsigned, so Windows may show a security warning. Only continue when the file came from the official StageSwap releases page.
+
+## Install, update, or try it once
+
+StageSwap comes as one self-contained file — there is no traditional setup wizard.
+
+- **Install StageSwap** adds Start Menu and Desktop shortcuts and enables the option to start with Windows.
+- **Run once** opens the downloaded copy without installing it. Windows startup stays disabled so moving or deleting the download cannot break it.
+- **Update StageSwap** by opening a newer downloaded version. StageSwap asks before replacing the installed copy, keeps your settings, and opens the updated dashboard.
+
+The first launch may briefly request administrator permission. Later launches run normally without it.
+
+## Privacy
+
+StageSwap is local-only. Camera and screen frames stay on your computer and are not recorded or uploaded. Settings, your reference image, and short diagnostic logs are stored under `%LocalAppData%\StageSwap`.
+
+Remember that anything visible on your selected display can become the virtual-camera output while **Automatic** or **Screen** mode is active.
+
+## Removing StageSwap
+
+Exit StageSwap from its system-tray menu first. Then open PowerShell in the folder containing your downloaded StageSwap file and run:
 
 ```powershell
-.\StageSwap_win64_vX.Y.Z.exe --cleanup
+.\StageSwap_win64_vX.Y.Z.exe --uninstall
 ```
 
-StageSwap has independent storage, startup, IPC, COM, virtual-camera, and deployment identities. It does not migrate, unregister, overwrite, or delete Automatic Screen Camera data or deployments.
+This removes the installed app, its shortcuts, Windows startup entry, and virtual camera. Your settings, reference image, and logs are kept. To remove only the startup entry and virtual camera while keeping the installed app, use `--cleanup` instead.
 
-## Product contract
+## Need a hand?
 
-- Windows 11 x64.
-- Immutable CPU BGRA frames and output fixed at 1280×720, 30 fps.
-- Media Foundation webcam input with optional centered 16:9 cropping, Windows Graphics Capture screen input, synchronous bounded channels, and no Tokio. Cropping feeds both preview and output.
-- Reference detection every 250 ms with 5-match/3-mismatch debounce; the selected monitor is restored by friendly label with secondary fallback. Asynchronous discovery requires the same winner twice without pausing output, runs automatically at startup, after reference changes, and every 30 seconds by default, and can be limited to explicit Rescan.
-- CPU aspect-fit, black letterboxing, configurable missing-source fallback, and reversible 500 ms blend.
-- The virtual camera prefers RGB32 1280×720 at 30 fps and retains selectable NV12 720p for Windows Camera and Zoom compatibility; 1080p is excluded.
-- Output uses deadline-based 30 fps pacing. Visible dashboard previews use latest-only conversion workers and display-sized textures. FPS remains runtime-owned and meaningful while the dashboard is hidden.
-- A fixed black off screen with the centered StageSwap app icon is actively published at 30 fps while automation is stopped and generated by the virtual camera whenever the app publisher is absent.
-- Dashboard, five settings categories, contextual previews, the shared executable/window/tray icon, synchronized expanded tray controls, warning notifications, exit confirmation, 14-day JSONL logs, and webcam/screen/virtual/all restarts.
-- No hot-plug manager, sleep/resume recovery, docking recovery, dynamic formats, OBS integration, or kernel driver.
+If a webcam or display was unplugged, rearranged, or stopped after sleep, reopen StageSwap and choose the source again. The **Diagnostics** settings also provide restart controls for the webcam, screen, and virtual-camera output.
 
-Configuration schema 1, references, and logs live under `%LocalAppData%\StageSwap`. Frames are not recorded or uploaded.
+For bugs and feature requests, [open an issue](https://github.com/NatanSlvdr/StageSwap/issues). If you want to build or contribute to StageSwap, continue with the [developer guide](DEV.md).
 
-## Build, test, and package
+---
 
-### Testing from macOS
-
-You do not need a physical Windows PC for routine development. Before pushing to
-`main`, run the platform-independent checks and cross-target Clippy checks locally:
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
-cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
-```
-
-When a development build is ready to publish, manually run the
-[Windows workflow](https://github.com/NatanSlvdr/StageSwap/actions/workflows/windows.yml)
-from GitHub Actions. It executes the x64 Windows tests, packages the x64 build,
-and creates a GitHub release tagged with the commit's short SHA. Running it again
-for the same commit replaces the release assets. The release contains the unsigned
-executable and its checksum; pushes do not build or publish releases.
-
-GitHub-hosted runners cannot validate an interactive desktop, a physical webcam, or
-virtual-camera enumeration. Run the final smoke test on a physical x64 Windows 11
-computer or an x64 Windows 11 VM. An Apple-silicon Mac cannot virtualize x64 Windows
-natively, so use an x64 Windows machine for acceptance testing.
-
-For fast incremental x64 builds on an Apple-silicon Mac, install the native
-cross-compilation tools once and run the packaging wrapper:
-
-```bash
-brew install llvm
-cargo install --locked cargo-xwin
-./scripts/package-x64-macos.sh
-```
-
-The wrapper cross-compiles with the x64 Windows MSVC target, pins the Windows SDK,
-embeds the matching DLL and Windows resources, validates the generated PE files and
-payload, and writes the versioned executable and checksum to `dist`. If a build's
-checksum differs from the latest versioned artifact in that directory, the patch
-number is incremented; rebuilding identical bytes keeps the same version. Cached
-Rust and SDK files make subsequent builds faster. GitHub Actions remains the
-authoritative release builder, and the resulting executable cannot be run or
-hardware-tested on macOS.
-
-In the VM, use the short smoke pass below:
-
-1. Launch the x64 executable and approve first-run registration.
-2. Confirm that Windows Camera lists **StageSwap**.
-3. Verify screen capture, Force Screen, the configurable missing-source fallback, and the branded off screen after stopping automation.
-4. Verify webcam capture and Force Webcam if the VM exposes a camera.
-5. Verify Automatic mode, tray/close behavior, restart actions, and cleanup.
-
-This gives strong day-to-day coverage, but it does not replace the physical x64
-release smoke test listed in [the acceptance tests](docs/ACCEPTANCE_TESTS.md).
-
-Install Rust 1.97.1 and Visual Studio 2022 Build Tools with Windows SDK 10.0.22621.0. The pinned toolchain file selects the Rust version. Run packaging from a Developer PowerShell where `WindowsSDKVersion` is `10.0.22621.0\\`; `xtask` rejects any missing or different SDK instead of writing misleading artifact metadata.
-
-```powershell
-rustup target add x86_64-pc-windows-msvc
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
-cargo test --workspace --all-targets --target x86_64-pc-windows-msvc
-cargo run -p xtask -- package x64 dist
-```
-
-`xtask` builds and validates the x64 DLL first, embeds it into the EXE, validates the PE machine type and embedded payload, and emits the EXE with a SHA-256 sidecar. Windows builds also embed an `asInvoker`, Per-Monitor-V2 manifest and executable version metadata.
-
-See [architecture](docs/ARCHITECTURE.md), [acceptance tests](docs/ACCEPTANCE_TESTS.md), [release gates](docs/RELEASE_GATES.md), and [rewrite scope](docs/RUST_REWRITE_SCOPE.md).
+<p align="center">
+  <sub>Built for Windows 11 · 1280×720 at 30 fps · Local-only</sub>
+</p>

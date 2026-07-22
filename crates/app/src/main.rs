@@ -51,24 +51,42 @@ use local_log::LocalLog;
 fn main() -> eframe::Result {
     let _embedded_payload = deployment_payload::bytes();
     #[cfg(windows)]
-    match stageswap_windows::deployment_startup(_embedded_payload) {
-        Ok(true) => return Ok(()),
-        Ok(false) => {}
+    let launch_context = match stageswap_windows::portable_bootstrap(_embedded_payload) {
+        Ok(stageswap_windows::BootstrapResult::Continue(context)) => context,
+        Ok(stageswap_windows::BootstrapResult::Exit) => return Ok(()),
         Err(error) => {
             stageswap_windows::show_error_dialog(&format!(
-                "StageSwap deployment failed:\n\n{error}"
+                "StageSwap installation failed:\n\n{error}"
             ));
-            eprintln!("StageSwap deployment failed: {error}");
-            std::process::exit(1);
+            return Ok(());
+        }
+    };
+    #[cfg(windows)]
+    let deployment_command = matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--register-elevated" | "--cleanup-elevated" | "--uninstall-elevated" | "--cleanup")
+    );
+    #[cfg(windows)]
+    if deployment_command {
+        match stageswap_windows::deployment_startup(_embedded_payload) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => deployment_failure(&error),
         }
     }
     #[cfg(windows)]
     let _single_instance = match stageswap_windows::SingleInstance::acquire() {
         Ok(Some(instance)) => instance,
         Ok(None) => {
-            stageswap_windows::show_error_dialog(
-                "StageSwap is already running. Open it from the system tray, or exit the tray application before launching this copy.",
-            );
+            if std::env::args().nth(1).as_deref() != Some("--startup")
+                && let Err(error) = stageswap_windows::send_instance_command(
+                    stageswap_windows::InstanceCommand::Show,
+                )
+            {
+                stageswap_windows::show_error_dialog(&format!(
+                    "StageSwap is already running, but its window could not be opened. Exit the legacy tray instance and try again.\n\n{error}"
+                ));
+            }
             return Ok(());
         }
         Err(error) => {
@@ -76,8 +94,40 @@ fn main() -> eframe::Result {
             return Ok(());
         }
     };
+    #[cfg(windows)]
+    if !deployment_command {
+        match stageswap_windows::deployment_startup(_embedded_payload) {
+            Ok(false) => {}
+            Ok(true) => return Ok(()),
+            Err(error) => deployment_failure(&error),
+        }
+    }
+    #[cfg(windows)]
+    let (instance_sender, instance_receiver) = std::sync::mpsc::channel();
+    #[cfg(windows)]
+    let _instance_control = match stageswap_windows::InstanceControl::start(instance_sender) {
+        Ok(control) => control,
+        Err(error) => {
+            stageswap_windows::show_error_dialog(&error);
+            return Ok(());
+        }
+    };
+    #[cfg(windows)]
+    let instance_readiness = _instance_control.readiness();
     let store = ConfigStore::new(local_data_directory());
     let loaded = store.load();
+    #[cfg(windows)]
+    let mut loaded = loaded;
+    #[cfg(windows)]
+    if launch_context.mode == stageswap_windows::PortableMode::RunOnce
+        && loaded.config.start_with_windows
+    {
+        loaded.config.start_with_windows = false;
+        let _ = stageswap_windows::save_config_atomic(&store, &loaded.config);
+    }
+    #[cfg(windows)]
+    let start_visible = launch_context.force_visible || !loaded.config.start_minimized;
+    #[cfg(not(windows))]
     let start_visible = !loaded.config.start_minimized;
     let app_icon = app_icon::load(None).expect("embedded app icon should decode");
     let options = eframe::NativeOptions {
@@ -113,6 +163,9 @@ fn main() -> eframe::Result {
             });
             let app = SwitcherApp::new(loaded.config, loaded.warnings, store);
             #[cfg(windows)]
+            let app =
+                app.with_launch_context(launch_context.mode, instance_receiver, instance_readiness);
+            #[cfg(windows)]
             if let Some(visible) = initial_visibility_override(start_visible, app.tray.is_some()) {
                 // eframe shows the root window after its first render even when the
                 // viewport builder starts hidden. A viewport command is applied
@@ -124,6 +177,13 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(windows)]
+fn deployment_failure(error: &str) -> ! {
+    stageswap_windows::show_error_dialog(&format!("StageSwap deployment failed:\n\n{error}"));
+    eprintln!("StageSwap deployment failed: {error}");
+    std::process::exit(1);
 }
 
 #[cfg(any(windows, test))]
@@ -558,6 +618,12 @@ struct SwitcherApp {
     last_notified_warning: Option<String>,
     #[cfg(windows)]
     tray: Option<tray::Tray>,
+    #[cfg(windows)]
+    portable_mode: stageswap_windows::PortableMode,
+    #[cfg(windows)]
+    instance_commands: Option<std::sync::mpsc::Receiver<stageswap_windows::InstanceCommand>>,
+    #[cfg(windows)]
+    instance_readiness: Option<stageswap_windows::InstanceReadiness>,
     exit_requested: bool,
     show_exit_confirmation: bool,
     last_window_size: Option<Vec2>,
@@ -593,10 +659,29 @@ impl SwitcherApp {
             last_notified_warning: None,
             #[cfg(windows)]
             tray: tray::Tray::new().ok(),
+            #[cfg(windows)]
+            portable_mode: stageswap_windows::PortableMode::Managed,
+            #[cfg(windows)]
+            instance_commands: None,
+            #[cfg(windows)]
+            instance_readiness: None,
             exit_requested: false,
             show_exit_confirmation: false,
             last_window_size: None,
         }
+    }
+
+    #[cfg(windows)]
+    fn with_launch_context(
+        mut self,
+        portable_mode: stageswap_windows::PortableMode,
+        instance_commands: std::sync::mpsc::Receiver<stageswap_windows::InstanceCommand>,
+        instance_readiness: stageswap_windows::InstanceReadiness,
+    ) -> Self {
+        self.portable_mode = portable_mode;
+        self.instance_commands = Some(instance_commands);
+        self.instance_readiness = Some(instance_readiness);
+        self
     }
 
     fn send(&self, command: Command) {
@@ -1327,6 +1412,32 @@ impl SwitcherApp {
             "Startup",
             "These choices take effect the next time Windows or the app starts.",
         );
+        #[cfg(windows)]
+        if self.portable_mode == stageswap_windows::PortableMode::RunOnce {
+            let mut disabled = false;
+            ui.add_enabled_ui(false, |ui| {
+                settings_toggle_row(
+                    ui,
+                    &mut disabled,
+                    "Start with Windows",
+                    "Install StageSwap to use a stable Windows startup path.",
+                );
+            });
+            if ui.button("Install StageSwap to enable startup").clicked()
+                && let Err(error) = stageswap_windows::request_install()
+            {
+                self.load_warnings
+                    .push(format!("Could not start installation: {error}"));
+            }
+        } else {
+            settings_toggle_row(
+                ui,
+                &mut self.config.start_with_windows,
+                "Start with Windows",
+                "Launch automatically after you sign in to Windows.",
+            );
+        }
+        #[cfg(not(windows))]
         settings_toggle_row(
             ui,
             &mut self.config.start_with_windows,
@@ -2041,6 +2152,29 @@ impl SwitcherApp {
 
 impl eframe::App for SwitcherApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        if let Some(readiness) = self.instance_readiness.take() {
+            readiness.mark_ready();
+        }
+        #[cfg(windows)]
+        if let Some(commands) = self.instance_commands.as_ref() {
+            let commands: Vec<_> = commands.try_iter().collect();
+            for command in commands {
+                match command {
+                    stageswap_windows::InstanceCommand::Show => {
+                        context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    stageswap_windows::InstanceCommand::ShutdownForReplacement => {
+                        let _ = save_config(&self.store, &self.config);
+                        self.exit_requested = true;
+                        self.show_exit_confirmation = false;
+                        context.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+            }
+        }
         let snapshot = self.runtime.snapshot();
         if self
             .awaiting_video_device_id
