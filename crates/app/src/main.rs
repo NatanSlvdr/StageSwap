@@ -9,7 +9,7 @@ use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle,
     TextureOptions, Vec2,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -23,9 +23,7 @@ const TRANSITION_AMBER: Color32 = Color32::from_rgb(245, 190, 75);
 const PREVIEW_NEUTRAL: Color32 = Color32::from_rgb(42, 47, 55);
 const SETTINGS_BLUE: Color32 = Color32::from_rgb(64, 118, 216);
 const SETTINGS_SWITCH_OFF: Color32 = Color32::from_rgb(49, 56, 68);
-const FPS_WINDOW: Duration = Duration::from_secs(1);
-const FPS_REFRESH: Duration = Duration::from_millis(250);
-const PREVIEW_REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 30);
+const VISIBLE_REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 30);
 const HIDDEN_REFRESH: Duration = Duration::from_millis(250);
 const MAX_PREVIEW_TEXTURE_WIDTH: u32 = 480;
 const MAX_PREVIEW_TEXTURE_HEIGHT: u32 = 270;
@@ -101,12 +99,9 @@ fn main() -> eframe::Result {
                 style.spacing.item_spacing = egui::vec2(10.0, 10.0);
                 style.spacing.button_padding = egui::vec2(14.0, 8.0);
             });
-            let app = SwitcherApp::new(loaded.config, loaded.warnings, store, start_visible);
-            #[cfg(windows)]
-            let mut app = app;
+            let app = SwitcherApp::new(loaded.config, loaded.warnings, store);
             #[cfg(windows)]
             if !start_visible && app.tray.is_none() {
-                app.window_visible = true;
                 context
                     .egui_ctx
                     .send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -356,6 +351,15 @@ impl PreviewKind {
         !matches!(self, Self::Reference)
     }
 
+    fn pipeline_fps(self, snapshot: &AppSnapshot) -> Option<u32> {
+        match self {
+            Self::Webcam => snapshot.webcam_fps,
+            Self::Screen => snapshot.screen_fps,
+            Self::Reference => None,
+            Self::Output => snapshot.output_fps,
+        }
+    }
+
     const fn empty_message(self) -> &'static str {
         match self {
             Self::Webcam => "No webcam frame",
@@ -369,6 +373,7 @@ impl PreviewKind {
 #[derive(Clone, Copy)]
 struct PreviewOptions {
     show_fps: bool,
+    fps: Option<u32>,
     empty_message: &'static str,
 }
 
@@ -397,9 +402,10 @@ struct SettingsPreview<'a> {
 }
 
 impl PreviewOptions {
-    const fn dashboard(kind: PreviewKind) -> Self {
+    const fn dashboard(kind: PreviewKind, fps: Option<u32>) -> Self {
         Self {
             show_fps: kind.shows_fps(),
+            fps,
             empty_message: kind.empty_message(),
         }
     }
@@ -407,6 +413,7 @@ impl PreviewOptions {
     const fn settings(empty_message: &'static str) -> Self {
         Self {
             show_fps: false,
+            fps: None,
             empty_message,
         }
     }
@@ -417,77 +424,6 @@ enum PreviewContour {
     Neutral,
     Active,
     Live,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FpsReading {
-    Pending,
-    Value(u32),
-}
-
-#[derive(Default)]
-struct FpsTracker {
-    samples: VecDeque<Instant>,
-    last_sequence: Option<u64>,
-    last_presented_at: Option<Instant>,
-    last_display_update: Option<Instant>,
-    displayed: Option<u32>,
-}
-
-impl FpsTracker {
-    fn record_presentation(&mut self, sequence: u64, now: Instant) {
-        if self.last_sequence == Some(sequence) {
-            return;
-        }
-        if self
-            .last_sequence
-            .is_some_and(|previous| sequence <= previous)
-            || self
-                .last_presented_at
-                .is_some_and(|presented| now.saturating_duration_since(presented) >= FPS_WINDOW)
-        {
-            self.samples.clear();
-            self.displayed = None;
-            self.last_display_update = None;
-        }
-        self.last_sequence = Some(sequence);
-        self.last_presented_at = Some(now);
-        self.samples.push_back(now);
-        while self
-            .samples
-            .front()
-            .is_some_and(|presented| now.saturating_duration_since(*presented) > FPS_WINDOW)
-        {
-            self.samples.pop_front();
-        }
-
-        if self
-            .last_display_update
-            .is_none_or(|updated| now.saturating_duration_since(updated) >= FPS_REFRESH)
-        {
-            self.last_display_update = Some(now);
-            if let (Some(first), Some(last)) = (self.samples.front(), self.samples.back()) {
-                let elapsed = last.saturating_duration_since(*first);
-                let frames = self.samples.len().saturating_sub(1);
-                if frames > 0 && !elapsed.is_zero() {
-                    self.displayed =
-                        Some(((frames as f64 / elapsed.as_secs_f64()).round() as u32).min(999));
-                }
-            }
-        }
-    }
-
-    fn reading(&self, now: Instant) -> FpsReading {
-        if self
-            .last_presented_at
-            .is_some_and(|presented| now.saturating_duration_since(presented) >= FPS_WINDOW)
-        {
-            FpsReading::Value(0)
-        } else {
-            self.displayed
-                .map_or(FpsReading::Pending, FpsReading::Value)
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -554,7 +490,6 @@ struct SwitcherApp {
     settings_section_changed_at: Option<Instant>,
     textures: HashMap<&'static str, PreviewTexture>,
     preview_converters: HashMap<PreviewKind, PreviewConverter>,
-    fps_trackers: HashMap<PreviewKind, FpsTracker>,
     log: LocalLog,
     last_activity: Option<String>,
     #[cfg(windows)]
@@ -564,16 +499,10 @@ struct SwitcherApp {
     exit_requested: bool,
     show_exit_confirmation: bool,
     last_window_size: Option<Vec2>,
-    window_visible: bool,
 }
 
 impl SwitcherApp {
-    fn new(
-        mut config: AppConfig,
-        load_warnings: Vec<String>,
-        store: ConfigStore,
-        window_visible: bool,
-    ) -> Self {
+    fn new(mut config: AppConfig, load_warnings: Vec<String>, store: ConfigStore) -> Self {
         if config.reference_image_path.is_empty() {
             config.reference_image_path = store.reference_path().display().to_string();
         }
@@ -595,7 +524,6 @@ impl SwitcherApp {
             settings_section_changed_at: None,
             textures: HashMap::new(),
             preview_converters: HashMap::new(),
-            fps_trackers: HashMap::new(),
             log,
             last_activity: None,
             #[cfg(windows)]
@@ -605,7 +533,6 @@ impl SwitcherApp {
             exit_requested: false,
             show_exit_confirmation: false,
             last_window_size: None,
-            window_visible,
         }
     }
 
@@ -849,9 +776,9 @@ impl SwitcherApp {
                                 ui,
                                 kind,
                                 frame,
-                                rendered_width,
-                                rendered_height,
+                                [rendered_width, rendered_height],
                                 snapshot.actual_output,
+                                kind.pipeline_fps(snapshot),
                             );
                         },
                     );
@@ -1828,17 +1755,17 @@ impl SwitcherApp {
         ui: &mut egui::Ui,
         kind: PreviewKind,
         frame: Option<&Arc<Frame>>,
-        width: f32,
-        height: f32,
+        size: [f32; 2],
         actual_output: Source,
+        fps: Option<u32>,
     ) {
         self.preview(
             ui,
             kind,
             frame,
-            [width, height],
+            size,
             actual_output,
-            PreviewOptions::dashboard(kind),
+            PreviewOptions::dashboard(kind, fps),
         );
         ui.add_space(8.0);
         preview_caption(ui, kind);
@@ -1868,8 +1795,6 @@ impl SwitcherApp {
             }
         };
         let contour_width = 3.0;
-        let now = Instant::now();
-        let mut presented_sequence = None;
         let preview_frame = egui::Frame::new()
             .fill(Color32::from_rgb(12, 14, 18))
             .stroke(Stroke::new(contour_width, contour_color))
@@ -1906,13 +1831,11 @@ impl SwitcherApp {
                                 if !Arc::ptr_eq(&texture.source, &prepared.frame)
                                     || texture.size != prepared.size
                                 {
-                                    presented_sequence = Some(prepared.frame.sequence);
                                     texture.texture.set(prepared.image, TextureOptions::LINEAR);
                                     texture.source = prepared.frame;
                                     texture.size = prepared.size;
                                 }
                             } else {
-                                presented_sequence = Some(prepared.frame.sequence);
                                 let texture = ui.ctx().load_texture(
                                     kind.key(),
                                     prepared.image,
@@ -1950,15 +1873,8 @@ impl SwitcherApp {
                 },
             );
         });
-        let fps_reading = options.show_fps.then(|| {
-            let tracker = self.fps_trackers.entry(kind).or_default();
-            if let Some(sequence) = presented_sequence {
-                tracker.record_presentation(sequence, now);
-            }
-            tracker.reading(now)
-        });
-        if let Some(reading) = fps_reading {
-            paint_fps_overlay(ui, preview.response.rect, reading);
+        if options.show_fps {
+            paint_fps_overlay(ui, preview.response.rect, options.fps);
         }
         preview.response.rect
     }
@@ -2020,7 +1936,6 @@ impl eframe::App for SwitcherApp {
         if let Some(action) = self.tray.as_ref().and_then(tray::Tray::poll) {
             match action {
                 tray::TrayAction::Show => {
-                    self.window_visible = true;
                     context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     context.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
@@ -2028,7 +1943,6 @@ impl eframe::App for SwitcherApp {
                 tray::TrayAction::Exit => {
                     if self.config.confirm_exit {
                         self.show_exit_confirmation = true;
-                        self.window_visible = true;
                         context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         context.send_viewport_cmd(egui::ViewportCommand::Focus);
                     } else {
@@ -2065,20 +1979,24 @@ impl eframe::App for SwitcherApp {
         if close_requested && self.config.close_to_tray && !self.exit_requested {
             context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            self.window_visible = false;
         } else if close_requested && self.config.confirm_exit && !self.exit_requested {
             context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.show_exit_confirmation = true;
         }
-        context.request_repaint_after(if self.window_visible {
-            PREVIEW_REFRESH
-        } else {
-            HIDDEN_REFRESH
-        });
+        context.request_repaint_after(repaint_interval(false));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.root_ui(ui);
+        ui.ctx().request_repaint_after(repaint_interval(true));
+    }
+}
+
+fn repaint_interval(ui_rendered: bool) -> Duration {
+    if ui_rendered {
+        VISIBLE_REFRESH
+    } else {
+        HIDDEN_REFRESH
     }
 }
 
@@ -2755,11 +2673,8 @@ fn preview_caption(ui: &mut egui::Ui, kind: PreviewKind) {
     }
 }
 
-fn paint_fps_overlay(ui: &egui::Ui, preview_rect: Rect, reading: FpsReading) {
-    let text = match reading {
-        FpsReading::Pending => "-- FPS".to_owned(),
-        FpsReading::Value(value) => format!("{value} FPS"),
-    };
+fn paint_fps_overlay(ui: &egui::Ui, preview_rect: Rect, fps: Option<u32>) {
+    let text = fps.map_or_else(|| "-- FPS".to_owned(), |value| format!("{value} FPS"));
     let font = FontId::monospace(10.5);
     let galley = ui
         .painter()
@@ -3357,6 +3272,14 @@ mod tests {
     }
 
     #[test]
+    fn visible_ui_and_hidden_logic_use_distinct_repaint_cadences() {
+        assert_eq!(repaint_interval(true), VISIBLE_REFRESH);
+        assert_eq!(repaint_interval(false), HIDDEN_REFRESH);
+        assert_eq!(VISIBLE_REFRESH, Duration::from_nanos(1_000_000_000 / 30));
+        assert_eq!(HIDDEN_REFRESH, Duration::from_millis(250));
+    }
+
+    #[test]
     fn preview_conversion_preserves_size_and_bgra_channels() {
         let frame = Frame::new(
             vec![3, 2, 1, 255, 30, 20, 10, 255].into(),
@@ -3555,71 +3478,16 @@ mod tests {
     }
 
     #[test]
-    fn fps_tracker_measures_presented_frames_at_steady_and_reduced_rates() {
-        let start = Instant::now();
-        let mut steady = FpsTracker::default();
-        for sequence in 1..=31 {
-            let elapsed = Duration::from_secs_f64((sequence - 1) as f64 / 30.0);
-            steady.record_presentation(sequence, start + elapsed);
-        }
-        assert_eq!(
-            steady.reading(start + Duration::from_secs(1)),
-            FpsReading::Value(30)
-        );
-
-        let mut reduced = FpsTracker::default();
-        for sequence in 1..=16 {
-            let elapsed = Duration::from_secs_f64((sequence - 1) as f64 / 15.0);
-            reduced.record_presentation(sequence, start + elapsed);
-        }
-        assert_eq!(
-            reduced.reading(start + Duration::from_secs(1)),
-            FpsReading::Value(15)
-        );
-    }
-
-    #[test]
-    fn fps_tracker_counts_presentations_instead_of_source_sequence_gaps() {
-        let start = Instant::now();
-        let mut tracker = FpsTracker::default();
-        tracker.record_presentation(1, start);
-        tracker.record_presentation(11, start + Duration::from_millis(333));
-        assert_eq!(
-            tracker.reading(start + Duration::from_millis(333)),
-            FpsReading::Value(3)
-        );
-    }
-
-    #[test]
-    fn fps_tracker_resets_and_reports_presentation_stalls() {
-        let start = Instant::now();
-        let mut tracker = FpsTracker::default();
-        tracker.record_presentation(10, start);
-        tracker.record_presentation(20, start + Duration::from_millis(333));
-        assert_eq!(
-            tracker.reading(start + Duration::from_millis(333)),
-            FpsReading::Value(3)
-        );
-
-        tracker.record_presentation(1, start + Duration::from_millis(500));
-        assert_eq!(
-            tracker.reading(start + Duration::from_millis(500)),
-            FpsReading::Pending
-        );
-        assert_eq!(
-            tracker.reading(start + Duration::from_millis(1500)),
-            FpsReading::Value(0)
-        );
-    }
-
-    #[test]
-    fn fps_overlays_skip_the_static_reference() {
+    fn fps_overlays_use_runtime_metrics_for_all_live_pipelines() {
         assert!(PreviewKind::Webcam.shows_fps());
         assert!(PreviewKind::Screen.shows_fps());
         assert!(PreviewKind::Output.shows_fps());
         assert!(!PreviewKind::Reference.shows_fps());
         assert!(!PreviewOptions::settings("missing").show_fps);
-        assert!(PreviewOptions::dashboard(PreviewKind::Webcam).show_fps);
+        assert!(PreviewOptions::dashboard(PreviewKind::Webcam, Some(30)).show_fps);
+        let output = PreviewOptions::dashboard(PreviewKind::Output, Some(30));
+        assert!(output.show_fps);
+        assert_eq!(output.fps, Some(30));
     }
 
     #[test]
@@ -3654,7 +3522,6 @@ mod tests {
             AppConfig::default(),
             Vec::new(),
             ConfigStore::new(directory.path()),
-            true,
         );
         let context = egui::Context::default();
         for (viewport, dpi_scale) in [
@@ -3807,7 +3674,6 @@ mod tests {
             AppConfig::default(),
             Vec::new(),
             ConfigStore::new(directory.path()),
-            true,
         );
         for kind in [
             PreviewKind::Webcam,
@@ -3874,7 +3740,6 @@ mod tests {
             AppConfig::default(),
             Vec::new(),
             ConfigStore::new(directory.path()),
-            true,
         );
         app.log.write("info", "test", "KEEP", "keep this entry");
         let before = directory.path().join("before.jsonl");
@@ -3909,7 +3774,7 @@ mod tests {
     fn settings_save_is_debounced_and_back_flushes_pending_changes() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path());
-        let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store.clone(), true);
+        let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store.clone());
         let started_at = Instant::now();
         app.config.cursor_visible = true;
         app.config.selected_video_device_id = "new-camera".into();
@@ -3945,7 +3810,6 @@ mod tests {
             AppConfig::default(),
             Vec::new(),
             ConfigStore::new(&blocked_path),
-            true,
         );
         app.config.show_notifications = false;
         app.queue_settings_save();
@@ -3973,7 +3837,6 @@ mod tests {
             },
             vec!["Test warning banner".into()],
             ConfigStore::new(directory.path()),
-            true,
         );
         let context = egui::Context::default();
         for viewport in [

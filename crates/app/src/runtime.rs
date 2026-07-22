@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const COMMAND_CAPACITY: usize = 32;
 const ACTIVITY_LIMIT: usize = 20;
+const FPS_TRACKING_WINDOW: Duration = Duration::from_secs(1);
 
 pub struct RuntimeHandle {
     commands: SyncSender<Command>,
@@ -89,6 +90,9 @@ struct RuntimeState {
     snapshot: AppSnapshot,
     transition: TransitionController,
     compositor: FrameCompositor,
+    webcam_fps: SourceFpsTracker,
+    screen_fps: SourceFpsTracker,
+    output_fps: OutputFpsTracker,
     activity: VecDeque<String>,
     sequence: u64,
     started_at: Instant,
@@ -130,6 +134,9 @@ impl RuntimeState {
             config,
             transition,
             compositor: FrameCompositor::default(),
+            webcam_fps: SourceFpsTracker::default(),
+            screen_fps: SourceFpsTracker::default(),
+            output_fps: OutputFpsTracker::default(),
             activity: VecDeque::with_capacity(ACTIVITY_LIMIT),
             sequence,
             started_at: now,
@@ -280,6 +287,98 @@ impl RuntimeState {
         };
         self.snapshot.detection = self.detector.update(similarity, valid);
     }
+
+    fn refresh_input_fps(&mut self, now: Instant) {
+        let webcam = self
+            .snapshot
+            .availability
+            .camera_ready
+            .then_some(self.snapshot.previews.webcam.as_deref())
+            .flatten();
+        let screen = self
+            .snapshot
+            .availability
+            .screen_ready
+            .then_some(self.snapshot.previews.screen.as_deref())
+            .flatten();
+        self.snapshot.webcam_fps = self.webcam_fps.observe(webcam, now);
+        self.snapshot.screen_fps = self.screen_fps.observe(screen, now);
+    }
+}
+
+#[derive(Default)]
+struct SourceFpsTracker {
+    samples: VecDeque<(Instant, u64)>,
+    last_sequence: Option<u64>,
+    last_received_at: Option<Instant>,
+    displayed: Option<u32>,
+}
+
+impl SourceFpsTracker {
+    fn observe(&mut self, frame: Option<&Frame>, now: Instant) -> Option<u32> {
+        if let Some(frame) = frame
+            && self.last_sequence != Some(frame.sequence)
+        {
+            if self
+                .last_sequence
+                .is_some_and(|sequence| frame.sequence <= sequence)
+            {
+                self.samples.clear();
+                self.displayed = None;
+            }
+            self.last_sequence = Some(frame.sequence);
+            self.last_received_at = Some(frame.received_at);
+            self.samples.push_back((frame.received_at, frame.sequence));
+            while self.samples.front().is_some_and(|(received_at, _)| {
+                frame.received_at.saturating_duration_since(*received_at) > FPS_TRACKING_WINDOW
+            }) {
+                self.samples.pop_front();
+            }
+            if let (Some((first_time, first_sequence)), Some((last_time, last_sequence))) =
+                (self.samples.front(), self.samples.back())
+            {
+                let elapsed = last_time.saturating_duration_since(*first_time);
+                let frames = last_sequence.saturating_sub(*first_sequence);
+                if frames > 0 && !elapsed.is_zero() {
+                    self.displayed =
+                        Some(((frames as f64 / elapsed.as_secs_f64()).round() as u32).min(999));
+                }
+            }
+        }
+
+        if self
+            .last_received_at
+            .is_some_and(|received| now.saturating_duration_since(received) >= FPS_TRACKING_WINDOW)
+        {
+            Some(0)
+        } else {
+            self.displayed
+        }
+    }
+}
+
+#[derive(Default)]
+struct OutputFpsTracker {
+    samples: VecDeque<Instant>,
+}
+
+impl OutputFpsTracker {
+    fn observe(&mut self, now: Instant) -> Option<u32> {
+        self.samples.push_back(now);
+        while self
+            .samples
+            .front()
+            .is_some_and(|sample| now.saturating_duration_since(*sample) > FPS_TRACKING_WINDOW)
+        {
+            self.samples.pop_front();
+        }
+        let first = self.samples.front()?;
+        let last = self.samples.back()?;
+        let elapsed = last.saturating_duration_since(*first);
+        let frames = self.samples.len().saturating_sub(1);
+        (frames > 0 && !elapsed.is_zero())
+            .then(|| ((frames as f64 / elapsed.as_secs_f64()).round() as u32).min(999))
+    }
 }
 
 fn gray_thumbnail(frame: &Frame) -> Option<GrayImage> {
@@ -391,8 +490,10 @@ fn run(config: AppConfig, commands: Receiver<Command>, shared: Arc<RwLock<AppSna
         }
         pacer.advance(now);
         platform.refresh_inputs(&mut state);
+        state.refresh_input_fps(now);
         state.detect(now);
         state.tick(now);
+        state.snapshot.output_fps = state.output_fps.observe(now);
         platform.publish(&mut state);
         *shared
             .write()
@@ -991,6 +1092,45 @@ impl Platform {
 mod tests {
     use super::*;
     use asc_core::OutputMode;
+
+    #[test]
+    fn output_fps_tracker_measures_generated_output_independently_of_ui() {
+        let start = Instant::now();
+        let mut tracker = OutputFpsTracker::default();
+        let mut reading = None;
+        for frame in 0..=30 {
+            reading = tracker.observe(start + Duration::from_secs_f64(frame as f64 / 30.0));
+        }
+        assert_eq!(reading, Some(30));
+
+        let resumed = tracker.observe(start + Duration::from_secs(3));
+        assert_eq!(resumed, None);
+    }
+
+    #[test]
+    fn source_fps_tracker_measures_capture_rate_and_reports_stalls() {
+        let start = Instant::now();
+        let mut tracker = SourceFpsTracker::default();
+        let mut reading = None;
+        for sequence in 1..=31 {
+            let received_at = start + Duration::from_secs_f64((sequence - 1) as f64 / 30.0);
+            let frame = Frame::placeholder(Size::new(1, 1), 0xff00_0000, sequence, 0, received_at);
+            reading = tracker.observe(Some(&frame), received_at);
+        }
+        assert_eq!(reading, Some(30));
+
+        let last = Frame::placeholder(
+            Size::new(1, 1),
+            0xff00_0000,
+            31,
+            0,
+            start + Duration::from_secs(1),
+        );
+        assert_eq!(
+            tracker.observe(Some(&last), start + Duration::from_secs(2)),
+            Some(0)
+        );
+    }
 
     #[test]
     fn reference_detection_is_gray_but_preview_stays_in_color() {
