@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, bail};
+use std::cmp::max;
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,8 +26,8 @@ fn main() -> Result<()> {
 
 fn portable(architecture: String, output: Option<PathBuf>) -> Result<()> {
     let windows_sdk = selected_windows_sdk()?;
-    let (target, artifact) = match architecture.as_str() {
-        "x64" => ("x86_64-pc-windows-msvc", "windows-x64-portable.exe"),
+    let target = match architecture.as_str() {
+        "x64" => "x86_64-pc-windows-msvc",
         _ => bail!("architecture must be x64"),
     };
     run(&mut cargo_build("asc-media-source", target, None))?;
@@ -53,7 +55,13 @@ fn portable(architecture: String, output: Option<PathBuf>) -> Result<()> {
     validate_embedded_payload(&executable, &dll)?;
     let output = output.unwrap_or_else(|| PathBuf::from("dist"));
     fs::create_dir_all(&output).context("create dist directory")?;
-    let destination = output.join(artifact);
+    let digest = sha256(&fs::read(&executable)?);
+    let history = env::var_os("ASC_RELEASE_HISTORY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| output.clone());
+    let release_version = select_release_version(&history, &digest)?;
+    let artifact = format!("WebcamSwitcher_win64_v{release_version}.exe");
+    let destination = output.join(&artifact);
     fs::copy(&executable, &destination).with_context(|| {
         format!(
             "copy portable executable from {} to {}",
@@ -61,16 +69,105 @@ fn portable(architecture: String, output: Option<PathBuf>) -> Result<()> {
             destination.display()
         )
     })?;
-    let digest = sha256(&fs::read(&destination)?);
     let revision = env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".into());
     let checksum = format!(
-        "# applicationVersion={}\n# sourceRevision={revision}\n# architecture={architecture}\n# configuration=Release\n# windowsSdk={windows_sdk}\n{} *{artifact}\n",
+        "# applicationVersion={}\n# releaseVersion={release_version}\n# sourceRevision={revision}\n# architecture={architecture}\n# configuration=Release\n# windowsSdk={windows_sdk}\n{} *{artifact}\n",
         env!("CARGO_PKG_VERSION"),
         hex(&digest)
     );
     fs::write(output.join(format!("{artifact}.sha256")), checksum)?;
     println!("packaged {}", destination.display());
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ReleaseVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
+impl ReleaseVersion {
+    fn parse(value: &str) -> Result<Self> {
+        let mut parts = value.split('.');
+        let version = Self {
+            major: parts.next().context("missing major version")?.parse()?,
+            minor: parts.next().context("missing minor version")?.parse()?,
+            patch: parts.next().context("missing patch version")?.parse()?,
+        };
+        if parts.next().is_some() {
+            bail!("release version must contain exactly three numbers");
+        }
+        Ok(version)
+    }
+
+    fn increment_patch(self) -> Result<Self> {
+        Ok(Self {
+            patch: self
+                .patch
+                .checked_add(1)
+                .context("patch version overflow")?,
+            ..self
+        })
+    }
+}
+
+impl fmt::Display for ReleaseVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+fn select_release_version(output: &Path, digest: &[u8; 32]) -> Result<ReleaseVersion> {
+    let application_version = ReleaseVersion::parse(env!("CARGO_PKG_VERSION"))?;
+    let Some((latest_version, latest_digest)) = latest_release(output)? else {
+        return Ok(application_version);
+    };
+    if latest_digest == hex(digest) {
+        return Ok(latest_version);
+    }
+    Ok(max(latest_version.increment_patch()?, application_version))
+}
+
+fn latest_release(output: &Path) -> Result<Option<(ReleaseVersion, String)>> {
+    const PREFIX: &str = "WebcamSwitcher_win64_v";
+    const SUFFIX: &str = ".exe.sha256";
+    if !output.exists() {
+        return Ok(None);
+    }
+    let mut latest = None;
+    for entry in fs::read_dir(output).context("read release output directory")? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(version) = name
+            .strip_prefix(PREFIX)
+            .and_then(|name| name.strip_suffix(SUFFIX))
+        else {
+            continue;
+        };
+        let Ok(version) = ReleaseVersion::parse(version) else {
+            continue;
+        };
+        if latest
+            .as_ref()
+            .is_some_and(|(latest_version, _)| *latest_version >= version)
+        {
+            continue;
+        }
+        let contents = fs::read_to_string(entry.path())
+            .with_context(|| format!("read release checksum {}", entry.path().display()))?;
+        let digest = contents
+            .lines()
+            .find(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .and_then(|line| line.split_whitespace().next())
+            .context("release sidecar has no checksum")?;
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("release sidecar has an invalid SHA-256 checksum");
+        }
+        latest = Some((version, digest.to_ascii_lowercase()));
+    }
+    Ok(latest)
 }
 
 fn cargo_build(package: &str, target: &str, embedded_dll: Option<&Path>) -> Command {
@@ -298,6 +395,34 @@ mod tests {
         assert_ne!(
             "10.0.26100.0".trim_end_matches(['\\', '/']),
             REQUIRED_WINDOWS_SDK
+        );
+    }
+
+    #[test]
+    fn release_version_reuses_matching_checksum_and_increments_changed_checksum() {
+        let directory = tempfile::tempdir().unwrap();
+        let digest = sha256(b"current build");
+        let sidecar = directory
+            .path()
+            .join("WebcamSwitcher_win64_v1.2.22.exe.sha256");
+        fs::write(&sidecar, format!("{} *artifact.exe\n", hex(&digest))).unwrap();
+
+        assert_eq!(
+            select_release_version(directory.path(), &digest).unwrap(),
+            ReleaseVersion::parse("1.2.22").unwrap()
+        );
+        assert_eq!(
+            select_release_version(directory.path(), &sha256(b"changed build")).unwrap(),
+            ReleaseVersion::parse("1.2.23").unwrap()
+        );
+    }
+
+    #[test]
+    fn release_version_starts_at_application_version() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            select_release_version(directory.path(), &sha256(b"first build")).unwrap(),
+            ReleaseVersion::parse(env!("CARGO_PKG_VERSION")).unwrap()
         );
     }
 }

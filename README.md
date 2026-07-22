@@ -2,12 +2,12 @@
 
 Automatic Screen Camera is a local-only Windows 11 virtual camera written in Rust. Automatic mode shows the webcam while a saved visual reference matches a monitor and otherwise shows that monitor. Force Webcam and Force Screen are manual overrides; changes use a reversible 500 ms fade.
 
-Download `windows-x64-portable.exe` for an x64 Windows 11 computer.
+Download `WebcamSwitcher_win64_vX.Y.Z.exe` for an x64 Windows 11 computer.
 
 Each EXE embeds its same-architecture Rust Media Foundation DLL. First launch requests elevation only to extract and register the DLL under `%ProgramFiles%\Automatic Screen Camera Rust Portable`; later launches run unelevated. Payloads use content-versioned filenames, so an upgrade can register its new DLL even while a camera application still has the previous DLL loaded. Locked old copies are scheduled for deletion at reboot. Before deleting the EXE, exit the tray application and run:
 
 ```powershell
-.\windows-x64-portable.exe --cleanup-portable
+.\WebcamSwitcher_win64_vX.Y.Z.exe --cleanup-portable
 ```
 
 On every launch, the app removes any legacy portable registration and files before verifying the current embedded camera source. User configuration, references, and logs are left intact.
@@ -64,9 +64,12 @@ cargo install --locked cargo-xwin
 
 The wrapper cross-compiles with the x64 Windows MSVC target, pins the Windows SDK,
 embeds the matching DLL and Windows resources, validates the generated PE files and
-payload, and writes the executable and checksum to `dist`. Cached Rust and SDK files
-make subsequent builds faster. GitHub Actions remains the authoritative release
-builder, and the resulting executable cannot be run or hardware-tested on macOS.
+payload, and writes the versioned executable and checksum to `dist`. If a build's
+checksum differs from the latest versioned artifact in that directory, the patch
+number is incremented; rebuilding identical bytes keeps the same version. Cached
+Rust and SDK files make subsequent builds faster. GitHub Actions remains the
+authoritative release builder, and the resulting executable cannot be run or
+hardware-tested on macOS.
 
 In the VM, use the short smoke pass below:
 

@@ -21,8 +21,31 @@ jobs:
         with:
           arch: amd64
           sdk: 10.0.22621.0
+      - name: Restore latest release version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          New-Item -ItemType Directory -Force release-history | Out-Null
+          $releases = gh release list --limit 100 --json tagName | ConvertFrom-Json
+          foreach ($release in $releases) {
+            $details = gh release view $release.tagName --json assets | ConvertFrom-Json
+            $versionedSidecars = @($details.assets | Where-Object {
+              $_.name -like 'WebcamSwitcher_win64_v*.exe.sha256'
+            })
+            if ($versionedSidecars.Count -eq 0) { continue }
+            gh release download $release.tagName `
+              --pattern 'WebcamSwitcher_win64_v*.exe.sha256' `
+              --dir release-history `
+              --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            break
+          }
       - name: Test and package x64
         shell: pwsh
+        env:
+          ASC_RELEASE_HISTORY: release-history
         run: |
           cargo test --workspace --all-targets --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -56,6 +79,12 @@ jobs:
           short_sha="${GITHUB_SHA::7}"
           release_tag="build-$short_sha"
           if gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release view "$release_tag" --json assets --jq '.assets[].name' |
+              while read -r asset; do
+                case "$asset" in
+                  *.exe|*.sha256) gh release delete-asset "$release_tag" "$asset" --yes ;;
+                esac
+              done
             gh release upload "$release_tag" \
               release-assets/*.exe \
               release-assets/*.sha256 \
