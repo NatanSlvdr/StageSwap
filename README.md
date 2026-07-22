@@ -1,173 +1,127 @@
 <p align="center">
-  <img src="crates/app/assets/app-icon.png" width="132" alt="StageSwap app icon">
+  <img src="crates/app/assets/app-icon.png" width="120" alt="StageSwap app icon">
 </p>
 
 <h1 align="center">StageSwap</h1>
 
-<p align="center">
-  <strong>Stay present while you present.</strong><br>
-  StageSwap automatically switches your virtual camera between you and your screen during hybrid meetings.
-</p>
+StageSwap is a free Windows 11 tool that combines one camera and one display into a virtual camera for meetings and hybrid events. Select **StageSwap** as the camera in your meeting app, then control whether its output shows the camera or the display.
 
-<p align="center">
-  <a href="https://github.com/NatanSlvdr/StageSwap/releases/latest"><strong>Download for Windows 11</strong></a>
-  ·
-  <a href="#how-automatic-mode-works">How it works</a>
-  ·
-  <a href="DEV.md">Developer guide</a>
-</p>
-
----
-
-## One camera that knows when you are presenting
-
-StageSwap combines **one webcam** and **one display** into a single virtual camera. Choose **StageSwap** as the camera in your meeting app and leave it selected: StageSwap decides whether that camera feed should currently show you or your presentation.
-
-When your chosen display shows its saved idle view, people see your webcam. Change the display to your presentation and they see the screen. Return to the idle view and StageSwap brings you back on camera.
-
-> [!IMPORTANT]
-> StageSwap sends the display through a virtual **camera** at 1280×720 and 30 fps. It does not start your meeting app's native screen-sharing mode and it does not send audio.
+The virtual-camera output is fixed at 1280×720 and 30 fps. StageSwap does not start the meeting app's native screen-sharing mode and does not transmit audio.
 
 ## How Automatic mode works
 
-### 1. You choose an idle view
+Automatic mode uses a saved image of the display to decide which source to show. This image is called the **reference**. It can be a holding slide, event graphic, desktop background, or any other view that means the camera should be active.
 
-Show something recognizable on your presentation display: a holding slide, event graphic, desktop wallpaper, or any screen you use when you want the audience to see you. Select **Capture reference** to save that view. You can also import an existing image.
+<p align="center"><strong>🖼️ Reference matches → 📷 Camera &nbsp;&nbsp;|&nbsp;&nbsp; Reference changes → 🖥️ Display</strong></p>
 
-The reference is simply a visual signal. StageSwap does not read slide titles, app names, or window content.
+StageSwap compares the selected display with the reference four times per second. It only looks at the visual similarity; it does not read slide titles, app names, or text.
 
-### 2. StageSwap watches for a change
+With the default settings:
 
-While automation is running, StageSwap compares the selected display with the reference four times per second.
+- A changed display is recognized after about **0.75 seconds**.
+- A returned reference is confirmed after about **1.25 seconds**.
+- Each change uses a reversible **0.5-second fade**.
 
-| What StageSwap detects | What it does |
+Waiting for several checks prevents a cursor, animation, or single unusual frame from causing a switch. **Match strictness** controls how closely the display must resemble the reference.
+
+If no usable reference is available, Automatic mode stays on the camera. Stopping automation keeps the virtual camera available but replaces its output with the black StageSwap off screen.
+
+## Output modes
+
+| Mode | Behavior while automation is running |
 |:---|:---|
-| The display matches the reference | Shows the **webcam** |
-| The display no longer matches | Shows the **screen** |
-| The reference appears again | Returns to the **webcam** |
+| **Automatic** | Uses the reference to switch between the camera and display |
+| **Camera** | Keeps the selected camera visible and ignores reference changes |
+| **Display** | Keeps the selected display visible and ignores reference changes |
 
-StageSwap waits for several matching or different checks before changing the output. With the default settings, a changed screen is recognized in about **0.75 seconds**, while a returned reference is confirmed in about **1.25 seconds**. This avoids rapid switching caused by a cursor, animation, or one unusual frame.
+Camera and Display are manual overrides. They remain selected until another mode is chosen and use the same fade as Automatic mode.
 
-The **Match strictness** setting controls how closely the screen must resemble the saved image. A higher value requires a closer match.
+## Set up StageSwap
 
-### 3. The output changes smoothly
+StageSwap requires a 64-bit Windows 11 computer, a camera, and the display you want to present.
 
-Every switch uses a half-second fade instead of a hard cut. The fade is reversible: if the detected state changes while a transition is still happening, StageSwap smoothly turns back from its current position.
+1. Download `StageSwap_win64_vX.Y.Z.exe` from the [official releases page](https://github.com/NatanSlvdr/StageSwap/releases/latest).
+2. Open it and choose **Install StageSwap**, or choose **Run once** to try it without copying the app to your computer.
 
-The final output keeps its 16:9 shape. Sources that do not fit are scaled without stretching and may receive black bars. The webcam can optionally be cropped and centered to fill 16:9.
+<p align="center">
+  <img src="docs/images/readme/first-launch.svg" width="760" alt="Placeholder for the StageSwap first-launch installation choice">
+</p>
+<p align="center"><em>First launch lets you install StageSwap or run the downloaded copy once.</em></p>
 
-## Three output modes
+3. Approve the administrator prompt. This is required only to add or update the virtual camera; normal launches run without administrator access.
+4. Choose the camera and display StageSwap should use.
 
-The selected mode controls the output while automation is running.
+<p align="center">
+  <img src="docs/images/readme/dashboard.svg" width="760" alt="Placeholder for the StageSwap dashboard">
+</p>
+<p align="center"><em>The dashboard shows the four previews, component status, output mode, and automation controls.</em></p>
 
-| Mode | Behavior |
-|:---|:---|
-| **Automatic** | Uses the saved reference to choose between the webcam and screen |
-| **Webcam** | Keeps the webcam visible, ignoring reference changes |
-| **Screen** | Keeps the selected display visible, ignoring reference changes |
+5. Show the idle view on the selected display and select **Capture reference**. An existing image can also be imported.
 
-The Webcam and Screen modes are manual overrides. They remain active until you select another mode, and they use the same smooth fade as Automatic mode.
+<p align="center">
+  <img src="docs/images/readme/matching-settings.svg" width="760" alt="Placeholder for the StageSwap reference-matching settings">
+</p>
+<p align="center"><em>Matching settings are used to capture or import the reference and adjust match strictness.</em></p>
 
-## What happens when something is unavailable?
-
-StageSwap favors predictable, private behavior rather than showing an unexpected source.
-
-| Situation | Output behavior |
-|:---|:---|
-| No usable reference | Automatic mode stays on the **webcam** |
-| Selected display is unavailable | StageSwap falls back to the **webcam** when possible |
-| Webcam is unavailable when requested | StageSwap shows a safe placeholder instead of another screen |
-| Automation is stopped | The virtual camera shows a black branded StageSwap screen |
-| StageSwap is fully exited | Camera apps still receive the black branded StageSwap screen |
-
-If a webcam or display is unplugged, reconnected, or affected by sleep, reselect it or use the restart controls in **Settings → Diagnostics**. StageSwap does not silently replace a missing webcam with a different camera.
-
-## Displays, references, and rescanning
-
-StageSwap remembers the selected display by its Windows name. If that display is no longer available at launch, it prefers another secondary display and uses the main display only when it is the sole option.
-
-By default, StageSwap looks for the saved reference at startup, after the reference changes, and every 30 seconds. It only moves to the best-matching display after confirming the result twice, without pausing the camera output. You can disable automatic display rescans or start one at any time with **Rescan screens**.
-
-You can decide whether the mouse cursor is included in the captured screen and in newly captured references.
-
-## Features at a glance
-
-- **Automatic camera-to-screen switching** based on a reference image you control
-- **Webcam and Screen overrides** available from the dashboard and system tray
-- **Smooth, reversible transitions** between live sources
-- **Four live previews** for the webcam, display, saved reference, and final audience output
-- **Component health indicators** for the webcam, screen capture, matching, and virtual camera
-- **Display rediscovery** when the reference moves to another monitor
-- **Optional 16:9 webcam crop** and optional mouse cursor capture
-- **Close to system tray** while capture and output continue running
-- **Flexible startup** with start minimized, start automatically, and start with Windows options
-- **Built-in recovery controls** to restart the webcam, screen capture, virtual camera, or everything
-- **Local diagnostic logs** retained for 14 days, with open, export, and clear actions
-- **Local-only processing** with no frame recording or upload
-
-## Everyday app behavior
-
-- **Start automation** makes the selected mode live through the virtual camera.
-- **Stop automation** keeps the virtual camera available but replaces its content with the branded off screen.
-- Closing the window can leave StageSwap running in the system tray, so the meeting output continues.
-- Fully exiting StageSwap stops capture and processing. The registered virtual camera remains available and shows the branded off screen.
-- Opening the installed app again brings the existing dashboard back instead of starting a second copy.
-- Opening a newer downloaded build offers to update the installed copy while keeping settings and the saved reference.
-
-## Get started
-
-### What you need
-
-- A 64-bit Windows 11 computer
-- A webcam
-- The display you want to present
-
-### Set up StageSwap
-
-1. Download the latest `StageSwap_win64_vX.Y.Z.exe` from the [official releases page](https://github.com/NatanSlvdr/StageSwap/releases/latest).
-2. Open it and choose **Install StageSwap** for the recommended setup, or **Run once** to try it without copying the app to your computer.
-3. Approve the Windows administrator prompt on first launch. StageSwap only needs it to add its virtual camera; normal launches do not require administrator access.
-4. In StageSwap, choose your webcam and the display you want it to watch.
-5. Show your preferred idle view and select **Capture reference**.
-6. In your meeting app, choose **StageSwap** as your camera, then select **Start automation**.
+6. Select **StageSwap** as the camera in the meeting app.
+7. Select **Start automation**.
 
 > [!NOTE]
-> Current releases are unsigned, so Windows may show a security warning. Only continue when the file came from the official StageSwap releases page.
+> Current releases are unsigned, so Windows may show a security warning. Continue only when the file came from the official StageSwap releases page.
 
-## Install, update, or try it once
+## Features
 
-StageSwap comes as one self-contained file — there is no traditional setup wizard.
+### Switching and output
 
-- **Install StageSwap** adds Start Menu and Desktop shortcuts and enables the option to start with Windows.
-- **Run once** opens the downloaded copy without installing it. Windows startup stays disabled so moving or deleting the download cannot break it.
-- **Update StageSwap** by opening a newer downloaded version. StageSwap asks before replacing the installed copy, keeps your settings, and opens the updated dashboard.
+- 🔄 **Automatic switching** uses the saved reference to choose the camera or display.
+- 🎛️ **Manual modes** force the camera or display when the operator needs direct control.
+- 👁️ **Four previews** show the camera, display, reference, and final audience output.
 
-The first launch may briefly request administrator permission. Later launches run normally without it.
+### Displays and operation
+
+- 🖥️ **Display rescanning** looks for the reference at startup, after reference changes, and every 30 seconds by default.
+- 🛠️ **Recovery controls** restart the camera, display capture, virtual camera, or the complete pipeline.
+- 🔒 **Local processing** keeps frames on the computer and does not record or upload them.
+
+StageSwap can include or hide the mouse cursor, crop and center the camera to 16:9, start minimized, begin automation on launch, and continue running when the dashboard is closed to the system tray.
+
+## Everyday controls
+
+- **Start automation** makes the selected output mode live.
+- **Stop automation** shows the StageSwap off screen without removing the virtual camera.
+- **Camera**, **Display**, and **Automatic** can be selected from the dashboard or tray menu.
+- **Capture reference** saves the current display view.
+- **Rescan screens** searches the connected displays for the saved reference.
+- Closing the dashboard to the tray keeps capture and output running. Fully exiting stops capture; camera apps receive the StageSwap off screen.
 
 ## Privacy
 
-StageSwap is local-only. Camera and screen frames stay on your computer and are not recorded or uploaded. Settings, your reference image, and short diagnostic logs are stored under `%LocalAppData%\StageSwap`.
+Camera and display frames are processed locally and are not recorded or uploaded. Settings, the reference image, and 14-day diagnostic logs are stored under `%LocalAppData%\StageSwap`.
 
-Remember that anything visible on your selected display can become the virtual-camera output while **Automatic** or **Screen** mode is active.
+Anything visible on the selected display can appear in the virtual-camera output while Automatic or Display mode is active.
 
-## Removing StageSwap
+## Updates and removal
 
-Exit StageSwap from its system-tray menu first. Then open PowerShell in the folder containing your downloaded StageSwap file and run:
+To update, open a newer downloaded build and confirm the replacement. The installed copy is updated and the existing settings and reference are retained.
+
+To remove StageSwap, exit it from the system tray, open PowerShell in the folder containing the downloaded executable, and run:
 
 ```powershell
 .\StageSwap_win64_vX.Y.Z.exe --uninstall
 ```
 
-This removes the installed app, its shortcuts, Windows startup entry, and virtual camera. Your settings, reference image, and logs are kept. To remove only the startup entry and virtual camera while keeping the installed app, use `--cleanup` instead.
+This removes the installed app, shortcuts, startup entry, and virtual camera. Settings, references, and logs are retained.
 
-## Need a hand?
+## Troubleshooting
 
-If a webcam or display was unplugged, rearranged, or stopped after sleep, reopen StageSwap and choose the source again. The **Diagnostics** settings also provide restart controls for the webcam, screen, and virtual-camera output.
-
-For bugs and feature requests, [open an issue](https://github.com/NatanSlvdr/StageSwap/issues). If you want to build or contribute to StageSwap, continue with the [developer guide](DEV.md).
-
----
+- **The camera or display stopped after being unplugged, reconnected, or waking from sleep:** select the source again or restart it under **Settings → Diagnostics**.
+- **Automatic mode switches at the wrong time:** capture the idle reference again and adjust **Match strictness**.
+- **The saved display is missing:** use **Rescan screens** or choose another display. StageSwap does not provide automatic hot-plug or docking recovery.
+- **A camera is missing:** refresh the camera list and select it again. StageSwap does not silently substitute another camera.
 
 <p align="center">
-  <sub>Built for Windows 11 · 1280×720 at 30 fps · Local-only</sub>
+  <img src="docs/images/readme/diagnostics.svg" width="760" alt="Placeholder for the StageSwap diagnostics settings">
 </p>
+<p align="center"><em>Diagnostics shows component health and provides individual and complete restart controls.</em></p>
+
+Build, test, and architecture information is in the [developer guide](DEV.md).
