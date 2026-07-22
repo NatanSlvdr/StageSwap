@@ -1,23 +1,23 @@
 [package]
-name = "automatic-screen-camera"
+name = "stageswap"
 build = "build.rs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Automatic screen and webcam switching virtual camera"
+description = "Automatic camera-to-screen switching for hybrid meetings"
 
 [[bin]]
-name = "AutomaticScreenCamera"
+name = "StageSwap"
 path = "src/main.rs"
 
 [lib]
-name = "asc_app"
+name = "stageswap_app"
 path = "src/lib.rs"
 
 [dependencies]
-asc-core = { path = "../core" }
-asc-windows = { path = "../windows" }
+stageswap-core = { path = "../core" }
+stageswap-windows = { path = "../windows" }
 eframe.workspace = true
 image.workspace = true
 serde.workspace = true
@@ -33,7 +33,7 @@ winresource = "0.1.31"
 tempfile = "3"
 
 [package.metadata.winresource]
-ProductName = "Automatic Screen Camera"
-FileDescription = "Automatic Screen Camera portable application"
-OriginalFilename = "AutomaticScreenCamera.exe"
-InternalName = "AutomaticScreenCamera"
+ProductName = "StageSwap"
+FileDescription = "StageSwap application"
+OriginalFilename = "StageSwap.exe"
+InternalName = "StageSwap"

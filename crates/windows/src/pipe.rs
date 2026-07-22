@@ -1,4 +1,4 @@
-use asc_core::{Frame, FrameHeader, HEADER_LEN, MAX_FRAME_BYTES};
+use stageswap_core::{Frame, FrameHeader, HEADER_LEN, MAX_FRAME_BYTES};
 use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -70,7 +70,7 @@ impl FramePublisher {
         let worker_shared = Arc::clone(&shared);
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
-            .name("asc-frame-publisher".into())
+            .name("stageswap-frame-publisher".into())
             .spawn(move || {
                 if let Err(error) = server_loop(&path, &worker_shared, &startup_sender) {
                     if let Ok(mut failure) = worker_shared.failure.lock() {
@@ -231,7 +231,7 @@ fn server_loop(
             let error = unsafe { GetLastError() };
             if error == ERROR_PIPE_BUSY {
                 return Err(
-                    "another Automatic Screen Camera instance already owns the frame pipe; exit it from the system tray before relaunching"
+                    "another StageSwap instance already owns the frame pipe; exit it from the system tray before relaunching"
                         .into(),
                 );
             }
@@ -298,15 +298,12 @@ fn write_all(pipe: HANDLE, mut bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asc_core::Size;
+    use stageswap_core::Size;
     use std::time::Instant;
 
     #[test]
     fn duplicate_pipe_publisher_is_rejected_during_startup() {
-        let name = format!(
-            r"\\.\pipe\AutomaticScreenCameraRust.PublisherTest.{}",
-            std::process::id()
-        );
+        let name = format!(r"\\.\pipe\StageSwap.PublisherTest.{}", std::process::id());
         let first = FramePublisher::start(&name).expect("first publisher should own the pipe");
         let second = FramePublisher::start(&name);
         assert!(second.is_err(), "duplicate publisher unexpectedly started");
@@ -315,10 +312,7 @@ mod tests {
 
     #[test]
     fn publishing_replaces_the_latest_frame_without_copying_its_pixels() {
-        let name = format!(
-            r"\\.\pipe\AutomaticScreenCameraRust.LatestTest.{}",
-            std::process::id()
-        );
+        let name = format!(r"\\.\pipe\StageSwap.LatestTest.{}", std::process::id());
         let publisher = FramePublisher::start(&name).unwrap();
         let first = Frame::placeholder(Size::new(2, 2), 0xff00_0000, 1, 0, Instant::now());
         let second = Frame::placeholder(Size::new(2, 2), 0xffff_ffff, 2, 1, Instant::now());

@@ -1,12 +1,12 @@
 [package]
-name = "asc-windows"
+name = "stageswap-windows"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-asc-core = { path = "../core" }
+stageswap-core = { path = "../core" }
 
 [target.'cfg(windows)'.dependencies]
 windows-core.workspace = true

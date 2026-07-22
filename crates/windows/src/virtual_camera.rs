@@ -17,9 +17,9 @@ use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_core::{Error, GUID, HRESULT, Interface, PCSTR, PCWSTR, PWSTR, Ref, implement};
 
-const SOURCE_ID: &str = "{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}";
-pub(crate) const LEGACY_SOURCE_ID: &str = "{4B8BA04C-7A67-4DD5-B9F4-C607940A7A64}";
-const PIPE_ATTRIBUTE: GUID = GUID::from_u128(0x905306dd_b9a3_4385_a273_606e05b3208b);
+const SOURCE_ID: &str = "{4ABA794D-7B23-449C-8467-CE74A41C2820}";
+const PIPE_ATTRIBUTE: GUID = GUID::from_u128(0x75c753a0_587b_4064_bb77_f0171fcd4ad7);
+const PIPE_NAME_PREFIX: &str = r"\\.\pipe\StageSwap.FinalFrame.";
 
 type CreateVirtualCamera = unsafe extern "system" fn(
     MFVirtualCameraType,
@@ -129,7 +129,7 @@ pub fn frame_pipe_name() -> Result<String, String> {
         .map_err(|error| format!("could not decode process user SID: {error}"));
     // SAFETY: ConvertSidToStringSidW allocated this pointer with LocalAlloc.
     let _ = unsafe { LocalFree(Some(HLOCAL(sid.0.cast()))) };
-    value.map(|sid| format!(r"\\.\pipe\AutomaticScreenCameraRust.FinalFrame.{sid}"))
+    value.map(|sid| format!("{PIPE_NAME_PREFIX}{sid}"))
 }
 
 #[implement(IMFAsyncCallback)]
@@ -220,7 +220,7 @@ impl VirtualCameraController {
     }
 
     fn open(&mut self) -> Result<(), String> {
-        let friendly = wide("Automatic Screen Camera");
+        let friendly = wide("StageSwap");
         let source = wide(SOURCE_ID);
         let camera = create_virtual_camera(PCWSTR(friendly.as_ptr()), PCWSTR(source.as_ptr()))?;
         let pipe = wide(&self.pipe_name);
@@ -285,7 +285,7 @@ pub fn remove_virtual_camera() -> Result<(), String> {
     remove_virtual_camera_for_source(SOURCE_ID)
 }
 
-pub(crate) fn remove_virtual_camera_for_source(source_id: &str) -> Result<(), String> {
+fn remove_virtual_camera_for_source(source_id: &str) -> Result<(), String> {
     // This cleanup entry point is expected to run in its own short-lived process.
     // SAFETY: all initialization and shutdown calls are balanced on this thread.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
@@ -296,7 +296,7 @@ pub(crate) fn remove_virtual_camera_for_source(source_id: &str) -> Result<(), St
         return Err(format!("could not initialize Media Foundation: {error}"));
     }
     let result = (|| {
-        let friendly = wide("Automatic Screen Camera");
+        let friendly = wide("StageSwap");
         let source = wide(source_id);
         let camera = create_virtual_camera(PCWSTR(friendly.as_ptr()), PCWSTR(source.as_ptr()))
             .map_err(|error| format!("could not open virtual camera registration: {error}"))?;
@@ -370,5 +370,15 @@ mod tests {
         assert!(!virtual_camera_registration_is_absent(
             &Error::from_hresult(windows::Win32::Foundation::E_ACCESSDENIED,)
         ));
+    }
+
+    #[test]
+    fn virtual_camera_identity_is_stageswap() {
+        assert_eq!(SOURCE_ID, "{4ABA794D-7B23-449C-8467-CE74A41C2820}");
+        assert_eq!(
+            PIPE_ATTRIBUTE,
+            GUID::from_u128(0x75c753a0_587b_4064_bb77_f0171fcd4ad7)
+        );
+        assert_eq!(PIPE_NAME_PREFIX, r"\\.\pipe\StageSwap.FinalFrame.");
     }
 }

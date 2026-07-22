@@ -32,11 +32,11 @@ jobs:
           foreach ($release in $releases) {
             $details = gh release view $release.tagName --json assets | ConvertFrom-Json
             $versionedSidecars = @($details.assets | Where-Object {
-              $_.name -like 'WebcamSwitcher_win64_v*.exe.sha256'
+              $_.name -like 'StageSwap_win64_v*.exe.sha256'
             })
             if ($versionedSidecars.Count -eq 0) { continue }
             gh release download $release.tagName `
-              --pattern 'WebcamSwitcher_win64_v*.exe.sha256' `
+              --pattern 'StageSwap_win64_v*.exe.sha256' `
               --dir release-history `
               --clobber
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -45,15 +45,15 @@ jobs:
       - name: Test and package x64
         shell: pwsh
         env:
-          ASC_RELEASE_HISTORY: release-history
+          STAGESWAP_RELEASE_HISTORY: release-history
         run: |
           cargo test --workspace --all-targets --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo run -p xtask -- portable x64 dist
-      - name: Upload unsigned portable artifact
+          cargo run -p xtask -- package x64 dist
+      - name: Upload unsigned artifact
         uses: actions/upload-artifact@v7
         with:
-          name: AutomaticScreenCamera-windows-x64-unsigned
+          name: StageSwap-win64-unsigned
           path: |
             dist/*.exe
             dist/*.sha256
@@ -66,10 +66,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download portable artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
-          name: AutomaticScreenCamera-windows-x64-unsigned
+          name: StageSwap-win64-unsigned
           path: release-assets
       - name: Publish release and checksums
         env:
@@ -94,6 +94,6 @@ jobs:
               release-assets/*.exe \
               release-assets/*.sha256 \
               --target "$GITHUB_SHA" \
-              --title "Automatic Screen Camera $short_sha" \
+              --title "StageSwap $short_sha" \
               --generate-notes
           fi

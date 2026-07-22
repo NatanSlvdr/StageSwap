@@ -1,4 +1,4 @@
-use asc_core::{FrameHeader, HEADER_LEN, SharedFrameCache};
+use stageswap_core::{FrameHeader, HEADER_LEN, SharedFrameCache};
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::windows::io::AsRawHandle;
@@ -27,7 +27,7 @@ impl PipeReader {
         };
         let worker_stop = Arc::clone(&stop);
         let worker = thread::Builder::new()
-            .name("asc-mf-pipe-reader".into())
+            .name("stageswap-mf-pipe-reader".into())
             .spawn(move || reader_loop(&path, &worker_stop, &cache))
             .ok();
         Self { stop, worker }

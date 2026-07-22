@@ -1,6 +1,6 @@
 use super::OBJECTS;
 use super::pipe_reader::PipeReader;
-use asc_core::{PIPELINE_SIZE, SharedFrameCache, off_frame_pixels};
+use stageswap_core::{PIPELINE_SIZE, SharedFrameCache, off_frame_pixels};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{E_POINTER, S_OK};
@@ -452,8 +452,7 @@ mod tests {
         // SAFETY: initializes Media Foundation for this test process.
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
         let _foundation = MediaFoundation;
-        let stream =
-            MediaStream::new(r"\\.\pipe\AutomaticScreenCameraRust.Nonexistent.Test".into())?;
+        let stream = MediaStream::new(r"\\.\pipe\StageSwap.Nonexistent.Test".into())?;
         let handler = unsafe { stream.descriptor.GetMediaTypeHandler()? };
         assert_eq!(unsafe { handler.GetMediaTypeCount()? }, 2);
         let current = unsafe { handler.GetCurrentMediaType()? };

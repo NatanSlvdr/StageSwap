@@ -1,5 +1,5 @@
 [package]
-name = "asc-media-source"
+name = "stageswap-media-source"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ license.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-asc-core = { path = "../core" }
+stageswap-core = { path = "../core" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [

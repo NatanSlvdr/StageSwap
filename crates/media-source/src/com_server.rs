@@ -19,14 +19,14 @@ mod media_stream;
 mod pipe_reader;
 use activation::Activation;
 
-const SOURCE_CLSID: GUID = GUID::from_u128(0x402eb87c_123b_4765_9ff7_6e11cc7da5b3);
+const SOURCE_CLSID: GUID = GUID::from_u128(0x4aba794d_7b23_449c_8467_ce74a41c2820);
 pub(super) static OBJECTS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 pub(super) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static SERVER_LOCKS: AtomicUsize = AtomicUsize::new(0);
 static MODULE_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
 
-const CLASS_KEY: &str = r"Software\Classes\CLSID\{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}";
+const CLASS_KEY: &str = r"Software\Classes\CLSID\{4ABA794D-7B23-449C-8467-CE74A41C2820}";
 
 struct RegistryKey(HKEY);
 
@@ -110,7 +110,7 @@ fn register_server() -> Result<(), HRESULT> {
     let path = String::from_utf16(&path[..length]).map_err(|_| E_FAIL)?;
     let class = create_key(HKEY_LOCAL_MACHINE, CLASS_KEY)?;
     if let Err(error) = (|| {
-        set_string(class.0, None, "Automatic Screen Camera Media Source")?;
+        set_string(class.0, None, "StageSwap Media Source")?;
         let server = create_key(class.0, "InprocServer32")?;
         set_string(server.0, None, &path)?;
         set_string(server.0, Some("ThreadingModel"), "Both")

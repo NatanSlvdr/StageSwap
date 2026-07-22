@@ -1,9 +1,9 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 
 #[cfg(all(windows, not(target_arch = "x86_64")))]
-compile_error!("Automatic Screen Camera supports only x64 Windows");
+compile_error!("StageSwap supports only x64 Windows");
 
-use asc_core::{Frame, MonitorDescriptor};
+use stageswap_core::{Frame, MonitorDescriptor};
 use std::sync::Arc;
 
 #[cfg(windows)]
@@ -21,7 +21,7 @@ pub use video_input::{MediaFoundationVideoInput, enumerate_video_devices};
 #[cfg(windows)]
 mod deployment;
 #[cfg(windows)]
-pub use deployment::{configure_startup, portable_startup};
+pub use deployment::{configure_startup, deployment_startup};
 #[cfg(windows)]
 mod notification;
 #[cfg(windows)]
@@ -108,7 +108,7 @@ mod tests {
 #[cfg(all(test, windows))]
 mod interactive_windows_tests {
     use super::*;
-    use asc_core::{FramePacer, PIPELINE_FPS, PIPELINE_SIZE};
+    use stageswap_core::{FramePacer, PIPELINE_FPS, PIPELINE_SIZE};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -195,7 +195,7 @@ mod interactive_windows_tests {
     }
 
     #[test]
-    #[ignore = "requires the portable COM source to be installed"]
+    #[ignore = "requires the COM source to be installed"]
     fn virtual_camera_can_restart_manually() {
         let pipe = frame_pipe_name().unwrap();
         let mut camera = VirtualCameraController::start(pipe).unwrap();
@@ -205,7 +205,7 @@ mod interactive_windows_tests {
     }
 
     #[test]
-    #[ignore = "requires the portable COM source to be installed and no running app instance"]
+    #[ignore = "requires the COM source to be installed and no running app instance"]
     fn virtual_camera_delivers_three_hundred_frames_at_thirty_fps() {
         let pipe_name = frame_pipe_name().unwrap();
         let publisher = FramePublisher::start(&pipe_name).unwrap();

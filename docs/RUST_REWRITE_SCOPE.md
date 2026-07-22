@@ -1,10 +1,10 @@
 # Locked Rust rewrite scope
 
-This scope replaced the former production application directly. The repository now contains only the Rust implementation and retained evidence-collection scripts. All unavoidable COM and unsafe code stays inside `asc-windows` and `asc-media-source`.
+This scope replaced the former production application directly. The repository now contains only the Rust implementation and retained evidence-collection scripts. All unavoidable COM and unsafe code stays inside `stageswap-windows` and `stageswap-media-source`.
 
 ## Product contract to preserve
 
-- One self-contained Windows 11 x64 application. The portable executable may embed and deploy its matching camera-source DLL; users install neither OBS nor another runtime application.
+- One self-contained Windows 11 x64 application. The executable may embed and deploy its matching camera-source DLL; users install neither OBS nor another runtime application.
 - One webcam input. Store its identifier, open it at startup, and use a fixed internal BGRA/RGB32 1280×720 at 30 fps contract.
 - One screen capture selected by the saved visual reference. Compare a 160×90 grayscale image every 250 ms, with five matches and three mismatches. Scan displays at startup, every 30 seconds, and on explicit Rescan only to locate that reference.
 - Automatic, Force Webcam, and Force Screen modes, with the current 500 ms reversible fade, configurable missing-source fallback, and fixed crossed-camera off screen.
@@ -12,7 +12,7 @@ This scope replaced the former production application directly. The repository n
 - Virtual-camera output prefers RGB32 1280×720 at 30 fps and retains selectable NV12 720p for Windows Camera and Zoom compatibility; do not restore 1080p without evidence.
 - Local configuration, reference image, previews, tray/main UI, startup preference, and bounded diagnostic logs.
 
-This is a new installation with source CLSID `{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}`, pipe attribute `{905306DD-B9A3-4385-A273-606E05B3208B}`, and storage under `%LocalAppData%\AutomaticScreenCameraRust`. It does not import the old schema-v2 data, but startup removes the legacy portable deployment artifacts while preserving user configuration, references, and logs.
+This is a new installation with source CLSID `{4ABA794D-7B23-449C-8467-CE74A41C2820}`, pipe attribute `{75C753A0-587B-4064-BB77-F0171FCD4AD7}`, and storage under `%LocalAppData%\StageSwap`. It does not import, unregister, overwrite, or delete Automatic Screen Camera data or deployments.
 
 ## Deliberate non-goals
 
@@ -34,7 +34,7 @@ This is a new installation with source CLSID `{402EB87C-123B-4765-9FF7-6E11CC7DA
 | Webcam capture | Direct Media Foundation source reader through `windows` | Adopted instead of `nokhwa`, keeping symbolic-link enumeration, fixed RGB32 negotiation, callbacks, and COM ownership inside the Windows adapter. Native webcam execution remains a release-machine test. |
 | Configuration | [`serde`](https://serde.rs/) and [`serde_json`](https://docs.rs/serde_json/latest/serde_json/) | Adopt a new typed `schema_version: 1`, atomic replacement, backup recovery, and defaults-with-warning when both files are invalid. No old-schema migration. |
 | Reference import and CPU image operations | [`image`](https://docs.rs/image/latest/image/) with only PNG, JPEG, and BMP features | Adopted for decoding. Direct grayscale thumbnails, cached BGRA composition, letterboxing, and the NV12 compatibility conversion remain in the repository with unit tests. |
-| Main window and previews | `eframe` 0.35 / `egui` with `wgpu` | Adopt with the retained dashboard, four settings categories, contextual previews, and restrained visual parity at 100% and 150% DPI. |
+| Main window and previews | `eframe` 0.35 / `egui` with `wgpu` | Adopt with the retained dashboard, five settings categories, contextual previews, and restrained visual parity at 100% and 150% DPI. |
 | Tray | `tray-icon` 0.24 | Adopt with close-to-tray, notifications, and the retained lifecycle actions. |
 | Virtual-camera media source | No production-ready drop-in crate found | Implement in the Rust DLL with `windows`. Reuse the current protocol and behavior; do not invent a new driver architecture. |
 
@@ -54,7 +54,7 @@ Microsoft's [custom media source guidance](https://learn.microsoft.com/en-us/win
 ## Workspace
 
 ```text
-automatic-screen-camera/
+stageswap/
 ├── crates/core/          pure state machine, frames, detector, transitions
 ├── crates/app/           UI, configuration, capture orchestration, composition
 ├── crates/windows/       webcam/screen/deployment/IPC adapters

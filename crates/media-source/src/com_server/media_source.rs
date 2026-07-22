@@ -22,7 +22,7 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows_core::{ComObject, Error, GUID, HRESULT, IUnknown, Ref, implement, w};
 
-const PIPE_ATTRIBUTE: GUID = GUID::from_u128(0x905306dd_b9a3_4385_a273_606e05b3208b);
+const PIPE_ATTRIBUTE: GUID = GUID::from_u128(0x75c753a0_587b_4064_bb77_f0171fcd4ad7);
 const ERROR_SET_NOT_FOUND_HRESULT: HRESULT = HRESULT(0x8007_0492_u32 as i32);
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -65,10 +65,7 @@ impl MediaSource {
                 &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
                 &KSCATEGORY_VIDEO_CAMERA,
             )?;
-            attributes.SetString(
-                &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
-                w!("Automatic Screen Camera"),
-            )?;
+            attributes.SetString(&MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, w!("StageSwap"))?;
         }
         let pipe_name = read_string_attribute(activation, &PIPE_ATTRIBUTE).unwrap_or_default();
         let stream = ComObject::new(MediaStream::new(pipe_name)?);

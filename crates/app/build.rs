@@ -3,12 +3,12 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=ASC_MEDIA_SOURCE_DLL");
-    println!("cargo:rerun-if-env-changed=ASC_CROSS_COMPILE_RESOURCES");
+    println!("cargo:rerun-if-env-changed=STAGESWAP_MEDIA_SOURCE_DLL");
+    println!("cargo:rerun-if-env-changed=STAGESWAP_CROSS_COMPILE_RESOURCES");
     println!("cargo:rerun-if-changed=assets/app-icon.ico");
-    let destination = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set"))
-        .join("AutomaticScreenCameraSource.dll");
-    if let Some(source) = env::var_os("ASC_MEDIA_SOURCE_DLL") {
+    let destination =
+        PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set")).join("StageSwapSource.dll");
+    if let Some(source) = env::var_os("STAGESWAP_MEDIA_SOURCE_DLL") {
         println!(
             "cargo:rerun-if-changed={}",
             PathBuf::from(&source).display()
@@ -25,7 +25,7 @@ fn main() {
 
     let windows_target = env::var("CARGO_CFG_TARGET_OS").is_ok_and(|target| target == "windows");
     let windows_host = env::var("HOST").is_ok_and(|host| host.contains("windows"));
-    let cross_compile_resources = env::var_os("ASC_CROSS_COMPILE_RESOURCES").is_some();
+    let cross_compile_resources = env::var_os("STAGESWAP_CROSS_COMPILE_RESOURCES").is_some();
     if windows_target && (windows_host || cross_compile_resources) {
         let manifest = r#"<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">

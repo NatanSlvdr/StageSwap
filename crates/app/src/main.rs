@@ -1,13 +1,13 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use asc_app::RuntimeHandle;
-use asc_core::{
-    AppConfig, AppSnapshot, Command, ConfigStore, DetectionState, DeviceState, Frame, OutputMode,
-    RestartTarget, RunState, Source,
-};
 use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle,
     TextureOptions, Vec2,
+};
+use stageswap_app::RuntimeHandle;
+use stageswap_core::{
+    AppConfig, AppSnapshot, Command, ConfigStore, DetectionState, DeviceState, Frame, OutputMode,
+    RestartTarget, RunState, Source,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 const WINDOW_ASPECT_RATIO: f32 = 16.0 / 9.0;
 const MIN_WINDOW_HEIGHT: f32 = 600.0;
+const WINDOW_TITLE: &str = concat!("StageSwap - v", env!("CARGO_PKG_VERSION"));
 const LIVE_RED: Color32 = Color32::from_rgb(235, 90, 90);
 const ACTIVE_GREEN: Color32 = Color32::from_rgb(76, 205, 132);
 const TRANSITION_AMBER: Color32 = Color32::from_rgb(245, 190, 75);
@@ -35,39 +36,43 @@ const SETTINGS_CONTENT_WIDTH: f32 = 960.0;
 const SETTINGS_PREVIEW_WIDTH: f32 = 480.0;
 const SETTINGS_PREVIEW_HEIGHT: f32 = 270.0;
 const SETTINGS_PREVIEW_COLUMNS_BREAKPOINT: f32 = 700.0;
+const SETTINGS_SIDEBAR_FILL: Color32 = Color32::from_rgb(20, 22, 27);
+const SETTINGS_NAV_HOVERED: Color32 = Color32::from_rgb(32, 35, 41);
+const SETTINGS_NAV_SELECTED: Color32 = Color32::from_rgb(45, 48, 55);
+const SETTINGS_NAV_INDICATOR: Color32 = Color32::from_rgb(151, 157, 168);
 
 mod app_icon;
+mod deployment_payload;
 mod local_log;
-mod portable_payload;
 #[cfg(windows)]
 mod tray;
 use local_log::LocalLog;
 
 fn main() -> eframe::Result {
-    let _embedded_payload = portable_payload::bytes();
+    let _embedded_payload = deployment_payload::bytes();
     #[cfg(windows)]
-    match asc_windows::portable_startup(_embedded_payload) {
+    match stageswap_windows::deployment_startup(_embedded_payload) {
         Ok(true) => return Ok(()),
         Ok(false) => {}
         Err(error) => {
-            asc_windows::show_error_dialog(&format!(
-                "Automatic Screen Camera deployment failed:\n\n{error}"
+            stageswap_windows::show_error_dialog(&format!(
+                "StageSwap deployment failed:\n\n{error}"
             ));
-            eprintln!("Automatic Screen Camera deployment failed: {error}");
+            eprintln!("StageSwap deployment failed: {error}");
             std::process::exit(1);
         }
     }
     #[cfg(windows)]
-    let _single_instance = match asc_windows::SingleInstance::acquire() {
+    let _single_instance = match stageswap_windows::SingleInstance::acquire() {
         Ok(Some(instance)) => instance,
         Ok(None) => {
-            asc_windows::show_error_dialog(
-                "Automatic Screen Camera is already running. Open it from the system tray, or exit the tray application before launching this copy.",
+            stageswap_windows::show_error_dialog(
+                "StageSwap is already running. Open it from the system tray, or exit the tray application before launching this copy.",
             );
             return Ok(());
         }
         Err(error) => {
-            asc_windows::show_error_dialog(&error);
+            stageswap_windows::show_error_dialog(&error);
             return Ok(());
         }
     };
@@ -77,7 +82,7 @@ fn main() -> eframe::Result {
     let app_icon = app_icon::load(None).expect("embedded app icon should decode");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Automatic Screen Camera")
+            .with_title(WINDOW_TITLE)
             .with_inner_size([1280.0, 720.0])
             .with_min_inner_size([MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT])
             .with_visible(start_visible)
@@ -89,7 +94,7 @@ fn main() -> eframe::Result {
         ..eframe::NativeOptions::default()
     };
     eframe::run_native(
-        "Automatic Screen Camera",
+        WINDOW_TITLE,
         options,
         Box::new(move |context| {
             let mut visuals = egui::Visuals::dark();
@@ -123,7 +128,7 @@ fn local_data_directory() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(std::env::temp_dir)
-        .join("AutomaticScreenCameraRust")
+        .join("StageSwap")
 }
 
 fn aspect_locked_window_size(current: Vec2, previous: Option<Vec2>) -> Vec2 {
@@ -142,36 +147,49 @@ fn aspect_locked_window_size(current: Vec2, previous: Option<Vec2>) -> Vec2 {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum SettingsTab {
-    App,
+    General,
     Webcam,
-    ScreenDetection,
+    Screen,
+    Matching,
     Diagnostics,
 }
 
 impl SettingsTab {
-    const ALL: [(Self, UiIcon, &'static str); 4] = [
-        (Self::App, UiIcon::Settings, "App"),
-        (Self::Webcam, UiIcon::Camera, "Webcam"),
-        (Self::ScreenDetection, UiIcon::Monitor, "Screen & detection"),
-        (Self::Diagnostics, UiIcon::Layers, "Diagnostics"),
+    #[cfg(test)]
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Webcam,
+        Self::Screen,
+        Self::Matching,
+        Self::Diagnostics,
     ];
+
+    const PRIMARY: [(Self, UiIcon, &'static str); 4] = [
+        (Self::General, UiIcon::Settings, "General"),
+        (Self::Webcam, UiIcon::Camera, "Webcam"),
+        (Self::Screen, UiIcon::Monitor, "Screen"),
+        (Self::Matching, UiIcon::Target, "Matching"),
+    ];
+
+    const DIAGNOSTICS: (Self, UiIcon, &'static str) =
+        (Self::Diagnostics, UiIcon::Layers, "Diagnostics");
 
     const fn title(self) -> &'static str {
         match self {
-            Self::App => "App",
+            Self::General => "General",
             Self::Webcam => "Webcam",
-            Self::ScreenDetection => "Screen & detection",
+            Self::Screen => "Screen",
+            Self::Matching => "Matching",
             Self::Diagnostics => "Diagnostics",
         }
     }
 
     const fn description(self) -> &'static str {
         match self {
-            Self::App => "Choose how the app launches, stays available, and reports problems.",
+            Self::General => "Choose how the app launches, stays available, and reports problems.",
             Self::Webcam => "Select, verify, and recover the camera used for webcam output.",
-            Self::ScreenDetection => {
-                "Choose what to capture and teach Automatic mode when to show the webcam."
-            }
+            Self::Screen => "Choose the display Automatic mode watches and how it is captured.",
+            Self::Matching => "Teach Automatic mode when the screen should show the webcam.",
             Self::Diagnostics => {
                 "Inspect component health, technical details, logs, and recovery tools."
             }
@@ -229,7 +247,7 @@ impl PreviewConverter {
         let shared = Arc::new((Mutex::new(PreviewConverterState::default()), Condvar::new()));
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
-            .name(format!("asc-preview-{}", kind.key()))
+            .name(format!("stageswap-preview-{}", kind.key()))
             .spawn(move || preview_converter_loop(&worker_shared))
             .expect("preview conversion worker can be created");
         Self {
@@ -392,6 +410,27 @@ struct SettingsPreviewControls {
     side_by_side: bool,
 }
 
+#[derive(Debug)]
+struct SettingsSidebarLayout {
+    brand_icon: Rect,
+    brand_title: Rect,
+    brand_separator: Rect,
+    back: Rect,
+    primary_navigation: Vec<Rect>,
+    diagnostics: Rect,
+    save_status: Rect,
+    go_back: bool,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct DashboardControlsLayout {
+    sections: [Rect; 3],
+    health_indicators: [Rect; 5],
+    section_dividers: [Rect; 2],
+    other_actions: [Rect; 2],
+}
+
 #[derive(Clone, Copy)]
 struct SettingsSection {
     icon: UiIcon,
@@ -524,7 +563,7 @@ impl SwitcherApp {
             store,
             load_warnings,
             view: AppView::Dashboard,
-            settings_tab: SettingsTab::App,
+            settings_tab: SettingsTab::General,
             settings_save_state: SettingsSaveState::Saved,
             confirm_clear_logs: false,
             awaiting_video_device_id: None,
@@ -603,7 +642,7 @@ impl SwitcherApp {
 
     fn import_reference_dialog(&mut self) {
         #[cfg(windows)]
-        if let Some(path) = asc_windows::pick_reference_image() {
+        if let Some(path) = stageswap_windows::pick_reference_image() {
             self.send(Command::ImportReference(path));
         }
         #[cfg(not(windows))]
@@ -613,7 +652,7 @@ impl SwitcherApp {
 
     fn open_log_directory(&mut self) {
         #[cfg(windows)]
-        if let Err(error) = asc_windows::open_directory(self.log.directory()) {
+        if let Err(error) = stageswap_windows::open_directory(self.log.directory()) {
             self.load_warnings.push(error);
         }
         #[cfg(not(windows))]
@@ -623,7 +662,7 @@ impl SwitcherApp {
 
     fn export_logs(&mut self) {
         #[cfg(windows)]
-        if let Some(path) = asc_windows::pick_log_export_path()
+        if let Some(path) = stageswap_windows::pick_log_export_path()
             && let Err(error) = self.log.export_to(&path)
         {
             self.load_warnings
@@ -752,7 +791,7 @@ impl SwitcherApp {
     fn app_icon_texture(&mut self, context: &egui::Context) -> egui::TextureId {
         self.app_icon_texture
             .get_or_insert_with(|| {
-                let icon = app_icon::load(Some(64)).expect("embedded app icon should decode");
+                let icon = app_icon::load(Some(512)).expect("embedded app icon should decode");
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [icon.width as usize, icon.height as usize],
                     &icon.rgba,
@@ -848,20 +887,28 @@ impl SwitcherApp {
         .inner
     }
 
-    fn controls_body(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
-        health_state_group(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state);
-        health_state_group(ui, UiIcon::Monitor, "Screen", snapshot.screen_state);
-        health_state_group(
-            ui,
-            UiIcon::Broadcast,
-            "Output",
-            snapshot.virtual_camera_state,
-        );
-        ui.separator();
-        detection_state_group(ui, snapshot.detection);
-        screen_mix_group(ui, snapshot.transition.screen_mix);
-        ui.add_space(12.0);
+    fn controls_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+    ) -> DashboardControlsLayout {
+        let health_heading = controls_section_heading(ui, "Components health");
+        let health_indicators = [
+            health_state_group(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state),
+            health_state_group(ui, UiIcon::Monitor, "Screen", snapshot.screen_state),
+            health_state_group(
+                ui,
+                UiIcon::Broadcast,
+                "Output",
+                snapshot.virtual_camera_state,
+            ),
+            detection_state_group(ui, snapshot.detection),
+            screen_mix_group(ui, snapshot.transition.screen_mix),
+        ];
+        let health_section = health_heading.union(health_indicators[4]);
+        let first_divider = controls_section_divider(ui);
 
+        let main_heading = controls_section_heading(ui, "Main controls");
         let automation_running =
             matches!(snapshot.run_state, RunState::Running | RunState::Starting);
         let (run_icon, run_label, run_accent) = if automation_running {
@@ -869,15 +916,14 @@ impl SwitcherApp {
         } else {
             (UiIcon::Play, "Start automation", ACTIVE_GREEN)
         };
-        if accent_icon_button(
+        let automation = accent_icon_button(
             ui,
             run_icon,
             run_label,
             egui::vec2(ui.available_width(), 36.0),
             run_accent,
-        )
-        .clicked()
-        {
+        );
+        if automation.clicked() {
             if automation_running {
                 self.send(Command::Stop);
             } else {
@@ -892,113 +938,95 @@ impl SwitcherApp {
         let icon_width = row_height;
         let heading_width =
             (ui.available_width() - automatic_width - icon_width * 2.0 - gap * 3.0).max(72.0);
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            ui.horizontal(|ui| {
-                indicator_heading(
-                    ui,
-                    UiIcon::Route,
-                    "Output mode",
-                    None,
-                    heading_width,
-                    row_height,
-                );
-                if icon_button(
-                    ui,
-                    UiIcon::Robot,
-                    "Auto",
-                    egui::vec2(automatic_width, row_height),
-                    snapshot.mode == OutputMode::Automatic,
-                    false,
-                )
-                .clicked()
-                {
-                    self.set_mode(OutputMode::Automatic);
-                }
-                if icon_button(
-                    ui,
-                    UiIcon::Camera,
-                    "",
-                    egui::vec2(icon_width, row_height),
-                    snapshot.mode == OutputMode::ForceCamera,
-                    false,
-                )
-                .on_hover_text("Webcam")
-                .clicked()
-                {
-                    self.set_mode(OutputMode::ForceCamera);
-                }
-                if icon_button(
-                    ui,
-                    UiIcon::Monitor,
-                    "",
-                    egui::vec2(icon_width, row_height),
-                    snapshot.mode == OutputMode::ForceScreen,
-                    false,
-                )
-                .on_hover_text("Screen")
-                .clicked()
-                {
-                    self.set_mode(OutputMode::ForceScreen);
-                }
-            });
-        });
+        let output_mode = ui
+            .scope(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.horizontal(|ui| {
+                    indicator_heading(
+                        ui,
+                        UiIcon::Route,
+                        "Output mode",
+                        None,
+                        heading_width,
+                        row_height,
+                    );
+                    if icon_button(
+                        ui,
+                        UiIcon::Robot,
+                        "Auto",
+                        egui::vec2(automatic_width, row_height),
+                        snapshot.mode == OutputMode::Automatic,
+                        false,
+                    )
+                    .clicked()
+                    {
+                        self.set_mode(OutputMode::Automatic);
+                    }
+                    if icon_button(
+                        ui,
+                        UiIcon::Camera,
+                        "",
+                        egui::vec2(icon_width, row_height),
+                        snapshot.mode == OutputMode::ForceCamera,
+                        false,
+                    )
+                    .on_hover_text("Webcam")
+                    .clicked()
+                    {
+                        self.set_mode(OutputMode::ForceCamera);
+                    }
+                    if icon_button(
+                        ui,
+                        UiIcon::Monitor,
+                        "",
+                        egui::vec2(icon_width, row_height),
+                        snapshot.mode == OutputMode::ForceScreen,
+                        false,
+                    )
+                    .on_hover_text("Screen")
+                    .clicked()
+                    {
+                        self.set_mode(OutputMode::ForceScreen);
+                    }
+                })
+                .response
+                .rect
+            })
+            .inner;
+        let main_section = main_heading.union(output_mode);
+        let second_divider = controls_section_divider(ui);
 
-        ui.add_space(8.0);
-        let gap = ui.spacing().item_spacing.x;
-        if ui.available_width() >= 285.0 {
-            let action_width = (ui.available_width() - gap) / 2.0;
-            ui.horizontal(|ui| {
-                if icon_button(
-                    ui,
-                    UiIcon::Capture,
-                    "Capture reference",
-                    egui::vec2(action_width, 32.0),
-                    false,
-                    false,
-                )
-                .clicked()
-                {
-                    self.send(Command::CaptureReference);
-                }
-                if icon_button(
-                    ui,
-                    UiIcon::Refresh,
-                    "Rescan screens",
-                    egui::vec2(action_width, 32.0),
-                    false,
-                    false,
-                )
-                .clicked()
-                {
-                    self.send(Command::Rescan);
-                }
-            });
-        } else {
-            if icon_button(
-                ui,
-                UiIcon::Capture,
-                "Capture reference",
-                egui::vec2(ui.available_width(), 32.0),
-                false,
-                false,
-            )
-            .clicked()
-            {
-                self.send(Command::CaptureReference);
-            }
-            if icon_button(
-                ui,
-                UiIcon::Refresh,
-                "Rescan screens",
-                egui::vec2(ui.available_width(), 32.0),
-                false,
-                false,
-            )
-            .clicked()
-            {
-                self.send(Command::Rescan);
-            }
+        let other_heading = controls_section_heading(ui, "Other");
+        let capture = icon_button(
+            ui,
+            UiIcon::Capture,
+            "Capture reference",
+            egui::vec2(ui.available_width(), 32.0),
+            false,
+            false,
+        );
+        if capture.clicked() {
+            self.send(Command::CaptureReference);
+        }
+        let rescan = icon_button(
+            ui,
+            UiIcon::Refresh,
+            "Rescan screens",
+            egui::vec2(ui.available_width(), 32.0),
+            false,
+            false,
+        );
+        if rescan.clicked() {
+            self.send(Command::Rescan);
+        }
+        let other_actions = [capture.rect, rescan.rect];
+        let other_section = other_heading.union(other_actions[1]);
+
+        DashboardControlsLayout {
+            sections: [health_section, main_section, other_section],
+            health_indicators,
+            section_dividers: [first_divider, second_divider],
+            other_actions,
         }
     }
 
@@ -1019,85 +1047,19 @@ impl SwitcherApp {
         ui.set_min_size(ui.available_size());
         ui.scope(|ui| {
             ui.set_opacity(0.72 + entrance * 0.28);
-            ui.add_space((1.0 - entrance) * 7.0);
-            if self.settings_header(ui) {
-                return;
+            if self.settings_workspace(ui) {
+                self.close_settings();
             }
-            ui.separator();
-            self.settings_workspace(ui);
         });
     }
 
-    fn settings_header(&mut self, ui: &mut egui::Ui) -> bool {
-        let mut go_back = false;
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), 54.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                let back = icon_button(ui, UiIcon::Back, "", egui::vec2(34.0, 34.0), false, false)
-                    .on_hover_text("Back to dashboard");
-                if back.clicked() {
-                    go_back = true;
-                }
-                ui.add_space(6.0);
-                ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new("Settings")
-                            .size(22.0)
-                            .strong()
-                            .color(Color32::WHITE),
-                    );
-                    ui.label(
-                        RichText::new("Automatic Screen Camera")
-                            .size(11.0)
-                            .color(Color32::from_rgb(133, 140, 153)),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (icon, label, color, detail) = match &self.settings_save_state {
-                        SettingsSaveState::Saved => (
-                            UiIcon::Check,
-                            "Saved",
-                            Color32::from_rgb(134, 213, 169),
-                            None,
-                        ),
-                        SettingsSaveState::Pending(_) => (
-                            UiIcon::Loader,
-                            "Saving…",
-                            Color32::from_rgb(173, 181, 194),
-                            None,
-                        ),
-                        SettingsSaveState::Failed(message) => (
-                            UiIcon::Error,
-                            "Couldn’t save",
-                            Color32::from_rgb(244, 133, 133),
-                            Some(message.as_str()),
-                        ),
-                    };
-                    let status = ui
-                        .horizontal(|ui| icon_text(ui, icon, label, color, false))
-                        .response;
-                    if let Some(detail) = detail {
-                        status.on_hover_text(detail);
-                    }
-                });
-            },
-        );
-        if go_back {
-            self.close_settings();
-        }
-        go_back
-    }
-
-    fn settings_workspace(&mut self, ui: &mut egui::Ui) {
+    fn settings_workspace(&mut self, ui: &mut egui::Ui) -> bool {
         let workspace_height = ui.available_height().max(0.0);
         ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
+            let sidebar = ui.allocate_ui_with_layout(
                 egui::vec2(SETTINGS_SIDEBAR_WIDTH, workspace_height),
                 egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    self.settings_sidebar(ui, workspace_height);
-                },
+                |ui| self.settings_sidebar(ui, workspace_height),
             );
 
             ui.separator();
@@ -1106,16 +1068,69 @@ impl SwitcherApp {
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| self.settings_content(ui),
             );
-        });
+            debug_assert!(sidebar.inner.brand_icon.is_positive());
+            debug_assert!(sidebar.inner.brand_title.is_positive());
+            debug_assert!(sidebar.inner.brand_separator.is_positive());
+            debug_assert!(sidebar.inner.back.is_positive());
+            debug_assert_eq!(
+                sidebar.inner.primary_navigation.len(),
+                SettingsTab::PRIMARY.len()
+            );
+            debug_assert!(sidebar.inner.diagnostics.is_positive());
+            debug_assert!(sidebar.inner.save_status.is_positive());
+            sidebar.inner.go_back
+        })
+        .inner
     }
 
-    fn settings_sidebar(&mut self, ui: &mut egui::Ui, height: f32) -> Vec<Rect> {
+    fn settings_sidebar(&mut self, ui: &mut egui::Ui, height: f32) -> SettingsSidebarLayout {
+        let app_icon_texture = self.app_icon_texture(ui.ctx());
         egui::Frame::new()
-            .fill(Color32::from_rgb(20, 22, 27))
+            .fill(SETTINGS_SIDEBAR_FILL)
             .inner_margin(egui::Margin::symmetric(10, 12))
             .show(ui, |ui| {
                 ui.set_width(SETTINGS_SIDEBAR_WIDTH - 20.0);
                 ui.set_min_height((height - 24.0).max(0.0));
+
+                let brand_icon = ui
+                    .allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 160.0),
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| {
+                            let (rect, _) =
+                                ui.allocate_exact_size(egui::vec2(160.0, 160.0), Sense::hover());
+                            ui.painter().image(
+                                app_icon_texture,
+                                rect,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                            rect
+                        },
+                    )
+                    .inner;
+                ui.add_space(6.0);
+                let brand_title = ui
+                    .allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 22.0),
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| {
+                            ui.label(
+                                RichText::new("StageSwap")
+                                    .size(16.0)
+                                    .strong()
+                                    .color(Color32::from_rgb(220, 225, 234)),
+                            )
+                            .rect
+                        },
+                    )
+                    .inner;
+                ui.add_space(10.0);
+                let brand_separator = ui.separator().rect;
+                ui.add_space(8.0);
+                let back = settings_back_button(ui);
+                let go_back = back.clicked();
+                ui.add_space(14.0);
                 ui.label(
                     RichText::new("PREFERENCES")
                         .size(10.0)
@@ -1123,10 +1138,10 @@ impl SwitcherApp {
                         .color(Color32::from_rgb(112, 120, 134)),
                 );
                 ui.add_space(8.0);
-                let mut navigation_rects = Vec::with_capacity(SettingsTab::ALL.len());
-                for (tab, icon, label) in SettingsTab::ALL {
+                let mut primary_navigation = Vec::with_capacity(SettingsTab::PRIMARY.len());
+                for (tab, icon, label) in SettingsTab::PRIMARY {
                     let response = settings_nav_button(ui, tab, icon, label, self.settings_tab);
-                    navigation_rects.push(response.rect);
+                    primary_navigation.push(response.rect);
                     if response.clicked() && self.settings_tab != tab {
                         self.settings_tab = tab;
                         self.confirm_clear_logs = false;
@@ -1134,16 +1149,77 @@ impl SwitcherApp {
                     }
                     ui.add_space(3.0);
                 }
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    ui.label(
-                        RichText::new("Changes save automatically")
-                            .size(10.5)
-                            .color(Color32::from_rgb(112, 120, 134)),
-                    );
-                });
-                navigation_rects
+
+                let (diagnostics, save_status) = ui
+                    .with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                        let save_status = self.settings_save_indicator(ui);
+                        ui.add_space(10.0);
+                        let (tab, icon, label) = SettingsTab::DIAGNOSTICS;
+                        let response = settings_nav_button(ui, tab, icon, label, self.settings_tab);
+                        if response.clicked() && self.settings_tab != tab {
+                            self.settings_tab = tab;
+                            self.confirm_clear_logs = false;
+                            self.settings_section_changed_at = Some(Instant::now());
+                        }
+                        (response.rect, save_status)
+                    })
+                    .inner;
+
+                SettingsSidebarLayout {
+                    brand_icon,
+                    brand_title,
+                    brand_separator,
+                    back: back.rect,
+                    primary_navigation,
+                    diagnostics,
+                    save_status,
+                    go_back,
+                }
             })
             .inner
+    }
+
+    fn settings_save_indicator(&self, ui: &mut egui::Ui) -> Rect {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 42.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.label(
+                    RichText::new("AUTOSAVE")
+                        .size(9.5)
+                        .strong()
+                        .color(Color32::from_rgb(103, 110, 122)),
+                );
+                let (icon, label, color, detail) = match &self.settings_save_state {
+                    SettingsSaveState::Saved => (
+                        UiIcon::Check,
+                        "Saved",
+                        Color32::from_rgb(134, 213, 169),
+                        None,
+                    ),
+                    SettingsSaveState::Pending(_) => (
+                        UiIcon::Loader,
+                        "Saving…",
+                        Color32::from_rgb(173, 181, 194),
+                        None,
+                    ),
+                    SettingsSaveState::Failed(message) => (
+                        UiIcon::Error,
+                        "Couldn’t save",
+                        Color32::from_rgb(244, 133, 133),
+                        Some(message.as_str()),
+                    ),
+                };
+                let status = ui
+                    .horizontal(|ui| icon_text(ui, icon, label, color, false))
+                    .response;
+                if let Some(detail) = detail {
+                    status.on_hover_text(detail);
+                }
+            },
+        )
+        .response
+        .rect
     }
 
     fn settings_content(&mut self, ui: &mut egui::Ui) {
@@ -1183,11 +1259,10 @@ impl SwitcherApp {
                                 );
                                 ui.add_space(18.0);
                                 match self.settings_tab {
-                                    SettingsTab::App => self.app_settings(ui),
+                                    SettingsTab::General => self.general_settings(ui),
                                     SettingsTab::Webcam => self.webcam_settings(ui),
-                                    SettingsTab::ScreenDetection => {
-                                        self.screen_detection_settings(ui)
-                                    }
+                                    SettingsTab::Screen => self.screen_settings(ui),
+                                    SettingsTab::Matching => self.matching_settings(ui),
                                     SettingsTab::Diagnostics => self.diagnostics_settings(ui),
                                 }
                                 ui.add_space(22.0);
@@ -1204,7 +1279,7 @@ impl SwitcherApp {
         }
     }
 
-    fn app_settings(&mut self, ui: &mut egui::Ui) {
+    fn general_settings(&mut self, ui: &mut egui::Ui) {
         settings_section_heading(
             ui,
             UiIcon::Play,
@@ -1230,7 +1305,7 @@ impl SwitcherApp {
             "Begin monitoring and switching after the app is ready.",
         );
 
-        settings_section_divider(ui);
+        settings_section_gap(ui);
         settings_section_heading(
             ui,
             UiIcon::Window,
@@ -1250,7 +1325,7 @@ impl SwitcherApp {
             "Ask before stopping the app and its active capture pipeline.",
         );
 
-        settings_section_divider(ui);
+        settings_section_gap(ui);
         settings_section_heading(
             ui,
             UiIcon::Bell,
@@ -1353,7 +1428,7 @@ impl SwitcherApp {
         );
     }
 
-    fn screen_detection_settings(&mut self, ui: &mut egui::Ui) {
+    fn screen_settings(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.runtime.snapshot();
         let selected_monitor = snapshot
             .selected_monitor
@@ -1409,13 +1484,15 @@ impl SwitcherApp {
                 );
             },
         );
+    }
 
-        settings_section_divider(ui);
+    fn matching_settings(&mut self, ui: &mut egui::Ui) {
+        let snapshot = self.runtime.snapshot();
         self.settings_preview_control_row(
             ui,
             SettingsSection {
                 icon: UiIcon::Target,
-                title: "Reference and matching",
+                title: "Reference matching",
                 description:
                     "Automatic mode shows the webcam while the screen resembles this reference.",
             },
@@ -1429,7 +1506,7 @@ impl SwitcherApp {
             |app, ui| {
                 ui.horizontal_wrapped(|ui| {
                     settings_reference_status(ui, snapshot.previews.reference.is_some());
-                    ui.separator();
+                    ui.add_space(8.0);
                     settings_detection_status(ui, snapshot.detection);
                 });
                 ui.add_space(10.0);
@@ -1514,7 +1591,7 @@ impl SwitcherApp {
         );
         settings_detection_status(ui, snapshot.detection);
 
-        settings_section_divider(ui);
+        settings_section_gap(ui);
         settings_section_heading(
             ui,
             UiIcon::Wrench,
@@ -1541,7 +1618,7 @@ impl SwitcherApp {
             }
         });
 
-        settings_section_divider(ui);
+        settings_section_gap(ui);
         settings_section_heading(
             ui,
             UiIcon::Info,
@@ -1593,7 +1670,7 @@ impl SwitcherApp {
             "Every 250 ms · 5 matches · 3 mismatches · full scan every 30 seconds",
         );
 
-        settings_section_divider(ui);
+        settings_section_gap(ui);
         settings_section_heading(
             ui,
             UiIcon::Folder,
@@ -1766,7 +1843,7 @@ impl SwitcherApp {
         if !self.show_exit_confirmation {
             return;
         }
-        egui::Window::new("Exit Automatic Screen Camera?")
+        egui::Window::new("Exit StageSwap?")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
@@ -1960,7 +2037,7 @@ impl eframe::App for SwitcherApp {
             && let Some(warning) = snapshot.warning.as_ref()
             && self.last_notified_warning.as_ref() != Some(warning)
         {
-            asc_windows::notify_warning(warning.clone());
+            stageswap_windows::notify_warning(warning.clone());
             self.last_notified_warning = Some(warning.clone());
         }
         #[cfg(windows)]
@@ -2062,7 +2139,7 @@ impl Drop for SwitcherApp {
 
 #[cfg(windows)]
 fn save_config(store: &ConfigStore, config: &AppConfig) -> std::io::Result<()> {
-    asc_windows::save_config_atomic(store, config)
+    stageswap_windows::save_config_atomic(store, config)
 }
 
 #[cfg(not(windows))]
@@ -2080,6 +2157,55 @@ fn animation_progress(started_at: Option<Instant>, duration: Duration) -> f32 {
     })
 }
 
+fn controls_section_heading(ui: &mut egui::Ui, title: &str) -> Rect {
+    let heading = ui.label(
+        RichText::new(title)
+            .size(11.0)
+            .strong()
+            .color(Color32::from_rgb(151, 158, 171)),
+    );
+    ui.add_space(6.0);
+    heading.rect
+}
+
+fn controls_section_divider(ui: &mut egui::Ui) -> Rect {
+    ui.add_space(10.0);
+    let divider = ui.separator().rect;
+    ui.add_space(10.0);
+    divider
+}
+
+fn settings_back_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), Sense::click());
+    let fill = if response.hovered() {
+        SETTINGS_NAV_HOVERED
+    } else {
+        SETTINGS_SIDEBAR_FILL
+    };
+    ui.painter().rect_filled(rect, 6, fill);
+    let foreground = if response.hovered() {
+        Color32::WHITE
+    } else {
+        Color32::from_rgb(161, 168, 181)
+    };
+    let icon_rect = Rect::from_center_size(
+        Pos2::new(rect.left() + 22.0, rect.center().y),
+        egui::vec2(16.0, 16.0),
+    );
+    draw_icon(ui.painter(), icon_rect, UiIcon::Back, foreground, 1.45);
+    ui.painter().text(
+        Pos2::new(rect.left() + 42.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        "Back to dashboard",
+        FontId::proportional(13.0),
+        foreground,
+    );
+    response
+        .on_hover_text("Back to dashboard")
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn settings_nav_button(
     ui: &mut egui::Ui,
     tab: SettingsTab,
@@ -2093,23 +2219,21 @@ fn settings_nav_button(
             .animate_bool_with_time(ui.make_persistent_id(("settings-nav", tab)), active, 0.14);
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), Sense::click());
-    let idle = Color32::from_rgb(20, 22, 27);
-    let hovered = Color32::from_rgb(31, 35, 43);
-    let selected_fill = Color32::from_rgb(33, 47, 75);
-    let base = if response.hovered() { hovered } else { idle };
+    let base = if response.hovered() {
+        SETTINGS_NAV_HOVERED
+    } else {
+        SETTINGS_SIDEBAR_FILL
+    };
     ui.painter()
-        .rect_filled(rect, 6, mix_color(base, selected_fill, amount));
+        .rect_filled(rect, 6, mix_color(base, SETTINGS_NAV_SELECTED, amount));
     if amount > 0.0 {
         let indicator_height = 16.0 + 10.0 * amount;
         let indicator = Rect::from_center_size(
             Pos2::new(rect.left() + 2.0, rect.center().y),
             egui::vec2(3.0, indicator_height),
         );
-        ui.painter().rect_filled(
-            indicator,
-            2,
-            ui.visuals().selection.bg_fill.gamma_multiply(amount),
-        );
+        ui.painter()
+            .rect_filled(indicator, 2, SETTINGS_NAV_INDICATOR.gamma_multiply(amount));
     }
     let foreground = mix_color(Color32::from_rgb(161, 168, 181), Color32::WHITE, amount);
     let icon_rect = Rect::from_center_size(
@@ -2164,13 +2288,8 @@ fn settings_section_heading(
     .rect
 }
 
-fn settings_section_divider(ui: &mut egui::Ui) -> Rect {
-    ui.add_space(14.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, 0, Color32::from_rgb(61, 67, 78));
-    ui.add_space(14.0);
-    rect
+fn settings_section_gap(ui: &mut egui::Ui) {
+    ui.add_space(24.0);
 }
 
 fn settings_toggle_row(ui: &mut egui::Ui, value: &mut bool, title: &str, description: &str) {
@@ -2435,7 +2554,12 @@ fn preview_contour(kind: PreviewKind, actual_output: Source) -> PreviewContour {
     }
 }
 
-fn health_state_group(ui: &mut egui::Ui, icon: UiIcon, label: &'static str, current: DeviceState) {
+fn health_state_group(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    label: &'static str,
+    current: DeviceState,
+) -> Rect {
     let choices = HEALTH_STATES.map(|state| IndicatorChoice {
         icon: device_state_icon(state),
         label: friendly_device_state(state),
@@ -2443,7 +2567,7 @@ fn health_state_group(ui: &mut egui::Ui, icon: UiIcon, label: &'static str, curr
         tone: device_state_tone(state),
         span: 1,
     });
-    indicator_group(ui, icon, label, &choices, None);
+    indicator_group(ui, icon, label, &choices, None)
 }
 
 #[derive(Clone, Copy)]
@@ -2462,7 +2586,7 @@ enum IndicatorTone {
     Red,
 }
 
-fn detection_state_group(ui: &mut egui::Ui, current: DetectionState) {
+fn detection_state_group(ui: &mut egui::Ui, current: DetectionState) -> Rect {
     let choices = [
         IndicatorChoice {
             icon: UiIcon::Question,
@@ -2493,7 +2617,7 @@ fn detection_state_group(ui: &mut egui::Ui, current: DetectionState) {
             span: 1,
         },
     ];
-    indicator_group(ui, UiIcon::Target, "Detection", &choices, None);
+    indicator_group(ui, UiIcon::Target, "Detection", &choices, None)
 }
 
 fn detection_indicator_tone(state: DetectionState) -> IndicatorTone {
@@ -2504,7 +2628,7 @@ fn detection_indicator_tone(state: DetectionState) -> IndicatorTone {
     }
 }
 
-fn screen_mix_group(ui: &mut egui::Ui, screen_mix: f64) {
+fn screen_mix_group(ui: &mut egui::Ui, screen_mix: f64) -> Rect {
     let active = if screen_mix <= 0.01 {
         0
     } else if screen_mix >= 0.99 {
@@ -2542,7 +2666,7 @@ fn screen_mix_group(ui: &mut egui::Ui, screen_mix: f64) {
         "Screen mix",
         &choices,
         Some((1, &percentage)),
-    );
+    )
 }
 
 fn indicator_group(
@@ -2769,11 +2893,9 @@ fn app_title(ui: &mut egui::Ui, texture: egui::TextureId) {
     const ICON_SIZE: f32 = 22.0;
     const GAP: f32 = 7.0;
     let color = Color32::from_rgb(205, 211, 222);
-    let galley = ui.painter().layout_no_wrap(
-        "Automatic Screen Camera".to_owned(),
-        FontId::proportional(14.0),
-        color,
-    );
+    let galley =
+        ui.painter()
+            .layout_no_wrap("StageSwap".to_owned(), FontId::proportional(14.0), color);
     let size = egui::vec2(
         ICON_SIZE + GAP + galley.size().x,
         galley.size().y.max(ICON_SIZE),
@@ -3405,6 +3527,24 @@ mod tests {
     }
 
     #[test]
+    fn user_data_directory_is_stageswap() {
+        assert_eq!(
+            local_data_directory()
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("StageSwap")
+        );
+    }
+
+    #[test]
+    fn window_title_includes_the_package_version() {
+        assert_eq!(
+            WINDOW_TITLE,
+            format!("StageSwap - v{}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
     fn visible_ui_and_hidden_logic_use_distinct_repaint_cadences() {
         assert_eq!(repaint_interval(true), VISIBLE_REFRESH);
         assert_eq!(repaint_interval(false), HIDDEN_REFRESH);
@@ -3416,7 +3556,7 @@ mod tests {
     fn preview_conversion_preserves_size_and_bgra_channels() {
         let frame = Frame::new(
             vec![3, 2, 1, 255, 30, 20, 10, 255].into(),
-            asc_core::Size::new(2, 1),
+            stageswap_core::Size::new(2, 1),
             8,
             1,
             0,
@@ -3431,7 +3571,7 @@ mod tests {
     #[test]
     fn preview_texture_is_capped_to_its_display_size() {
         let frame = Frame::placeholder(
-            asc_core::Size::new(1280, 720),
+            stageswap_core::Size::new(1280, 720),
             0xff03_0201,
             1,
             0,
@@ -3454,7 +3594,7 @@ mod tests {
         for sequence in 1..=12 {
             converter.submit(
                 Arc::new(Frame::placeholder(
-                    asc_core::Size::new(1280, 720),
+                    stageswap_core::Size::new(1280, 720),
                     0xff00_0000 | sequence,
                     u64::from(sequence),
                     0,
@@ -3484,14 +3624,14 @@ mod tests {
     fn preview_converter_keeps_completed_frame_when_newer_request_is_pending() {
         let now = Instant::now();
         let completed = Arc::new(Frame::placeholder(
-            asc_core::Size::new(2, 2),
+            stageswap_core::Size::new(2, 2),
             0xff00_0001,
             1,
             0,
             now,
         ));
         let pending = Arc::new(Frame::placeholder(
-            asc_core::Size::new(2, 2),
+            stageswap_core::Size::new(2, 2),
             0xff00_0002,
             2,
             0,
@@ -3695,7 +3835,7 @@ mod tests {
                 .unwrap()
                 .native_pixels_per_point = Some(dpi_scale);
             let mut sidebar_rect = Rect::NOTHING;
-            let mut navigation_rects = Vec::new();
+            let mut sidebar_layout = None;
             let _ = context.run_ui(input, |ui| {
                 let sidebar = ui.allocate_ui_with_layout(
                     egui::vec2(SETTINGS_SIDEBAR_WIDTH, viewport.y),
@@ -3703,11 +3843,29 @@ mod tests {
                     |ui| app.settings_sidebar(ui, viewport.y),
                 );
                 sidebar_rect = sidebar.response.rect;
-                navigation_rects = sidebar.inner;
+                sidebar_layout = Some(sidebar.inner);
             });
 
-            assert_eq!(navigation_rects.len(), SettingsTab::ALL.len());
-            for rect in &navigation_rects {
+            let sidebar_layout = sidebar_layout.unwrap();
+            for rect in [
+                sidebar_layout.brand_icon,
+                sidebar_layout.brand_title,
+                sidebar_layout.brand_separator,
+                sidebar_layout.back,
+            ] {
+                assert!(rect.is_positive());
+                assert!(sidebar_rect.contains_rect(rect));
+            }
+            assert!((sidebar_layout.brand_icon.width() - 160.0).abs() < 0.01);
+            assert!((sidebar_layout.brand_icon.height() - 160.0).abs() < 0.01);
+            assert!(sidebar_layout.brand_icon.bottom() < sidebar_layout.brand_title.top());
+            assert!(sidebar_layout.brand_title.bottom() < sidebar_layout.brand_separator.top());
+            assert!(sidebar_layout.brand_separator.bottom() < sidebar_layout.back.top());
+            assert_eq!(
+                sidebar_layout.primary_navigation.len(),
+                SettingsTab::PRIMARY.len()
+            );
+            for rect in &sidebar_layout.primary_navigation {
                 assert!(rect.is_positive(), "invalid navigation rect: {rect:?}");
                 assert!(
                     sidebar_rect.contains_rect(*rect),
@@ -3715,7 +3873,7 @@ mod tests {
                 );
                 assert!((rect.height() - 36.0).abs() < 0.01);
             }
-            for pair in navigation_rects.windows(2) {
+            for pair in sidebar_layout.primary_navigation.windows(2) {
                 assert!(
                     pair[1].top() - pair[0].bottom() >= 2.9,
                     "navigation rows overlap: {:?} and {:?}",
@@ -3724,7 +3882,37 @@ mod tests {
                 );
                 assert!(!pair[0].intersects(pair[1]));
             }
+            assert!(sidebar_layout.back.bottom() < sidebar_layout.primary_navigation[0].top());
+            assert!(
+                sidebar_layout.primary_navigation.last().unwrap().bottom()
+                    < sidebar_layout.diagnostics.top()
+            );
+            assert!(sidebar_layout.diagnostics.bottom() < sidebar_layout.save_status.top());
+            assert!(sidebar_rect.contains_rect(sidebar_layout.diagnostics));
+            assert!(sidebar_rect.contains_rect(sidebar_layout.save_status));
+            assert!(
+                sidebar_rect.bottom() - sidebar_layout.save_status.bottom() <= 24.0,
+                "autosave footer was not bottom-aligned: sidebar={sidebar_rect:?}, save={:?}",
+                sidebar_layout.save_status
+            );
         }
+    }
+
+    #[test]
+    fn settings_sidebar_navigation_uses_neutral_gray_colors() {
+        assert_eq!(SETTINGS_SIDEBAR_FILL, Color32::from_rgb(20, 22, 27));
+        assert_eq!(SETTINGS_NAV_HOVERED, Color32::from_rgb(32, 35, 41));
+        assert_eq!(SETTINGS_NAV_SELECTED, Color32::from_rgb(45, 48, 55));
+        assert_eq!(SETTINGS_NAV_INDICATOR, Color32::from_rgb(151, 157, 168));
+    }
+
+    #[test]
+    fn screen_and_matching_are_separate_settings_pages() {
+        assert_eq!(SettingsTab::Screen.title(), "Screen");
+        assert_eq!(SettingsTab::Matching.title(), "Matching");
+        assert!(SettingsTab::Screen.description().contains("display"));
+        assert!(SettingsTab::Matching.description().contains("webcam"));
+        assert_ne!(SettingsTab::Screen, SettingsTab::Matching);
     }
 
     #[test]
@@ -3789,25 +3977,23 @@ mod tests {
     }
 
     #[test]
-    fn settings_category_divider_is_full_width_and_between_sections() {
+    fn settings_sections_use_whitespace_instead_of_divider_lines() {
         let context = egui::Context::default();
         let mut first = Rect::NOTHING;
-        let mut divider = Rect::NOTHING;
         let mut second = Rect::NOTHING;
         let _ = context.run_ui(egui::RawInput::default(), |ui| {
             ui.set_width(520.0);
             first = ui.allocate_space(egui::vec2(ui.available_width(), 30.0)).1;
-            divider = settings_section_divider(ui);
+            settings_section_gap(ui);
             second = ui.allocate_space(egui::vec2(ui.available_width(), 30.0)).1;
         });
-        assert!(first.bottom() < divider.top());
-        assert!(divider.bottom() < second.top());
-        assert!((divider.width() - 520.0).abs() < 0.01);
+        assert!(second.top() - first.bottom() >= 24.0);
     }
 
     #[test]
-    fn four_settings_categories_keep_every_recovery_target_in_diagnostics() {
-        assert_eq!(SettingsTab::ALL.len(), 4);
+    fn five_settings_categories_keep_every_recovery_target_in_diagnostics() {
+        assert_eq!(SettingsTab::ALL.len(), 5);
+        assert_eq!(SettingsTab::PRIMARY.len(), 4);
         for target in [
             RestartTarget::Webcam,
             RestartTarget::ScreenCapture,
@@ -3872,6 +4058,50 @@ mod tests {
             assert!(footer.is_positive());
             assert!(footer.left() >= 0.0 && footer.right() <= viewport.x + 0.01);
             assert!(footer.top() >= 0.0 && footer.bottom() <= viewport.y + 0.01);
+        }
+    }
+
+    #[test]
+    fn dashboard_controls_have_three_separated_full_width_sections() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            AppConfig::default(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        );
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 560.0))),
+            ..egui::RawInput::default()
+        };
+        let snapshot = app.runtime.snapshot();
+        let mut layout = None;
+        let mut available_width = 0.0;
+        let _ = context.run_ui(input, |ui| {
+            available_width = ui.available_width();
+            layout = Some(app.controls_body(ui, &snapshot));
+        });
+        let layout = layout.unwrap();
+
+        for rect in layout.sections {
+            assert!(rect.is_positive());
+        }
+        for pair in layout.sections.windows(2) {
+            assert!(pair[0].bottom() < pair[1].top());
+            assert!(!pair[0].intersects(pair[1]));
+        }
+        assert_eq!(layout.health_indicators.len(), 5);
+        for pair in layout.health_indicators.windows(2) {
+            assert!(pair[0].bottom() < pair[1].top());
+        }
+        assert!(layout.sections[0].bottom() < layout.section_dividers[0].top());
+        assert!(layout.section_dividers[0].bottom() < layout.sections[1].top());
+        assert!(layout.sections[1].bottom() < layout.section_dividers[1].top());
+        assert!(layout.section_dividers[1].bottom() < layout.sections[2].top());
+        assert_eq!(layout.other_actions.len(), 2);
+        assert!(layout.other_actions[0].bottom() < layout.other_actions[1].top());
+        for action in layout.other_actions {
+            assert!((action.width() - available_width).abs() < 0.01);
         }
     }
 
@@ -4068,12 +4298,7 @@ mod tests {
                 });
                 assert!(!dashboard_output.shapes.is_empty());
 
-                for tab in [
-                    SettingsTab::App,
-                    SettingsTab::Webcam,
-                    SettingsTab::ScreenDetection,
-                    SettingsTab::Diagnostics,
-                ] {
+                for tab in SettingsTab::ALL {
                     app.settings_tab = tab;
                     app.view = AppView::Settings;
                     app.settings_opened_at = None;

@@ -1,4 +1,4 @@
-use asc_core::{
+use stageswap_core::{
     AppConfig, AppSnapshot, Command, DebouncedDetector, DetectorSettings, DeviceState, Frame,
     FrameCompositor, FrameMetadata, FramePacer, GrayImage, PIPELINE_FPS, RunState, Size, Source,
     SourceAvailability, TransitionController, bgra_to_gray, decide, image_similarity, off_frame,
@@ -11,9 +11,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
-use asc_core::{MonitorScore, MonitorTracker, MonitorTrackerSettings, RestartTarget};
+use stageswap_core::{MonitorScore, MonitorTracker, MonitorTrackerSettings, RestartTarget};
 #[cfg(windows)]
-use asc_windows::{
+use stageswap_windows::{
     FramePublisher, MediaFoundationVideoInput, ScreenInput, VideoInput, VirtualCameraController,
     WindowsGraphicsScreenInput, choose_video_device, configure_startup, frame_pipe_name,
 };
@@ -52,7 +52,7 @@ impl RuntimeHandle {
         let snapshot = Arc::new(RwLock::new(initial_snapshot));
         let worker_snapshot = Arc::clone(&snapshot);
         let worker = thread::Builder::new()
-            .name("asc-runtime".into())
+            .name("stageswap-runtime".into())
             .spawn(move || run(config, receiver, worker_snapshot))
             .expect("runtime thread can be created");
         Self {
@@ -349,7 +349,7 @@ impl RuntimeState {
         .ok()
         .map(Arc::new);
         self.detector.reset();
-        self.snapshot.detection = asc_core::DetectionState::Unknown;
+        self.snapshot.detection = stageswap_core::DetectionState::Unknown;
         self.last_detection = now - Duration::from_millis(250);
     }
 
@@ -595,7 +595,7 @@ struct MonitorScanRequest {
 #[cfg(windows)]
 struct MonitorScanResult {
     generation: u64,
-    monitors: Vec<asc_core::MonitorDescriptor>,
+    monitors: Vec<stageswap_core::MonitorDescriptor>,
     scores: Vec<MonitorScore>,
 }
 
@@ -616,7 +616,7 @@ impl MonitorScanWorker {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let worker = thread::Builder::new()
-            .name("asc-monitor-scan".into())
+            .name("stageswap-monitor-scan".into())
             .spawn(move || {
                 while let Ok(request) = request_receiver.recv() {
                     if worker_stop.load(Ordering::Acquire) {
@@ -724,7 +724,7 @@ struct Platform {
     pipe_name: Option<String>,
     webcam: MediaFoundationVideoInput,
     screen: WindowsGraphicsScreenInput,
-    selected_monitor: Option<asc_core::MonitorDescriptor>,
+    selected_monitor: Option<stageswap_core::MonitorDescriptor>,
     monitor_tracker: MonitorTracker,
     last_monitor_scan: Instant,
     monitor_scan_generation: u64,
@@ -781,7 +781,7 @@ impl Platform {
             Ok(devices) => {
                 state.snapshot.video_devices = devices
                     .iter()
-                    .map(|device| asc_core::VideoDeviceChoice {
+                    .map(|device| stageswap_core::VideoDeviceChoice {
                         id: device.id.clone(),
                         name: device.name.clone(),
                     })
@@ -965,7 +965,7 @@ impl Platform {
                 Ok(devices) => {
                     state.snapshot.video_devices = devices
                         .into_iter()
-                        .map(|device| asc_core::VideoDeviceChoice {
+                        .map(|device| stageswap_core::VideoDeviceChoice {
                             id: device.id,
                             name: device.name,
                         })
@@ -1179,7 +1179,7 @@ impl Platform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asc_core::OutputMode;
+    use stageswap_core::OutputMode;
 
     #[test]
     fn output_fps_tracker_measures_generated_output_independently_of_ui() {
@@ -1229,7 +1229,7 @@ mod tests {
             for x in 0..size.width as usize {
                 let offset = (y * size.width as usize + x) * 4;
                 pixels[offset..offset + 4].copy_from_slice(
-                    if x < 160 || x >= 1120 || y < 90 || y >= 630 {
+                    if !(160..1120).contains(&x) || !(90..630).contains(&y) {
                         &[0, 0, 255, 255]
                     } else {
                         &[0, 255, 0, 255]
@@ -1333,7 +1333,7 @@ mod tests {
         assert_eq!(initial.actual_output, Source::Placeholder);
         assert_eq!(
             initial_output.pixels(),
-            asc_core::off_frame_pixels().as_ref()
+            stageswap_core::off_frame_pixels().as_ref()
         );
 
         runtime.send(Command::Start).unwrap();
@@ -1369,7 +1369,7 @@ mod tests {
         assert_eq!(stopped.actual_output, Source::Placeholder);
         assert_eq!(
             stopped_output.pixels(),
-            asc_core::off_frame_pixels().as_ref()
+            stageswap_core::off_frame_pixels().as_ref()
         );
     }
 
@@ -1400,7 +1400,7 @@ mod tests {
             );
             thread::yield_now();
         };
-        assert_eq!(later.pixels(), asc_core::off_frame_pixels().as_ref());
+        assert_eq!(later.pixels(), stageswap_core::off_frame_pixels().as_ref());
     }
 
     #[test]

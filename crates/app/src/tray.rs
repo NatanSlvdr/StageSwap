@@ -1,17 +1,15 @@
-use asc_core::{AppSnapshot, OutputMode, RunState};
 use image::{Rgba, RgbaImage, imageops::FilterType};
+use stageswap_core::{AppSnapshot, OutputMode, RunState};
 use tray_icon::menu::{
     CheckMenuItem, Icon as MenuIcon, IconMenuItem, Menu, MenuEvent, MenuId, PredefinedMenuItem,
     Submenu,
 };
-use tray_icon::{
-    Icon as TrayImage, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
-};
+use tray_icon::{Icon as TrayImage, TrayIcon, TrayIconBuilder};
 
 use crate::app_icon;
 
 pub struct Tray {
-    icon: TrayIcon,
+    _icon: TrayIcon,
     show: MenuId,
     automation: IconMenuItem,
     start_icon: MenuIcon,
@@ -35,12 +33,7 @@ pub enum TrayAction {
 impl Tray {
     pub fn new() -> Result<Self, String> {
         let menu = Menu::new();
-        let show = IconMenuItem::new(
-            "Open Automatic Screen Camera",
-            true,
-            Some(app_menu_icon()?),
-            None,
-        );
+        let show = IconMenuItem::new("Open StageSwap", true, Some(app_menu_icon()?), None);
         let start_icon = action_menu_icon(MenuGlyph::Start)?;
         let stop_icon = action_menu_icon(MenuGlyph::Stop)?;
         let automation =
@@ -77,15 +70,15 @@ impl Tray {
         let icon = TrayImage::from_rgba(app_icon.rgba, app_icon.width, app_icon.height)
             .map_err(|error| format!("could not create tray icon: {error}"))?;
         let icon = TrayIconBuilder::new()
-            .with_tooltip("Automatic Screen Camera")
+            .with_tooltip("StageSwap")
             .with_icon(icon)
             .with_menu(Box::new(menu))
-            .with_menu_on_left_click(false)
+            .with_menu_on_left_click(true)
             .with_menu_on_right_click(true)
             .build()
             .map_err(|error| format!("could not create tray icon: {error}"))?;
         Ok(Self {
-            icon,
+            _icon: icon,
             show: show.id().clone(),
             automation,
             start_icon,
@@ -121,19 +114,6 @@ impl Tray {
     }
 
     pub fn poll(&self) -> Option<TrayAction> {
-        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            if let TrayIconEvent::Click {
-                id,
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-                && id == *self.icon.id()
-            {
-                return Some(TrayAction::Show);
-            }
-        }
-
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             let id = event.id();
             if id == &self.show {

@@ -1,20 +1,17 @@
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;
-use windows_core::w;
+use windows_core::PCWSTR;
+
+const MUTEX_NAME: &str = r"Local\StageSwap.Application";
 
 pub struct SingleInstance(HANDLE);
 
 impl SingleInstance {
     pub fn acquire() -> Result<Option<Self>, String> {
         // A Local mutex scopes ownership to the signed-in Windows session.
-        let handle = unsafe {
-            CreateMutexW(
-                None,
-                false,
-                w!("Local\\AutomaticScreenCameraRust.Application"),
-            )
-        }
-        .map_err(|error| format!("could not create application instance lock: {error}"))?;
+        let name: Vec<u16> = MUTEX_NAME.encode_utf16().chain([0]).collect();
+        let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
+            .map_err(|error| format!("could not create application instance lock: {error}"))?;
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             let _ = unsafe { CloseHandle(handle) };
             return Ok(None);
@@ -26,5 +23,15 @@ impl SingleInstance {
 impl Drop for SingleInstance {
     fn drop(&mut self) {
         let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mutex_identity_is_stageswap() {
+        assert_eq!(MUTEX_NAME, r"Local\StageSwap.Application");
     }
 }

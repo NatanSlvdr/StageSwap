@@ -1,5 +1,5 @@
 use crate::{InputDevice, VideoInput};
-use asc_core::{Frame, PIPELINE_SIZE, Size};
+use stageswap_core::{Frame, PIPELINE_SIZE, Size};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -71,7 +71,7 @@ pub(super) fn enumerate_all_video_devices() -> Result<Vec<InputDevice>, String> 
             &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
         )
         .unwrap_or_default();
-        let is_virtual = name.contains("Automatic Screen Camera");
+        let is_virtual = is_managed_virtual_camera(&name);
         if !id.is_empty() {
             result.push(InputDevice {
                 id,
@@ -83,6 +83,11 @@ pub(super) fn enumerate_all_video_devices() -> Result<Vec<InputDevice>, String> 
     // SAFETY: Media Foundation allocated the interface-array block with CoTaskMemAlloc.
     unsafe { CoTaskMemFree(Some(raw.cast())) };
     Ok(result)
+}
+
+fn is_managed_virtual_camera(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("stageswap") || name.contains("automatic screen camera")
 }
 
 fn allocated_string(activation: &IMFActivate, key: &windows_core::GUID) -> Option<String> {
@@ -446,5 +451,14 @@ mod tests {
         assert!(state.is_current(generation));
         state.generation.fetch_add(1, Ordering::AcqRel);
         assert!(!state.is_current(generation));
+    }
+
+    #[test]
+    fn product_virtual_cameras_are_never_selectable_webcams() {
+        assert!(is_managed_virtual_camera("StageSwap"));
+        assert!(is_managed_virtual_camera("Automatic Screen Camera"));
+        assert!(is_managed_virtual_camera("stageswap"));
+        assert!(is_managed_virtual_camera("StageSwap Virtual Camera"));
+        assert!(!is_managed_virtual_camera("USB Webcam"));
     }
 }

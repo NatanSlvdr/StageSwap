@@ -1,6 +1,5 @@
 use crate::remove_virtual_camera;
-use crate::virtual_camera::{LEGACY_SOURCE_ID, remove_virtual_camera_for_source};
-use asc_core::{AppConfig, ConfigStore};
+use stageswap_core::{AppConfig, ConfigStore};
 use std::env;
 use std::fs;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -13,9 +12,9 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
-    REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW,
-    RegGetValueW, RegOpenKeyExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegGetValueW,
+    RegSetValueExW,
 };
 use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_AMD64;
 use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
@@ -26,17 +25,14 @@ use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, Shel
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows_core::{HRESULT, PCSTR, PCWSTR};
 
-const SOURCE_FILE: &str = "AutomaticScreenCameraSource.dll";
-const SOURCE_FILE_PREFIX: &str = "AutomaticScreenCameraSource-";
-const OLD_CLASS_KEY: &str = r"Software\Classes\CLSID\{4B8BA04C-7A67-4DD5-B9F4-C607940A7A64}";
-const OLD_DEPLOYMENT_KEY: &str = r"SOFTWARE\AutomaticScreenCamera\Deployment";
-const OLD_PORTABLE_DIRECTORY: &str = "Automatic Screen Camera Portable";
-const SOURCE_CLASS_KEY: &str = r"Software\Classes\CLSID\{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}";
+const SOURCE_FILE: &str = "StageSwapSource.dll";
+const SOURCE_FILE_PREFIX: &str = "StageSwapSource-";
+const DEPLOYMENT_DIRECTORY_NAME: &str = "StageSwap";
+const SOURCE_CLASS_KEY: &str = r"Software\Classes\CLSID\{4ABA794D-7B23-449C-8467-CE74A41C2820}";
 const SOURCE_INPROC_KEY: &str =
-    r"Software\Classes\CLSID\{402EB87C-123B-4765-9FF7-6E11CC7DA5B3}\InprocServer32";
+    r"Software\Classes\CLSID\{4ABA794D-7B23-449C-8467-CE74A41C2820}\InprocServer32";
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const RUN_VALUE: &str = "AutomaticScreenCameraRust";
-const OLD_RUN_VALUE: &str = "AutomaticScreenCamera";
+const RUN_VALUE: &str = "StageSwap";
 
 pub fn configure_startup(enabled: bool) -> Result<(), String> {
     let path: Vec<u16> = RUN_KEY.encode_utf16().chain([0]).collect();
@@ -107,59 +103,54 @@ pub fn save_config_atomic(store: &ConfigStore, config: &AppConfig) -> std::io::R
     })
 }
 
-/// Handles internal elevated deployment commands and ensures that a portable
-/// release has extracted and registered its embedded, same-architecture DLL.
+/// Handles internal elevated deployment commands and ensures that the release
+/// has extracted and registered its embedded, same-architecture DLL.
 /// Returns true when the current process should exit without opening the UI.
-pub fn portable_startup(payload: &[u8]) -> Result<bool, String> {
+pub fn deployment_startup(payload: &[u8]) -> Result<bool, String> {
     let argument = env::args().nth(1);
     match argument.as_deref() {
-        Some("--portable-register-elevated") => {
+        Some("--register-elevated") => {
             validate_native_architecture()?;
             validate_embedded_source(payload)?;
             install(payload)?;
             Ok(true)
         }
-        Some("--cleanup-legacy-elevated") => {
-            cleanup_legacy_machine_install()?;
-            Ok(true)
-        }
-        Some("--cleanup-portable-elevated") => {
+        Some("--cleanup-elevated") => {
             cleanup()?;
             Ok(true)
         }
-        Some("--cleanup-portable") => {
-            run_elevated("--cleanup-portable-elevated")?;
+        Some("--cleanup") => {
+            run_elevated("--cleanup-elevated")?;
             Ok(true)
         }
         Some("--startup") => {
-            ensure_portable_install(payload)?;
+            ensure_deployment(payload)?;
             Ok(false)
         }
         Some(_) => Ok(false),
         None if payload.is_empty() => Ok(false),
         None => {
-            ensure_portable_install(payload)?;
+            ensure_deployment(payload)?;
             Ok(false)
         }
     }
 }
 
-fn ensure_portable_install(payload: &[u8]) -> Result<(), String> {
+fn ensure_deployment(payload: &[u8]) -> Result<(), String> {
     if payload.is_empty() {
         return Ok(());
     }
     validate_native_architecture()?;
     validate_embedded_source(payload)?;
-    cleanup_legacy_install()?;
     let source = payload_source_path(payload)?;
     if fs::read(&source).ok().as_deref() != Some(payload) || !source_registration_matches(&source) {
-        run_elevated("--portable-register-elevated")?;
+        run_elevated("--register-elevated")?;
     }
     if fs::read(&source).ok().as_deref() != Some(payload) {
-        return Err("portable camera source was not installed correctly".into());
+        return Err("camera source was not installed correctly".into());
     }
     if !source_registration_matches(&source) {
-        return Err("portable camera source COM registration was not installed correctly".into());
+        return Err("camera source COM registration was not installed correctly".into());
     }
     Ok(())
 }
@@ -265,68 +256,7 @@ fn validate_native_architecture() -> Result<(), String> {
     .map_err(|error| format!("could not validate native package architecture: {error}"))?;
     let package_machine = IMAGE_FILE_MACHINE_AMD64;
     if native_machine != package_machine || process_machine != IMAGE_FILE_MACHINE_UNKNOWN {
-        return Err(
-            "this portable executable must run on matching native Windows architecture".into(),
-        );
-    }
-    Ok(())
-}
-
-fn previous_install_present() -> bool {
-    registry_key_present(HKEY_LOCAL_MACHINE, OLD_CLASS_KEY)
-        || registry_key_present(HKEY_LOCAL_MACHINE, OLD_DEPLOYMENT_KEY)
-        || old_source_path().is_file()
-}
-
-fn registry_key_present(root: HKEY, key: &str) -> bool {
-    let path: Vec<u16> = key.encode_utf16().chain([0]).collect();
-    let mut opened_key = HKEY::default();
-    // SAFETY: path is terminated and key is writable.
-    let opened = unsafe {
-        RegOpenKeyExW(
-            root,
-            PCWSTR(path.as_ptr()),
-            Some(0),
-            KEY_READ,
-            &mut opened_key,
-        )
-    }
-    .is_ok();
-    if opened {
-        let _ = unsafe { RegCloseKey(opened_key) };
-    }
-    opened
-}
-
-fn cleanup_legacy_install() -> Result<(), String> {
-    remove_startup_value(OLD_RUN_VALUE)?;
-    // Opening and removing this source identity is idempotent and also clears a
-    // virtual-camera registration left behind after its COM key was removed.
-    remove_virtual_camera_for_source(LEGACY_SOURCE_ID)
-        .map_err(|error| format!("could not remove legacy virtual camera: {error}"))?;
-    if !previous_install_present() {
-        return Ok(());
-    }
-    run_elevated("--cleanup-legacy-elevated")?;
-    if previous_install_present() {
-        return Err("legacy Automatic Screen Camera installation was not removed correctly".into());
-    }
-    Ok(())
-}
-
-fn cleanup_legacy_machine_install() -> Result<(), String> {
-    let source = old_source_path();
-    if source.is_file() {
-        // The direct registry removal below is the fallback for damaged DLLs.
-        let _ = invoke_registration(&source, b"DllUnregisterServer\0");
-    }
-    delete_registry_tree(HKEY_LOCAL_MACHINE, OLD_CLASS_KEY)?;
-    delete_registry_tree(HKEY_LOCAL_MACHINE, OLD_DEPLOYMENT_KEY)?;
-    if let Some(directory) = source.parent()
-        && directory.exists()
-    {
-        fs::remove_dir_all(directory)
-            .map_err(|error| format!("could not remove {}: {error}", directory.display()))?;
+        return Err("this executable must run on matching native Windows architecture".into());
     }
     Ok(())
 }
@@ -338,51 +268,19 @@ fn delete_registry_tree(root: HKEY, key: &str) -> Result<(), String> {
     if status.is_ok() || status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND {
         Ok(())
     } else {
-        Err(format!("could not remove legacy registry key: {status:?}"))
+        Err(format!("could not remove registry key: {status:?}"))
     }
 }
 
-fn remove_startup_value(value: &str) -> Result<(), String> {
-    let path: Vec<u16> = RUN_KEY.encode_utf16().chain([0]).collect();
-    let value: Vec<u16> = value.encode_utf16().chain([0]).collect();
-    let mut key = HKEY::default();
-    // SAFETY: the path is terminated and key is writable.
-    let status = unsafe {
-        RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(path.as_ptr()),
-            Some(0),
-            KEY_WRITE,
-            &mut key,
-        )
-    };
-    if status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND {
-        return Ok(());
-    }
-    if status.is_err() {
-        return Err(format!("could not open Windows startup key: {status:?}"));
-    }
-    // SAFETY: the key and terminated value name remain live for the call.
-    let result = unsafe { RegDeleteValueW(key, PCWSTR(value.as_ptr())) };
-    let _ = unsafe { RegCloseKey(key) };
-    if result.is_ok() || result == ERROR_FILE_NOT_FOUND {
-        Ok(())
-    } else {
-        Err(format!(
-            "could not remove legacy Windows startup entry: {result:?}"
-        ))
-    }
-}
-
-fn portable_directory() -> Result<PathBuf, String> {
+fn deployment_directory() -> Result<PathBuf, String> {
     env::var_os("ProgramFiles")
         .map(PathBuf::from)
         .ok_or_else(|| "ProgramFiles is not defined".into())
-        .map(|path| path.join("Automatic Screen Camera Rust Portable"))
+        .map(|path| path.join(DEPLOYMENT_DIRECTORY_NAME))
 }
 
 fn payload_source_path(payload: &[u8]) -> Result<PathBuf, String> {
-    Ok(portable_directory()?.join(payload_source_file_name(payload)))
+    Ok(deployment_directory()?.join(payload_source_file_name(payload)))
 }
 
 fn payload_source_file_name(payload: &[u8]) -> String {
@@ -397,16 +295,8 @@ fn payload_source_file_name(payload: &[u8]) -> String {
     format!("{SOURCE_FILE_PREFIX}{hash:016x}.dll")
 }
 
-fn old_source_path() -> PathBuf {
-    env::var_os("ProgramFiles")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
-        .join(OLD_PORTABLE_DIRECTORY)
-        .join(SOURCE_FILE)
-}
-
 fn install(payload: &[u8]) -> Result<(), String> {
-    let directory = portable_directory()?;
+    let directory = deployment_directory()?;
     fs::create_dir_all(&directory)
         .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
     let source = directory.join(payload_source_file_name(payload));
@@ -450,7 +340,7 @@ fn install(payload: &[u8]) -> Result<(), String> {
 fn cleanup() -> Result<(), String> {
     configure_startup(false)?;
     let camera_result = remove_virtual_camera();
-    let directory = portable_directory()?;
+    let directory = deployment_directory()?;
     if let Some(source) = registered_managed_source(&directory) {
         let _ = invoke_registration(&source, b"DllUnregisterServer\0");
     }
@@ -501,8 +391,8 @@ fn cleanup_managed_sources(directory: &Path, keep: Option<&Path>) {
             continue;
         };
         if file_name
-            .get(.."AutomaticScreenCameraSource".len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("AutomaticScreenCameraSource"))
+            .get(.."StageSwapSource".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("StageSwapSource"))
         {
             let _ = remove_or_schedule(&path);
         }
@@ -565,9 +455,8 @@ fn run_elevated(argument: &str) -> Result<(), String> {
         ..SHELLEXECUTEINFOW::default()
     };
     // SAFETY: all referenced buffers remain live until ShellExecuteExW returns.
-    unsafe { ShellExecuteExW(&mut execute) }.map_err(|error| {
-        format!("portable deployment elevation was cancelled or failed: {error}")
-    })?;
+    unsafe { ShellExecuteExW(&mut execute) }
+        .map_err(|error| format!("deployment elevation was cancelled or failed: {error}"))?;
     if execute.hProcess.is_invalid() {
         return Err("elevated deployment process was not created".into());
     }
@@ -591,7 +480,7 @@ mod tests {
     fn payload_source_names_are_stable_and_versioned() {
         assert_eq!(
             payload_source_file_name(b"test"),
-            "AutomaticScreenCameraSource-f9e6e6ef197c2b25.dll"
+            "StageSwapSource-f9e6e6ef197c2b25.dll"
         );
         assert_ne!(
             payload_source_file_name(b"first"),
@@ -600,19 +489,42 @@ mod tests {
     }
 
     #[test]
+    fn deployment_identity_is_stageswap() {
+        assert_eq!(DEPLOYMENT_DIRECTORY_NAME, "StageSwap");
+        assert_eq!(RUN_VALUE, "StageSwap");
+        assert_eq!(SOURCE_FILE, "StageSwapSource.dll");
+        assert_eq!(SOURCE_FILE_PREFIX, "StageSwapSource-");
+        assert!(SOURCE_CLASS_KEY.ends_with("{4ABA794D-7B23-449C-8467-CE74A41C2820}"));
+        assert!(
+            SOURCE_INPROC_KEY.ends_with("{4ABA794D-7B23-449C-8467-CE74A41C2820}\\InprocServer32")
+        );
+    }
+
+    #[test]
     fn only_owned_dll_names_are_managed() {
-        let directory = Path::new(r"C:\Program Files\Automatic Screen Camera Rust Portable");
+        let directory = Path::new(r"C:\Program Files\StageSwap");
         assert!(is_managed_source(&directory.join(SOURCE_FILE), directory));
         assert!(is_managed_source(
-            &directory.join("AutomaticScreenCameraSource-0123456789abcdef.dll"),
+            &directory.join("StageSwapSource-0123456789abcdef.dll"),
             directory
         ));
         assert!(!is_managed_source(
-            &directory.join("AutomaticScreenCameraSource-0123456789abcdef.dll.installing"),
+            &directory.join("StageSwapSource-0123456789abcdef.dll.installing"),
             directory
         ));
         assert!(!is_managed_source(
-            Path::new(r"C:\Windows\System32\AutomaticScreenCameraSource.dll"),
+            Path::new(r"C:\Windows\System32\StageSwapSource.dll"),
+            directory
+        ));
+    }
+
+    #[test]
+    fn automatic_screen_camera_paths_are_not_owned() {
+        let directory = Path::new(r"C:\Program Files\StageSwap");
+        assert!(!is_managed_source(
+            Path::new(
+                r"C:\Program Files\Automatic Screen Camera Rust Portable\AutomaticScreenCameraSource-0123456789abcdef.dll"
+            ),
             directory
         ));
     }

@@ -6,8 +6,8 @@ param(
     [string]$ZoomPath,
     [ValidateSet('stable', 'enterprise', 'other')]
     [string]$ZoomChannel = 'stable',
-    [string]$VmImageId = $env:ASC_VM_IMAGE_ID,
-    [string]$UsbPassthroughId = $env:ASC_USB_PASSTHROUGH_ID
+    [string]$VmImageId = $env:STAGESWAP_VM_IMAGE_ID,
+    [string]$UsbPassthroughId = $env:STAGESWAP_USB_PASSTHROUGH_ID
 )
 
 $ErrorActionPreference = 'Stop'
@@ -218,5 +218,5 @@ $environmentJson = $environment | ConvertTo-Json -Depth 8
 Write-Host "Release environment written to $OutputPath"
 if (-not $zoom) { Write-Warning 'Zoom was not found; the release environment is incomplete.' }
 if ($webcams.Count -eq 0) { Write-Warning 'No physical webcam driver was found; the release environment is incomplete.' }
-if (-not $VmImageId) { Write-Warning 'VM image ID is missing; pass -VmImageId or set ASC_VM_IMAGE_ID.' }
-if (-not $UsbPassthroughId) { Write-Warning 'USB passthrough ID is missing; pass -UsbPassthroughId or set ASC_USB_PASSTHROUGH_ID.' }
+if (-not $VmImageId) { Write-Warning 'VM image ID is missing; pass -VmImageId or set STAGESWAP_VM_IMAGE_ID.' }
+if (-not $UsbPassthroughId) { Write-Warning 'USB passthrough ID is missing; pass -UsbPassthroughId or set STAGESWAP_USB_PASSTHROUGH_ID.' }

@@ -1,5 +1,5 @@
 use crate::ScreenInput;
-use asc_core::{Frame, FramePacer, MonitorDescriptor, Size};
+use stageswap_core::{Frame, FramePacer, MonitorDescriptor, Size};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

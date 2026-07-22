@@ -7,6 +7,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const REQUIRED_WINDOWS_SDK: &str = "10.0.22621.0";
+const APP_PACKAGE: &str = "stageswap";
+const MEDIA_SOURCE_PACKAGE: &str = "stageswap-media-source";
+const APP_EXECUTABLE: &str = "StageSwap.exe";
+const MEDIA_SOURCE_DLL: &str = "stageswap_media_source.dll";
+const RELEASE_PREFIX: &str = "StageSwap_win64_v";
+const RELEASE_SUFFIX: &str = ".exe.sha256";
 
 fn main() -> Result<()> {
     let mut arguments = env::args().skip(1);
@@ -15,26 +21,26 @@ fn main() -> Result<()> {
             arguments.next().context("missing PE path")?,
             arguments.next().context("missing architecture")?,
         ),
-        Some("portable") => portable(
+        Some("package") => package(
             arguments.next().context("missing architecture")?,
             arguments.next().map(PathBuf::from),
         ),
         Some(command) => bail!("unknown xtask command: {command}"),
-        None => bail!("usage: cargo xtask <validate-pe PATH x64 | portable x64 [OUTPUT_DIR]>"),
+        None => bail!("usage: cargo xtask <validate-pe PATH x64 | package x64 [OUTPUT_DIR]>"),
     }
 }
 
-fn portable(architecture: String, output: Option<PathBuf>) -> Result<()> {
+fn package(architecture: String, output: Option<PathBuf>) -> Result<()> {
     let windows_sdk = selected_windows_sdk()?;
     let target = match architecture.as_str() {
         "x64" => "x86_64-pc-windows-msvc",
         _ => bail!("architecture must be x64"),
     };
-    run(&mut cargo_build("asc-media-source", target, None))?;
+    run(&mut cargo_build(MEDIA_SOURCE_PACKAGE, target, None))?;
     let dll = PathBuf::from("target")
         .join(target)
         .join("release")
-        .join("asc_media_source.dll");
+        .join(MEDIA_SOURCE_DLL);
     if !dll.is_file() {
         bail!("media-source build did not produce {}", dll.display());
     }
@@ -42,29 +48,25 @@ fn portable(architecture: String, output: Option<PathBuf>) -> Result<()> {
     let embedded_dll = dll
         .canonicalize()
         .context("canonicalize media-source DLL")?;
-    run(&mut cargo_build(
-        "automatic-screen-camera",
-        target,
-        Some(&embedded_dll),
-    ))?;
+    run(&mut cargo_build(APP_PACKAGE, target, Some(&embedded_dll)))?;
     let executable = PathBuf::from("target")
         .join(target)
         .join("release")
-        .join("AutomaticScreenCamera.exe");
+        .join(APP_EXECUTABLE);
     validate_pe_path(&executable, &architecture)?;
     validate_embedded_payload(&executable, &dll)?;
     let output = output.unwrap_or_else(|| PathBuf::from("dist"));
     fs::create_dir_all(&output).context("create dist directory")?;
     let digest = sha256(&fs::read(&executable)?);
-    let history = env::var_os("ASC_RELEASE_HISTORY")
+    let history = env::var_os("STAGESWAP_RELEASE_HISTORY")
         .map(PathBuf::from)
         .unwrap_or_else(|| output.clone());
     let release_version = select_release_version(&history, &digest)?;
-    let artifact = format!("WebcamSwitcher_win64_v{release_version}.exe");
+    let artifact = format!("{RELEASE_PREFIX}{release_version}.exe");
     let destination = output.join(&artifact);
     fs::copy(&executable, &destination).with_context(|| {
         format!(
-            "copy portable executable from {} to {}",
+            "copy executable from {} to {}",
             executable.display(),
             destination.display()
         )
@@ -130,8 +132,6 @@ fn select_release_version(output: &Path, digest: &[u8; 32]) -> Result<ReleaseVer
 }
 
 fn latest_release(output: &Path) -> Result<Option<(ReleaseVersion, String)>> {
-    const PREFIX: &str = "WebcamSwitcher_win64_v";
-    const SUFFIX: &str = ".exe.sha256";
     if !output.exists() {
         return Ok(None);
     }
@@ -141,8 +141,8 @@ fn latest_release(output: &Path) -> Result<Option<(ReleaseVersion, String)>> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         let Some(version) = name
-            .strip_prefix(PREFIX)
-            .and_then(|name| name.strip_suffix(SUFFIX))
+            .strip_prefix(RELEASE_PREFIX)
+            .and_then(|name| name.strip_suffix(RELEASE_SUFFIX))
         else {
             continue;
         };
@@ -172,24 +172,24 @@ fn latest_release(output: &Path) -> Result<Option<(ReleaseVersion, String)>> {
 
 fn cargo_build(package: &str, target: &str, embedded_dll: Option<&Path>) -> Command {
     let mut command = Command::new("cargo");
-    if env::var_os("ASC_USE_CARGO_XWIN").is_some() {
+    if env::var_os("STAGESWAP_USE_CARGO_XWIN").is_some() {
         command.args(["xwin", "build"]);
     } else {
         command.arg("build");
     }
     command.args(["-p", package, "--release", "--target", target]);
     if let Some(dll) = embedded_dll {
-        command.env("ASC_MEDIA_SOURCE_DLL", dll);
+        command.env("STAGESWAP_MEDIA_SOURCE_DLL", dll);
     }
     command
 }
 
 fn selected_windows_sdk() -> Result<String> {
-    let value = env::var("ASC_WINDOWS_SDK_VERSION")
+    let value = env::var("STAGESWAP_WINDOWS_SDK_VERSION")
         .or_else(|_| env::var("WindowsSDKVersion"))
         .context(
             "Windows SDK is not selected; run from a VS Developer shell or set \
-             ASC_WINDOWS_SDK_VERSION",
+             STAGESWAP_WINDOWS_SDK_VERSION",
         )?;
     let normalized = value.trim().trim_end_matches(['\\', '/']);
     if normalized != REQUIRED_WINDOWS_SDK {
@@ -217,7 +217,7 @@ fn validate_embedded_payload(executable: &Path, payload: &Path) -> Result<()> {
                     == Some(payload_bytes.as_slice())
         });
     if !embedded {
-        bail!("portable executable does not contain the media-source payload");
+        bail!("executable does not contain the media-source payload");
     }
     Ok(())
 }
@@ -280,7 +280,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 // Compact FIPS 180-4 SHA-256 used by packaging to avoid relying on a platform
-// command or adding a runtime dependency to the portable artifact.
+// command or adding a runtime dependency to the artifact.
 fn sha256(input: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -402,9 +402,7 @@ mod tests {
     fn release_version_reuses_matching_checksum_and_increments_changed_checksum() {
         let directory = tempfile::tempdir().unwrap();
         let digest = sha256(b"current build");
-        let sidecar = directory
-            .path()
-            .join("WebcamSwitcher_win64_v1.2.22.exe.sha256");
+        let sidecar = directory.path().join("StageSwap_win64_v1.2.22.exe.sha256");
         fs::write(&sidecar, format!("{} *artifact.exe\n", hex(&digest))).unwrap();
 
         assert_eq!(
@@ -418,11 +416,37 @@ mod tests {
     }
 
     #[test]
+    fn packaging_identity_is_stageswap() {
+        assert_eq!(APP_PACKAGE, "stageswap");
+        assert_eq!(MEDIA_SOURCE_PACKAGE, "stageswap-media-source");
+        assert_eq!(APP_EXECUTABLE, "StageSwap.exe");
+        assert_eq!(MEDIA_SOURCE_DLL, "stageswap_media_source.dll");
+        assert_eq!(RELEASE_PREFIX, "StageSwap_win64_v");
+        assert_eq!(RELEASE_SUFFIX, ".exe.sha256");
+    }
+
+    #[test]
     fn release_version_starts_at_application_version() {
         let directory = tempfile::tempdir().unwrap();
         assert_eq!(
             select_release_version(directory.path(), &sha256(b"first build")).unwrap(),
             ReleaseVersion::parse(env!("CARGO_PKG_VERSION")).unwrap()
+        );
+    }
+
+    #[test]
+    fn webcam_switcher_history_does_not_affect_stageswap_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory
+                .path()
+                .join("WebcamSwitcher_win64_v9.9.9.exe.sha256"),
+            format!("{} *legacy.exe\n", hex(&sha256(b"legacy"))),
+        )
+        .unwrap();
+        assert_eq!(
+            select_release_version(directory.path(), &sha256(b"first StageSwap build")).unwrap(),
+            ReleaseVersion::parse("0.2.0").unwrap()
         );
     }
 }

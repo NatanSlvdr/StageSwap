@@ -4,6 +4,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const LOG_FILE_PREFIX: &str = "stageswap-";
+
 pub struct LocalLog {
     directory: PathBuf,
     retention: Duration,
@@ -38,7 +40,7 @@ impl LocalLog {
             .unwrap_or_default()
             .as_millis();
         let day = millis / 86_400_000;
-        let path = self.directory.join(format!("asc-{day}.jsonl"));
+        let path = self.directory.join(format!("{LOG_FILE_PREFIX}{day}.jsonl"));
         let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
             return;
         };
@@ -119,6 +121,15 @@ mod tests {
         let log = LocalLog::new(directory.path().join("logs"), 14);
         log.write("info", "test", "ONE", "first");
         log.write("warning", "test", "TWO", "second");
+        let log_name = fs::read_dir(log.directory())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        assert!(log_name.starts_with(LOG_FILE_PREFIX));
         let export = directory.path().join("export.jsonl");
         log.export_to(&export).unwrap();
         let contents = fs::read_to_string(export).unwrap();

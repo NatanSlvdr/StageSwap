@@ -6,7 +6,7 @@ use windows_core::PCWSTR;
 
 pub fn notify_warning(message: String) {
     let _ = thread::Builder::new()
-        .name("asc-notification".into())
+        .name("stageswap-notification".into())
         .spawn(move || show_dialog(&message, MB_OK | MB_ICONWARNING));
 }
 
@@ -16,10 +16,7 @@ pub fn show_error_dialog(message: &str) {
 
 fn show_dialog(message: &str, style: MESSAGEBOX_STYLE) {
     let message: Vec<u16> = message.encode_utf16().chain([0]).collect();
-    let title: Vec<u16> = "Automatic Screen Camera"
-        .encode_utf16()
-        .chain([0])
-        .collect();
+    let title: Vec<u16> = "StageSwap".encode_utf16().chain([0]).collect();
     // SAFETY: both UTF-16 buffers are terminated and live for the duration of the call.
     unsafe {
         MessageBoxW(
