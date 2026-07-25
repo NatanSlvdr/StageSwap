@@ -2510,7 +2510,7 @@ impl SwitcherApp {
 
                         ui.add_space(8.0);
                         let mut auto_restore = status.auto_restore_on_launch;
-                        settings_toggle_row(
+                        settings_toggle_row_without_separator(
                             ui,
                             &mut auto_restore,
                             "Auto-restore on launch",
@@ -3337,7 +3337,16 @@ fn settings_toggle_row(
     title: &str,
     description: &str,
 ) -> SettingsToggleLayout {
-    settings_toggle_row_with_result(ui, value, title, description, None)
+    settings_toggle_row_with_result(ui, value, title, description, None, true)
+}
+
+fn settings_toggle_row_without_separator(
+    ui: &mut egui::Ui,
+    value: &mut bool,
+    title: &str,
+    description: &str,
+) -> SettingsToggleLayout {
+    settings_toggle_row_with_result(ui, value, title, description, None, false)
 }
 
 fn settings_explained_toggle_row(
@@ -3347,7 +3356,7 @@ fn settings_explained_toggle_row(
     description: &str,
     result: &str,
 ) -> SettingsToggleLayout {
-    settings_toggle_row_with_result(ui, value, title, description, Some(result))
+    settings_toggle_row_with_result(ui, value, title, description, Some(result), true)
 }
 
 fn settings_toggle_row_with_result(
@@ -3356,6 +3365,7 @@ fn settings_toggle_row_with_result(
     title: &str,
     description: &str,
     result: Option<&str>,
+    separator: bool,
 ) -> SettingsToggleLayout {
     const TEXT_CONTROL_GAP: f32 = 12.0;
     const CONTROL_WIDTH: f32 = 83.0;
@@ -3457,7 +3467,9 @@ fn settings_toggle_row_with_result(
         egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, title)
     });
     response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    ui.separator();
+    if separator {
+        ui.separator();
+    }
     SettingsToggleLayout {
         row,
         description: description_rect,
