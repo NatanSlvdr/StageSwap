@@ -41,7 +41,7 @@ mod screen_input;
 #[cfg(windows)]
 mod single_instance;
 #[cfg(windows)]
-pub use deployment::save_config_atomic;
+pub use deployment::{replace_file_atomic, save_config_atomic};
 #[cfg(windows)]
 pub use instance_control::{
     InstanceCommand, InstanceControl, InstanceReadiness, InstanceStatus, instance_status,

@@ -5,11 +5,10 @@ use eframe::egui::{
     TextureOptions, Vec2,
 };
 use stageswap_app::RuntimeHandle;
-#[cfg(not(windows))]
-use stageswap_core::ConfigLoad;
 use stageswap_core::{
-    AppConfig, AppSnapshot, Command, ConfigStore, DetectionState, DeviceState, Frame, OutputMode,
-    RestartTarget, RunState, Source,
+    AdminProfileStatus, AdminProfileStore, AdminRestoreOutcome, AppConfig, AppSnapshot, Command,
+    ConfigLoad, ConfigStore, DetectionState, DeviceState, Frame, OutputMode, RestartTarget,
+    RunState, Source,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -134,7 +133,7 @@ fn main() -> eframe::Result {
         local_data_directory()
     });
     #[cfg(windows)]
-    let loaded = store.load();
+    let loaded = load_config_with_admin_restore(&store);
     #[cfg(not(windows))]
     let loaded = if ui_preview_request.is_some() {
         ConfigLoad {
@@ -142,7 +141,7 @@ fn main() -> eframe::Result {
             ..ConfigLoad::default()
         }
     } else {
-        store.load()
+        load_config_with_admin_restore(&store)
     };
     #[cfg(windows)]
     let mut loaded = loaded;
@@ -231,6 +230,30 @@ fn local_data_directory() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(std::env::temp_dir)
         .join("StageSwap")
+}
+
+fn load_config_with_admin_restore(store: &ConfigStore) -> ConfigLoad {
+    let mut restore_warnings = Vec::new();
+    let admin_store = AdminProfileStore::new(store.directory());
+    if let Err(error) = restore_admin_profile(&admin_store) {
+        restore_warnings.push(format!(
+            "Could not restore the admin configuration: {error}"
+        ));
+    }
+    let mut loaded = store.load();
+    restore_warnings.append(&mut loaded.warnings);
+    loaded.warnings = restore_warnings;
+    loaded
+}
+
+#[cfg(windows)]
+fn restore_admin_profile(store: &AdminProfileStore) -> std::io::Result<AdminRestoreOutcome> {
+    store.restore_on_launch_with_replace(stageswap_windows::replace_file_atomic)
+}
+
+#[cfg(not(windows))]
+fn restore_admin_profile(store: &AdminProfileStore) -> std::io::Result<AdminRestoreOutcome> {
+    store.restore_on_launch()
 }
 
 fn aspect_locked_window_size(current: Vec2, previous: Option<Vec2>) -> Vec2 {
@@ -805,6 +828,10 @@ struct SwitcherApp {
     view: AppView,
     settings_tab: SettingsTab,
     settings_save_state: SettingsSaveState,
+    admin_profile_status: Option<AdminProfileStatus>,
+    show_admin_configuration: bool,
+    confirm_replace_admin_baseline: bool,
+    confirm_remove_admin_baseline: bool,
     confirm_clear_logs: bool,
     awaiting_video_device_id: Option<String>,
     settings_opened_at: Option<Instant>,
@@ -832,10 +859,23 @@ struct SwitcherApp {
 }
 
 impl SwitcherApp {
-    fn new(mut config: AppConfig, load_warnings: Vec<String>, store: ConfigStore) -> Self {
+    fn new(mut config: AppConfig, mut load_warnings: Vec<String>, store: ConfigStore) -> Self {
         if config.reference_image_path.is_empty() {
             config.reference_image_path = store.reference_path().display().to_string();
         }
+        let admin_profile_status = match AdminProfileStore::new(store.directory()).status() {
+            Ok(status) => status,
+            Err(error) => {
+                let warning = format!("Could not read the admin configuration: {error}");
+                if !load_warnings
+                    .iter()
+                    .any(|warning| warning.contains("admin configuration"))
+                {
+                    load_warnings.push(warning);
+                }
+                None
+            }
+        };
         let log = LocalLog::new(store.logs_path(), 14);
         for warning in &load_warnings {
             log.write("warning", "configuration", "LOAD_WARNING", warning);
@@ -848,6 +888,10 @@ impl SwitcherApp {
             view: AppView::Dashboard,
             settings_tab: SettingsTab::General,
             settings_save_state: SettingsSaveState::Saved,
+            admin_profile_status,
+            show_admin_configuration: false,
+            confirm_replace_admin_baseline: false,
+            confirm_remove_admin_baseline: false,
             confirm_clear_logs: false,
             awaiting_video_device_id: None,
             settings_opened_at: None,
@@ -977,9 +1021,98 @@ impl SwitcherApp {
     fn close_settings(&mut self) {
         self.flush_settings();
         self.view = AppView::Dashboard;
+        self.show_admin_configuration = false;
+        self.confirm_replace_admin_baseline = false;
+        self.confirm_remove_admin_baseline = false;
         self.confirm_clear_logs = false;
         self.settings_opened_at = None;
         self.settings_section_changed_at = None;
+    }
+
+    fn open_admin_configuration(&mut self) {
+        self.show_admin_configuration = true;
+        self.confirm_replace_admin_baseline = false;
+        self.confirm_remove_admin_baseline = false;
+        match AdminProfileStore::new(self.store.directory()).status() {
+            Ok(status) => self.admin_profile_status = status,
+            Err(error) => {
+                self.admin_profile_status = None;
+                self.record_admin_failure(format!(
+                    "Could not read the existing admin baseline: {error}"
+                ));
+            }
+        }
+    }
+
+    fn save_admin_baseline(&mut self) {
+        let admin_store = AdminProfileStore::new(self.store.directory());
+        match save_admin_profile(&admin_store, &self.config) {
+            Ok(status) => {
+                self.admin_profile_status = Some(status);
+                self.confirm_replace_admin_baseline = false;
+                self.log.write(
+                    "info",
+                    "configuration",
+                    "ADMIN_BASELINE_SAVED",
+                    "Admin baseline saved",
+                );
+            }
+            Err(error) => {
+                self.record_admin_failure(format!("Could not save the admin baseline: {error}"));
+            }
+        }
+    }
+
+    fn set_admin_auto_restore(&mut self, enabled: bool) {
+        let admin_store = AdminProfileStore::new(self.store.directory());
+        match set_admin_auto_restore(&admin_store, enabled) {
+            Ok(status) => {
+                self.admin_profile_status = Some(status);
+                self.log.write(
+                    "info",
+                    "configuration",
+                    "ADMIN_AUTO_RESTORE_CHANGED",
+                    if enabled {
+                        "Admin auto-restore enabled"
+                    } else {
+                        "Admin auto-restore disabled"
+                    },
+                );
+            }
+            Err(error) => {
+                self.record_admin_failure(format!("Could not update auto-restore: {error}"));
+            }
+        }
+    }
+
+    fn remove_admin_baseline(&mut self) {
+        let admin_store = AdminProfileStore::new(self.store.directory());
+        match admin_store.remove() {
+            Ok(_) => {
+                self.admin_profile_status = None;
+                self.confirm_remove_admin_baseline = false;
+                self.confirm_replace_admin_baseline = false;
+                self.log.write(
+                    "info",
+                    "configuration",
+                    "ADMIN_BASELINE_REMOVED",
+                    "Admin baseline removed",
+                );
+            }
+            Err(error) => {
+                self.record_admin_failure(format!("Could not remove the admin baseline: {error}"));
+            }
+        }
+    }
+
+    fn record_admin_failure(&mut self, message: String) {
+        self.log.write(
+            "warning",
+            "configuration",
+            "ADMIN_CONFIGURATION_FAILED",
+            &message,
+        );
+        self.load_warnings.push(message);
     }
 
     fn import_reference_dialog(&mut self) {
@@ -1053,6 +1186,7 @@ impl SwitcherApp {
                 content_rect
             })
             .inner;
+        self.admin_configuration_window(&context);
         self.exit_confirmation(&context);
         content_rect
     }
@@ -1380,6 +1514,7 @@ impl SwitcherApp {
 
     fn settings_view(&mut self, context: &egui::Context, ui: &mut egui::Ui) {
         if !self.show_exit_confirmation
+            && !self.show_admin_configuration
             && context.input(|input| input.key_pressed(egui::Key::Escape))
         {
             self.close_settings();
@@ -1445,14 +1580,17 @@ impl SwitcherApp {
                         egui::vec2(ui.available_width(), 96.0),
                         egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                         |ui| {
-                            let (rect, _) =
-                                ui.allocate_exact_size(egui::vec2(96.0, 96.0), Sense::hover());
+                            let (rect, response) =
+                                ui.allocate_exact_size(egui::vec2(96.0, 96.0), Sense::click());
                             ui.painter().image(
                                 app_icon_texture,
                                 rect,
                                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                                 Color32::WHITE,
                             );
+                            if admin_logo_activated(&response) {
+                                self.open_admin_configuration();
+                            }
                             rect
                         },
                     )
@@ -2312,6 +2450,156 @@ impl SwitcherApp {
         .inner
     }
 
+    fn admin_configuration_window(&mut self, context: &egui::Context) {
+        if !self.show_admin_configuration {
+            return;
+        }
+        let mut open = true;
+        let status = self.admin_profile_status;
+        egui::Window::new("Admin configuration")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .open(&mut open)
+            .show(context, |ui| {
+                if self.confirm_replace_admin_baseline || self.confirm_remove_admin_baseline {
+                    ui.disable();
+                }
+                ui.set_width(440.0);
+
+                match status {
+                    None => {
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), 36.0],
+                                egui::Button::new("Save current setup as admin baseline"),
+                            )
+                            .clicked()
+                        {
+                            self.save_admin_baseline();
+                        }
+                    }
+                    Some(status) => {
+                        let gap = ui.spacing().item_spacing.x;
+                        let button_width = ((ui.available_width() - gap) / 2.0).max(1.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_sized(
+                                    [button_width, 36.0],
+                                    egui::Button::new("Replace admin baseline…"),
+                                )
+                                .clicked()
+                            {
+                                self.confirm_replace_admin_baseline = true;
+                                self.confirm_remove_admin_baseline = false;
+                            }
+                            if ui
+                                .add_sized(
+                                    [button_width, 36.0],
+                                    egui::Button::new(
+                                        RichText::new("Remove admin baseline…")
+                                            .color(Color32::from_rgb(244, 143, 143)),
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                self.confirm_remove_admin_baseline = true;
+                                self.confirm_replace_admin_baseline = false;
+                            }
+                        });
+
+                        ui.add_space(8.0);
+                        let mut auto_restore = status.auto_restore_on_launch;
+                        settings_toggle_row(
+                            ui,
+                            &mut auto_restore,
+                            "Auto-restore on launch",
+                            "Replace session changes with the admin baseline whenever StageSwap starts.",
+                        );
+                        if auto_restore != status.auto_restore_on_launch {
+                            self.set_admin_auto_restore(auto_restore);
+                        }
+                    }
+                }
+
+            });
+        self.show_admin_configuration = open;
+        if open {
+            self.admin_confirmation_dialogs(context);
+        } else {
+            self.confirm_replace_admin_baseline = false;
+            self.confirm_remove_admin_baseline = false;
+        }
+    }
+
+    fn admin_confirmation_dialogs(&mut self, context: &egui::Context) {
+        if self.confirm_replace_admin_baseline {
+            egui::Window::new("Replace admin baseline?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(context, |ui| {
+                    ui.set_width(360.0);
+                    ui.label(
+                        "Replace the saved baseline with the setup currently shown in Settings?",
+                    );
+                    ui.add_space(8.0);
+                    let gap = ui.spacing().item_spacing.x;
+                    let button_width = ((ui.available_width() - gap) / 2.0).max(1.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_sized([button_width, 34.0], egui::Button::new("Cancel"))
+                            .clicked()
+                        {
+                            self.confirm_replace_admin_baseline = false;
+                        }
+                        if ui
+                            .add_sized([button_width, 34.0], egui::Button::new("Replace baseline"))
+                            .clicked()
+                        {
+                            self.save_admin_baseline();
+                        }
+                    });
+                });
+        }
+
+        if self.confirm_remove_admin_baseline {
+            egui::Window::new("Remove admin baseline?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(context, |ui| {
+                    ui.set_width(360.0);
+                    ui.label(
+                        "Remove the saved baseline and turn off automatic restoration on launch?",
+                    );
+                    ui.add_space(8.0);
+                    let gap = ui.spacing().item_spacing.x;
+                    let button_width = ((ui.available_width() - gap) / 2.0).max(1.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_sized([button_width, 34.0], egui::Button::new("Cancel"))
+                            .clicked()
+                        {
+                            self.confirm_remove_admin_baseline = false;
+                        }
+                        if ui
+                            .add_sized(
+                                [button_width, 34.0],
+                                egui::Button::new(
+                                    RichText::new("Remove baseline")
+                                        .color(Color32::from_rgb(244, 133, 133)),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.remove_admin_baseline();
+                        }
+                    });
+                });
+        }
+    }
+
     fn exit_confirmation(&mut self, context: &egui::Context) {
         if !self.show_exit_confirmation {
             return;
@@ -2646,6 +2934,42 @@ fn save_config(store: &ConfigStore, config: &AppConfig) -> std::io::Result<()> {
 #[cfg(not(windows))]
 fn save_config(store: &ConfigStore, config: &AppConfig) -> std::io::Result<()> {
     store.save(config)
+}
+
+#[cfg(windows)]
+fn save_admin_profile(
+    store: &AdminProfileStore,
+    config: &AppConfig,
+) -> std::io::Result<AdminProfileStatus> {
+    store.save_with_replace(config, stageswap_windows::replace_file_atomic)
+}
+
+#[cfg(not(windows))]
+fn save_admin_profile(
+    store: &AdminProfileStore,
+    config: &AppConfig,
+) -> std::io::Result<AdminProfileStatus> {
+    store.save(config)
+}
+
+#[cfg(windows)]
+fn set_admin_auto_restore(
+    store: &AdminProfileStore,
+    enabled: bool,
+) -> std::io::Result<AdminProfileStatus> {
+    store.set_auto_restore_with_replace(enabled, stageswap_windows::replace_file_atomic)
+}
+
+#[cfg(not(windows))]
+fn set_admin_auto_restore(
+    store: &AdminProfileStore,
+    enabled: bool,
+) -> std::io::Result<AdminProfileStatus> {
+    store.set_auto_restore_on_launch(enabled)
+}
+
+fn admin_logo_activated(response: &egui::Response) -> bool {
+    response.double_clicked_by(egui::PointerButton::Secondary)
 }
 
 fn animation_progress(started_at: Option<Instant>, duration: Duration) -> f32 {
@@ -5259,6 +5583,137 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("Could not save settings"))
         );
+    }
+
+    #[test]
+    fn admin_baseline_captures_pending_settings_and_toggle_is_independent() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store.clone());
+        assert_eq!(app.admin_profile_status, None);
+
+        app.config.selected_video_device_id = "pending-admin-camera".into();
+        app.settings_save_state = SettingsSaveState::Pending(Instant::now());
+        app.save_admin_baseline();
+        assert_eq!(
+            app.admin_profile_status,
+            Some(AdminProfileStatus {
+                auto_restore_on_launch: false,
+                reference_included: false,
+            })
+        );
+
+        app.set_admin_auto_restore(true);
+        assert!(app.admin_profile_status.unwrap().auto_restore_on_launch);
+        save_config(
+            &store,
+            &AppConfig {
+                selected_video_device_id: "temporary-user-camera".into(),
+                reference_image_path: store.reference_path().display().to_string(),
+                ..AppConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            restore_admin_profile(&AdminProfileStore::new(directory.path())).unwrap(),
+            AdminRestoreOutcome::Restored
+        );
+        assert_eq!(
+            store.load().config.selected_video_device_id,
+            "pending-admin-camera"
+        );
+
+        app.set_admin_auto_restore(false);
+        app.config.selected_video_device_id = "replacement-admin-camera".into();
+        app.save_admin_baseline();
+        assert!(!app.admin_profile_status.unwrap().auto_restore_on_launch);
+        app.remove_admin_baseline();
+        assert_eq!(app.admin_profile_status, None);
+        assert_eq!(
+            AdminProfileStore::new(directory.path()).status().unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn startup_admin_restore_failures_preserve_the_working_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        let user = AppConfig {
+            selected_video_device_id: "user-camera".into(),
+            ..AppConfig::default()
+        };
+        save_config(&store, &user).unwrap();
+        std::fs::write(
+            AdminProfileStore::new(directory.path()).profile_path(),
+            "invalid admin profile",
+        )
+        .unwrap();
+
+        let loaded = load_config_with_admin_restore(&store);
+        assert_eq!(loaded.config, user);
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Could not restore the admin configuration"))
+        );
+    }
+
+    #[test]
+    fn only_a_secondary_double_click_activates_the_admin_logo() {
+        fn click_input(time: f64, button: egui::PointerButton) -> egui::RawInput {
+            let position = Pos2::new(20.0, 20.0);
+            egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(140.0, 140.0))),
+                events: vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..egui::RawInput::default()
+            }
+        }
+
+        fn render_logo(context: &egui::Context, input: egui::RawInput) -> bool {
+            let mut activated = false;
+            let _ = context.run_ui(input, |ui| {
+                let (_, response) = ui.allocate_exact_size(egui::vec2(96.0, 96.0), Sense::click());
+                activated = admin_logo_activated(&response);
+            });
+            activated
+        }
+
+        let secondary = egui::Context::default();
+        assert!(!render_logo(
+            &secondary,
+            click_input(0.0, egui::PointerButton::Secondary)
+        ));
+        assert!(render_logo(
+            &secondary,
+            click_input(0.1, egui::PointerButton::Secondary)
+        ));
+
+        let primary = egui::Context::default();
+        assert!(!render_logo(
+            &primary,
+            click_input(0.0, egui::PointerButton::Primary)
+        ));
+        assert!(!render_logo(
+            &primary,
+            click_input(0.1, egui::PointerButton::Primary)
+        ));
     }
 
     #[test]

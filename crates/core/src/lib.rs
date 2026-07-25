@@ -12,7 +12,9 @@ pub mod runtime;
 pub mod transition;
 pub mod types;
 
-pub use config::{AppConfig, ConfigLoad, ConfigStore};
+pub use config::{
+    AdminProfileStatus, AdminProfileStore, AdminRestoreOutcome, AppConfig, ConfigLoad, ConfigStore,
+};
 pub use decision::{Decision, decide};
 pub use detector::{DebouncedDetector, DetectorSettings};
 pub use frame::{

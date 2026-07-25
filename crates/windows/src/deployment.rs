@@ -105,19 +105,24 @@ pub(crate) fn validate_release(payload: &[u8]) -> Result<(), String> {
 }
 
 pub fn save_config_atomic(store: &ConfigStore, config: &AppConfig) -> std::io::Result<()> {
-    store.save_with_replace(config, |source, destination| {
-        let source: Vec<u16> = source.as_os_str().encode_wide().chain([0]).collect();
-        let destination: Vec<u16> = destination.as_os_str().encode_wide().chain([0]).collect();
-        // SAFETY: both paths are terminated and remain live for the call.
-        unsafe {
-            MoveFileExW(
-                PCWSTR(source.as_ptr()),
-                PCWSTR(destination.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        }
-        .map_err(std::io::Error::other)
-    })
+    store.save_with_replace(config, replace_file_atomic)
+}
+
+pub fn replace_file_atomic(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain([0]).collect();
+    let destination: Vec<u16> = destination.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: both paths are terminated and remain live for the call.
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(std::io::Error::other)
 }
 
 /// Handles internal elevated deployment commands and ensures that the release

@@ -9,6 +9,7 @@
 | Two-scan monitor selection | `MonitorTracker`, runtime 30-second scanner | monitor test and multi-monitor acceptance |
 | Fallbacks and reversible fade | `decide`, `TransitionController`, `Frame::blend` | decision and reversal tests |
 | Isolated schema 1, backup, atomic Windows save | `ConfigStore`, `save_config_atomic` | round-trip/corruption tests |
+| Hidden admin baseline and optional launch restore | `AdminProfileStore`, Settings admin window | profile, rollback, startup, toggle, and gesture tests |
 | Strict 40-byte bounded IPC and two-second expiry | `FrameHeader`, `SharedFrameCache`, `FramePublisher` | IPC tests |
 | Rust COM source and required interfaces | `stageswap-media-source::com_server` | Windows COM/source-state tests |
 | RGB32 1280×720@30 only | `MediaStream` media type | MF probe, Windows Camera, Zoom |
