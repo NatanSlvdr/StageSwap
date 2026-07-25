@@ -5,6 +5,8 @@ use eframe::egui::{
     TextureOptions, Vec2,
 };
 use stageswap_app::RuntimeHandle;
+#[cfg(not(windows))]
+use stageswap_core::ConfigLoad;
 use stageswap_core::{
     AppConfig, AppSnapshot, Command, ConfigStore, DetectionState, DeviceState, Frame, OutputMode,
     RestartTarget, RunState, Source,
@@ -50,6 +52,15 @@ use local_log::LocalLog;
 
 fn main() -> eframe::Result {
     let _embedded_payload = deployment_payload::bytes();
+    #[cfg(not(windows))]
+    let ui_preview_request = match parse_ui_preview_request(&std::env::args().collect::<Vec<_>>()) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("StageSwap UI preview: {error}");
+            eprintln!("Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics]");
+            return Ok(());
+        }
+    };
     #[cfg(windows)]
     let launch_context = match stageswap_windows::portable_bootstrap(_embedded_payload) {
         Ok(stageswap_windows::BootstrapResult::Continue(context)) => context,
@@ -114,8 +125,25 @@ fn main() -> eframe::Result {
     };
     #[cfg(windows)]
     let instance_readiness = _instance_control.readiness();
+    #[cfg(windows)]
     let store = ConfigStore::new(local_data_directory());
+    #[cfg(not(windows))]
+    let store = ConfigStore::new(if ui_preview_request.is_some() {
+        std::env::temp_dir().join(format!("StageSwap-ui-preview-{}", std::process::id()))
+    } else {
+        local_data_directory()
+    });
+    #[cfg(windows)]
     let loaded = store.load();
+    #[cfg(not(windows))]
+    let loaded = if ui_preview_request.is_some() {
+        ConfigLoad {
+            config: ui_preview_config(),
+            ..ConfigLoad::default()
+        }
+    } else {
+        store.load()
+    };
     #[cfg(windows)]
     let mut loaded = loaded;
     #[cfg(windows)]
@@ -128,7 +156,7 @@ fn main() -> eframe::Result {
     #[cfg(windows)]
     let start_visible = launch_context.force_visible || !loaded.config.start_minimized;
     #[cfg(not(windows))]
-    let start_visible = !loaded.config.start_minimized;
+    let start_visible = ui_preview_request.is_some() || !loaded.config.start_minimized;
     let app_icon = app_icon::load(None).expect("embedded app icon should decode");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -162,6 +190,12 @@ fn main() -> eframe::Result {
                 style.spacing.button_padding = egui::vec2(14.0, 8.0);
             });
             let app = SwitcherApp::new(loaded.config, loaded.warnings, store);
+            #[cfg(not(windows))]
+            let app = if let Some(request) = ui_preview_request {
+                app.with_ui_preview(request)
+            } else {
+                app
+            };
             #[cfg(windows)]
             let app =
                 app.with_launch_context(launch_context.mode, instance_receiver, instance_readiness);
@@ -263,6 +297,55 @@ impl SettingsTab {
             }
         }
     }
+}
+
+#[cfg(not(windows))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UiPreviewRequest {
+    tab: SettingsTab,
+}
+
+#[cfg(not(windows))]
+impl SettingsTab {
+    #[cfg(test)]
+    const fn preview_name(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Webcam => "webcam",
+            Self::Screen => "screen",
+            Self::Matching => "matching",
+            Self::Diagnostics => "diagnostics",
+        }
+    }
+
+    fn from_preview_name(value: &str) -> Option<Self> {
+        match value {
+            "general" => Some(Self::General),
+            "webcam" => Some(Self::Webcam),
+            "screen" => Some(Self::Screen),
+            "matching" => Some(Self::Matching),
+            "diagnostics" => Some(Self::Diagnostics),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>, String> {
+    let Some(preview_index) = args.iter().position(|argument| argument == "--ui-preview") else {
+        return Ok(None);
+    };
+    let tab = match args.get(preview_index + 1) {
+        Some(value) if !value.starts_with("--") => {
+            SettingsTab::from_preview_name(value).ok_or_else(|| {
+                format!(
+                    "unknown Settings page '{value}'; expected general, webcam, screen, matching, or diagnostics"
+                )
+            })?
+        }
+        _ => SettingsTab::General,
+    };
+    Ok(Some(UiPreviewRequest { tab }))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -463,6 +546,118 @@ impl PreviewKind {
     }
 }
 
+#[cfg(not(windows))]
+fn ui_preview_config() -> AppConfig {
+    AppConfig {
+        selected_video_device_id: "preview-camera".into(),
+        selected_monitor_label: "Stage display".into(),
+        start_with_windows: true,
+        start_minimized: true,
+        start_automatically: true,
+        output_mode: OutputMode::Automatic,
+        ..AppConfig::default()
+    }
+}
+
+#[cfg(not(windows))]
+fn ui_preview_snapshot() -> AppSnapshot {
+    let webcam = ui_preview_frame(1, [46, 30, 18], [139, 83, 37]);
+    let screen = ui_preview_frame(2, [39, 23, 15], [216, 118, 63]);
+    AppSnapshot {
+        run_state: RunState::Running,
+        mode: OutputMode::Automatic,
+        detection: DetectionState::Matching,
+        automatic_target: Source::Camera,
+        actual_output: Source::Camera,
+        availability: stageswap_core::SourceAvailability {
+            camera_ready: true,
+            screen_ready: true,
+        },
+        webcam_state: DeviceState::Ready,
+        screen_state: DeviceState::Ready,
+        virtual_camera_state: DeviceState::Ready,
+        webcam_fps: Some(30),
+        screen_fps: Some(30),
+        output_fps: Some(30),
+        recent_activity: vec![
+            "Reference display confirmed".into(),
+            "Automatic output selected Camera".into(),
+        ]
+        .into(),
+        previews: stageswap_core::PreviewFrames {
+            final_output: Some(Arc::clone(&webcam)),
+            webcam: Some(webcam),
+            screen: Some(Arc::clone(&screen)),
+            reference: Some(screen),
+        },
+        video_devices: vec![
+            stageswap_core::VideoDeviceChoice {
+                id: "preview-camera".into(),
+                name: "Studio Camera".into(),
+            },
+            stageswap_core::VideoDeviceChoice {
+                id: "preview-camera-secondary".into(),
+                name: "Wide Camera".into(),
+            },
+        ]
+        .into(),
+        selected_video_device_id: "preview-camera".into(),
+        monitors: vec![
+            stageswap_core::MonitorDescriptor {
+                display_name: "preview-display-1".into(),
+                label: "Control display".into(),
+                width: 1920,
+                height: 1080,
+                ..stageswap_core::MonitorDescriptor::default()
+            },
+            stageswap_core::MonitorDescriptor {
+                display_name: "preview-display-2".into(),
+                label: "Stage display".into(),
+                x: 1920,
+                width: 1920,
+                height: 1080,
+                ..stageswap_core::MonitorDescriptor::default()
+            },
+        ]
+        .into(),
+        selected_monitor: Some(stageswap_core::MonitorDescriptor {
+            display_name: "preview-display-2".into(),
+            label: "Stage display".into(),
+            x: 1920,
+            width: 1920,
+            height: 1080,
+            ..stageswap_core::MonitorDescriptor::default()
+        }),
+        ..AppSnapshot::default()
+    }
+}
+
+#[cfg(not(windows))]
+fn ui_preview_frame(sequence: u64, background: [u8; 3], accent: [u8; 3]) -> Arc<Frame> {
+    let size = stageswap_core::Size::new(640, 360);
+    let mut pixels = vec![0; size.width as usize * size.height as usize * 4];
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[background[2], background[1], background[0], 255]);
+    }
+    for y in 64..296 {
+        for x in 72..568 {
+            let offset = (y * size.width as usize + x) * 4;
+            pixels[offset..offset + 4].copy_from_slice(&[accent[2], accent[1], accent[0], 255]);
+        }
+    }
+    Arc::new(
+        Frame::new(
+            pixels.into(),
+            size,
+            size.width * 4,
+            sequence,
+            0,
+            Instant::now(),
+        )
+        .expect("UI preview frame is valid"),
+    )
+}
+
 #[derive(Clone, Copy)]
 struct PreviewOptions {
     show_fps: bool,
@@ -597,6 +792,11 @@ const SETTINGS_RECOVERY_TARGETS: [(UiIcon, &str, f32, RestartTarget); 4] = [
     (UiIcon::Layers, "Restart all", 126.0, RestartTarget::All),
 ];
 
+#[cfg(not(windows))]
+struct UiPreviewSession {
+    snapshot: AppSnapshot,
+}
+
 struct SwitcherApp {
     config: AppConfig,
     runtime: RuntimeHandle,
@@ -624,6 +824,8 @@ struct SwitcherApp {
     instance_commands: Option<std::sync::mpsc::Receiver<stageswap_windows::InstanceCommand>>,
     #[cfg(windows)]
     instance_readiness: Option<stageswap_windows::InstanceReadiness>,
+    #[cfg(not(windows))]
+    ui_preview: Option<UiPreviewSession>,
     exit_requested: bool,
     show_exit_confirmation: bool,
     last_window_size: Option<Vec2>,
@@ -665,6 +867,8 @@ impl SwitcherApp {
             instance_commands: None,
             #[cfg(windows)]
             instance_readiness: None,
+            #[cfg(not(windows))]
+            ui_preview: None,
             exit_requested: false,
             show_exit_confirmation: false,
             last_window_size: None,
@@ -682,6 +886,26 @@ impl SwitcherApp {
         self.instance_commands = Some(instance_commands);
         self.instance_readiness = Some(instance_readiness);
         self
+    }
+
+    #[cfg(not(windows))]
+    fn with_ui_preview(mut self, request: UiPreviewRequest) -> Self {
+        self.view = AppView::Settings;
+        self.settings_tab = request.tab;
+        self.settings_opened_at = None;
+        self.settings_section_changed_at = None;
+        self.ui_preview = Some(UiPreviewSession {
+            snapshot: ui_preview_snapshot(),
+        });
+        self
+    }
+
+    fn snapshot(&self) -> AppSnapshot {
+        #[cfg(not(windows))]
+        if let Some(preview) = &self.ui_preview {
+            return preview.snapshot.clone();
+        }
+        self.runtime.snapshot()
     }
 
     fn send(&self, command: Command) {
@@ -834,7 +1058,7 @@ impl SwitcherApp {
     }
 
     fn dashboard(&mut self, ui: &mut egui::Ui) {
-        let snapshot = self.runtime.snapshot();
+        let snapshot = self.snapshot();
         for warning in self
             .load_warnings
             .iter()
@@ -1522,7 +1746,7 @@ impl SwitcherApp {
     }
 
     fn webcam_settings(&mut self, ui: &mut egui::Ui) {
-        let snapshot = self.runtime.snapshot();
+        let snapshot = self.snapshot();
         let selected_name = snapshot
             .video_devices
             .iter()
@@ -1612,7 +1836,7 @@ impl SwitcherApp {
     }
 
     fn screen_settings(&mut self, ui: &mut egui::Ui) {
-        let snapshot = self.runtime.snapshot();
+        let snapshot = self.snapshot();
         let selected_monitor = snapshot
             .selected_monitor
             .as_ref()
@@ -1695,7 +1919,7 @@ impl SwitcherApp {
     }
 
     fn matching_settings(&mut self, ui: &mut egui::Ui) {
-        let snapshot = self.runtime.snapshot();
+        let snapshot = self.snapshot();
         self.settings_preview_control_row(
             ui,
             SettingsSection {
@@ -1802,7 +2026,7 @@ impl SwitcherApp {
     }
 
     fn diagnostics_settings(&mut self, ui: &mut egui::Ui) {
-        let snapshot = self.runtime.snapshot();
+        let snapshot = self.snapshot();
         settings_section_heading(
             ui,
             UiIcon::Check,
@@ -2266,7 +2490,7 @@ impl eframe::App for SwitcherApp {
                 }
             }
         }
-        let snapshot = self.runtime.snapshot();
+        let snapshot = self.snapshot();
         if self
             .awaiting_video_device_id
             .as_ref()
@@ -2406,6 +2630,10 @@ fn repaint_interval(ui_rendered: bool) -> Duration {
 
 impl Drop for SwitcherApp {
     fn drop(&mut self) {
+        #[cfg(not(windows))]
+        if self.ui_preview.is_some() {
+            return;
+        }
         let _ = save_config(&self.store, &self.config);
     }
 }
@@ -4480,6 +4708,60 @@ mod tests {
         assert_eq!(SETTINGS_NAV_HOVERED, Color32::from_rgb(32, 35, 41));
         assert_eq!(SETTINGS_NAV_SELECTED, Color32::from_rgb(45, 48, 55));
         assert_eq!(SETTINGS_NAV_INDICATOR, Color32::from_rgb(151, 157, 168));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn ui_preview_cli_selects_each_settings_page() {
+        for tab in SettingsTab::ALL {
+            let args = vec![
+                "StageSwap".to_owned(),
+                "--ui-preview".to_owned(),
+                tab.preview_name().to_owned(),
+            ];
+            assert_eq!(
+                parse_ui_preview_request(&args).unwrap(),
+                Some(UiPreviewRequest { tab })
+            );
+        }
+        let default_page = vec!["StageSwap".to_owned(), "--ui-preview".to_owned()];
+        assert_eq!(
+            parse_ui_preview_request(&default_page).unwrap(),
+            Some(UiPreviewRequest {
+                tab: SettingsTab::General,
+            })
+        );
+        assert!(
+            parse_ui_preview_request(&["StageSwap".to_owned()])
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            parse_ui_preview_request(&[
+                "StageSwap".to_owned(),
+                "--ui-preview".to_owned(),
+                "unknown".to_owned(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn ui_preview_snapshot_has_realistic_ready_inputs_and_frames() {
+        let snapshot = ui_preview_snapshot();
+        assert_eq!(snapshot.run_state, RunState::Running);
+        assert_eq!(snapshot.mode, OutputMode::Automatic);
+        assert_eq!(snapshot.detection, DetectionState::Matching);
+        assert_eq!(snapshot.webcam_state, DeviceState::Ready);
+        assert_eq!(snapshot.screen_state, DeviceState::Ready);
+        assert_eq!(snapshot.virtual_camera_state, DeviceState::Ready);
+        assert!(snapshot.previews.webcam.is_some());
+        assert!(snapshot.previews.screen.is_some());
+        assert!(snapshot.previews.reference.is_some());
+        assert!(snapshot.previews.final_output.is_some());
+        assert_eq!(snapshot.video_devices.len(), 2);
+        assert_eq!(snapshot.monitors.len(), 2);
     }
 
     #[test]

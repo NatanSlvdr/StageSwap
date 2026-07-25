@@ -54,6 +54,24 @@ cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D war
 
 These checks provide strong day-to-day coverage, but GitHub-hosted runners and macOS cannot validate an interactive Windows desktop, a physical webcam, or virtual-camera enumeration. Native Windows acceptance testing remains required.
 
+## Interactive UI preview on macOS
+
+Launch the real StageSwap Settings interface with deterministic mock cameras, displays, reference imagery, and healthy runtime states:
+
+```bash
+cargo run -p stageswap --bin StageSwap -- --ui-preview
+```
+
+General opens by default. To open a particular page:
+
+```bash
+cargo run -p stageswap --bin StageSwap -- --ui-preview matching
+```
+
+Available page names are `general`, `webcam`, `screen`, `matching`, and `diagnostics`. You can still navigate between every page after launch.
+
+Preview mode uses a temporary configuration directory and does not save changes to the normal StageSwap configuration. It is intended for checking layout, wrapping, conditional explanations, and interactions. Windows tray behavior, native file dialogs, hardware capture, and exact Windows font rendering still require native Windows acceptance testing.
+
 ## Fast x64 packaging from macOS
 
 An Apple-silicon Mac can cross-compile the x64 Windows build but cannot run or hardware-test it. Install the native tools once:
