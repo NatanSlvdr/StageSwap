@@ -1,3 +1,4 @@
+use crate::dialog::{TaskDialogIcon, TaskDialogSpec, show_task_dialog};
 use crate::{
     InstanceCommand, InstanceStatus, SingleInstance, configure_startup, instance_status,
     send_instance_command,
@@ -9,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     GetFileVersionInfoSizeW, GetFileVersionInfoW, MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW,
     VS_FIXEDFILEINFO, VerQueryValueW,
@@ -19,10 +20,7 @@ use windows::Win32::System::Com::{
     CoUninitialize, IPersistFile,
 };
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::Controls::{
-    TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
-    TDF_USE_COMMAND_LINKS, TaskDialogIndirect,
-};
+use windows::Win32::UI::Controls::TDCBF_CANCEL_BUTTON;
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Programs, IShellLinkW, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
     ShellLink,
@@ -42,7 +40,6 @@ const INSTALL_BUTTON: i32 = 100;
 const RUN_ONCE_BUTTON: i32 = 101;
 const UPDATE_BUTTON: i32 = 102;
 const OPEN_INSTALLED_BUTTON: i32 = 103;
-const CANCEL_BUTTON: i32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PortableMode {
@@ -536,35 +533,15 @@ fn task_dialog(
     choices: &[(i32, &str)],
     default: i32,
 ) -> Result<i32, String> {
-    let title = wide("StageSwap");
-    let instruction = wide(instruction);
-    let content = wide(content);
-    let labels: Vec<Vec<u16>> = choices.iter().map(|(_, label)| wide(label)).collect();
-    let buttons: Vec<TASKDIALOG_BUTTON> = choices
-        .iter()
-        .zip(&labels)
-        .map(|((id, _), label)| TASKDIALOG_BUTTON {
-            nButtonID: *id,
-            pszButtonText: PCWSTR(label.as_ptr()),
-        })
-        .collect();
-    let config = TASKDIALOGCONFIG {
-        cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
-        hwndParent: HWND::default(),
-        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_COMMAND_LINKS,
-        dwCommonButtons: TDCBF_CANCEL_BUTTON,
-        pszWindowTitle: PCWSTR(title.as_ptr()),
-        pszMainInstruction: PCWSTR(instruction.as_ptr()),
-        pszContent: PCWSTR(content.as_ptr()),
-        cButtons: buttons.len() as u32,
-        pButtons: buttons.as_ptr(),
-        nDefaultButton: default,
-        ..TASKDIALOGCONFIG::default()
-    };
-    let mut selected = CANCEL_BUTTON;
-    unsafe { TaskDialogIndirect(&config, Some(&mut selected), None, None) }
-        .map_err(|error| format!("could not show install choice: {error}"))?;
-    Ok(selected)
+    show_task_dialog(TaskDialogSpec {
+        instruction,
+        content,
+        icon: TaskDialogIcon::Information,
+        choices,
+        default_button: default,
+        common_buttons: TDCBF_CANCEL_BUTTON,
+        command_links: true,
+    })
 }
 
 fn create_shortcuts(executable: &Path) -> Result<(), String> {

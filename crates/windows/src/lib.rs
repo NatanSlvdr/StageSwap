@@ -29,6 +29,8 @@ mod notification;
 #[cfg(windows)]
 pub use notification::{notify_warning, show_error_dialog};
 #[cfg(windows)]
+mod dialog;
+#[cfg(windows)]
 mod shell_ui;
 #[cfg(windows)]
 pub use shell_ui::{open_directory, pick_log_export_path, pick_reference_image};

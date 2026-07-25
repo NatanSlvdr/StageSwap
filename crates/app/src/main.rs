@@ -32,6 +32,7 @@ const MAX_PREVIEW_TEXTURE_HEIGHT: u32 = 270;
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const SETTINGS_ENTRANCE_DURATION: Duration = Duration::from_millis(160);
 const SETTINGS_SECTION_DURATION: Duration = Duration::from_millis(120);
+const DIALOG_ENTRANCE_DURATION: Duration = Duration::from_millis(150);
 const SETTINGS_SIDEBAR_WIDTH: f32 = 196.0;
 const SETTINGS_CONTENT_WIDTH: f32 = 960.0;
 const SETTINGS_PREVIEW_WIDTH: f32 = 480.0;
@@ -56,7 +57,9 @@ fn main() -> eframe::Result {
         Ok(request) => request,
         Err(error) => {
             eprintln!("StageSwap UI preview: {error}");
-            eprintln!("Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics]");
+            eprintln!(
+                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|dialog-*]"
+            );
             return Ok(());
         }
     };
@@ -65,9 +68,7 @@ fn main() -> eframe::Result {
         Ok(stageswap_windows::BootstrapResult::Continue(context)) => context,
         Ok(stageswap_windows::BootstrapResult::Exit) => return Ok(()),
         Err(error) => {
-            stageswap_windows::show_error_dialog(&format!(
-                "StageSwap installation failed:\n\n{error}"
-            ));
+            stageswap_windows::show_error_dialog("StageSwap installation failed", &error);
             return Ok(());
         }
     };
@@ -93,14 +94,17 @@ fn main() -> eframe::Result {
                     stageswap_windows::InstanceCommand::Show,
                 )
             {
-                stageswap_windows::show_error_dialog(&format!(
-                    "StageSwap is already running, but its window could not be opened. Exit the legacy tray instance and try again.\n\n{error}"
-                ));
+                stageswap_windows::show_error_dialog(
+                    "StageSwap is already running",
+                    &format!(
+                        "Its window could not be opened. Exit the legacy tray instance and try again.\n\n{error}"
+                    ),
+                );
             }
             return Ok(());
         }
         Err(error) => {
-            stageswap_windows::show_error_dialog(&error);
+            stageswap_windows::show_error_dialog("StageSwap could not start", &error);
             return Ok(());
         }
     };
@@ -118,7 +122,10 @@ fn main() -> eframe::Result {
     let _instance_control = match stageswap_windows::InstanceControl::start(instance_sender) {
         Ok(control) => control,
         Err(error) => {
-            stageswap_windows::show_error_dialog(&error);
+            stageswap_windows::show_error_dialog(
+                "StageSwap could not start its local control service",
+                &error,
+            );
             return Ok(());
         }
     };
@@ -214,7 +221,7 @@ fn main() -> eframe::Result {
 
 #[cfg(windows)]
 fn deployment_failure(error: &str) -> ! {
-    stageswap_windows::show_error_dialog(&format!("StageSwap deployment failed:\n\n{error}"));
+    stageswap_windows::show_error_dialog("StageSwap deployment failed", error);
     eprintln!("StageSwap deployment failed: {error}");
     std::process::exit(1);
 }
@@ -325,7 +332,14 @@ impl SettingsTab {
 #[cfg(not(windows))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct UiPreviewRequest {
-    tab: SettingsTab,
+    target: UiPreviewTarget,
+}
+
+#[cfg(not(windows))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UiPreviewTarget {
+    Settings(SettingsTab),
+    Dialog(AppDialogKind),
 }
 
 #[cfg(not(windows))]
@@ -358,17 +372,26 @@ fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>,
     let Some(preview_index) = args.iter().position(|argument| argument == "--ui-preview") else {
         return Ok(None);
     };
-    let tab = match args.get(preview_index + 1) {
-        Some(value) if !value.starts_with("--") => {
-            SettingsTab::from_preview_name(value).ok_or_else(|| {
-                format!(
-                    "unknown Settings page '{value}'; expected general, webcam, screen, matching, or diagnostics"
-                )
-            })?
+    let target = match args.get(preview_index + 1).map(String::as_str) {
+        Some("dialog-exit") => UiPreviewTarget::Dialog(AppDialogKind::Exit),
+        Some("dialog-clear-logs") => UiPreviewTarget::Dialog(AppDialogKind::ClearLogs),
+        Some("dialog-admin") => UiPreviewTarget::Dialog(AppDialogKind::Admin),
+        Some("dialog-replace-baseline") => {
+            UiPreviewTarget::Dialog(AppDialogKind::ReplaceAdminBaseline)
         }
-        _ => SettingsTab::General,
+        Some("dialog-remove-baseline") => {
+            UiPreviewTarget::Dialog(AppDialogKind::RemoveAdminBaseline)
+        }
+        Some(value) if !value.starts_with("--") => SettingsTab::from_preview_name(value)
+            .map(UiPreviewTarget::Settings)
+            .ok_or_else(|| {
+                format!(
+                    "unknown UI preview '{value}'; expected a Settings page or dialog-* preview"
+                )
+            })?,
+        _ => UiPreviewTarget::Settings(SettingsTab::General),
     };
-    Ok(Some(UiPreviewRequest { tab }))
+    Ok(Some(UiPreviewRequest { target }))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -376,6 +399,33 @@ enum AppView {
     #[default]
     Dashboard,
     Settings,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum AppDialogKind {
+    Exit,
+    ClearLogs,
+    Admin,
+    ReplaceAdminBaseline,
+    RemoveAdminBaseline,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActiveDialog {
+    kind: AppDialogKind,
+    opened_at: Instant,
+    focus_safe_action: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DialogAction {
+    Dismiss,
+    Exit,
+    ClearLogs,
+    SaveAdminBaseline,
+    ReplaceAdminBaseline,
+    RemoveAdminBaseline,
+    SetAdminAutoRestore(bool),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -829,10 +879,7 @@ struct SwitcherApp {
     settings_tab: SettingsTab,
     settings_save_state: SettingsSaveState,
     admin_profile_status: Option<AdminProfileStatus>,
-    show_admin_configuration: bool,
-    confirm_replace_admin_baseline: bool,
-    confirm_remove_admin_baseline: bool,
-    confirm_clear_logs: bool,
+    active_dialog: Option<ActiveDialog>,
     awaiting_video_device_id: Option<String>,
     settings_opened_at: Option<Instant>,
     settings_section_changed_at: Option<Instant>,
@@ -854,7 +901,6 @@ struct SwitcherApp {
     #[cfg(not(windows))]
     ui_preview: Option<UiPreviewSession>,
     exit_requested: bool,
-    show_exit_confirmation: bool,
     last_window_size: Option<Vec2>,
 }
 
@@ -889,10 +935,7 @@ impl SwitcherApp {
             settings_tab: SettingsTab::General,
             settings_save_state: SettingsSaveState::Saved,
             admin_profile_status,
-            show_admin_configuration: false,
-            confirm_replace_admin_baseline: false,
-            confirm_remove_admin_baseline: false,
-            confirm_clear_logs: false,
+            active_dialog: None,
             awaiting_video_device_id: None,
             settings_opened_at: None,
             settings_section_changed_at: None,
@@ -914,7 +957,6 @@ impl SwitcherApp {
             #[cfg(not(windows))]
             ui_preview: None,
             exit_requested: false,
-            show_exit_confirmation: false,
             last_window_size: None,
         }
     }
@@ -935,7 +977,28 @@ impl SwitcherApp {
     #[cfg(not(windows))]
     fn with_ui_preview(mut self, request: UiPreviewRequest) -> Self {
         self.view = AppView::Settings;
-        self.settings_tab = request.tab;
+        match request.target {
+            UiPreviewTarget::Settings(tab) => self.settings_tab = tab,
+            UiPreviewTarget::Dialog(kind) => {
+                self.settings_tab = if kind == AppDialogKind::ClearLogs {
+                    SettingsTab::Diagnostics
+                } else {
+                    SettingsTab::General
+                };
+                if matches!(
+                    kind,
+                    AppDialogKind::Admin
+                        | AppDialogKind::ReplaceAdminBaseline
+                        | AppDialogKind::RemoveAdminBaseline
+                ) {
+                    self.admin_profile_status = Some(AdminProfileStatus {
+                        auto_restore_on_launch: true,
+                        reference_included: true,
+                    });
+                }
+                self.open_dialog(kind);
+            }
+        }
         self.settings_opened_at = None;
         self.settings_section_changed_at = None;
         self.ui_preview = Some(UiPreviewSession {
@@ -1021,18 +1084,30 @@ impl SwitcherApp {
     fn close_settings(&mut self) {
         self.flush_settings();
         self.view = AppView::Dashboard;
-        self.show_admin_configuration = false;
-        self.confirm_replace_admin_baseline = false;
-        self.confirm_remove_admin_baseline = false;
-        self.confirm_clear_logs = false;
+        self.active_dialog = None;
         self.settings_opened_at = None;
         self.settings_section_changed_at = None;
     }
 
+    fn open_dialog(&mut self, kind: AppDialogKind) {
+        self.active_dialog = Some(ActiveDialog {
+            kind,
+            opened_at: Instant::now(),
+            focus_safe_action: true,
+        });
+    }
+
+    fn dismiss_dialog(&mut self) {
+        self.active_dialog = None;
+    }
+
+    fn dialog_is(&self, kind: AppDialogKind) -> bool {
+        self.active_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.kind == kind)
+    }
+
     fn open_admin_configuration(&mut self) {
-        self.show_admin_configuration = true;
-        self.confirm_replace_admin_baseline = false;
-        self.confirm_remove_admin_baseline = false;
         match AdminProfileStore::new(self.store.directory()).status() {
             Ok(status) => self.admin_profile_status = status,
             Err(error) => {
@@ -1042,6 +1117,7 @@ impl SwitcherApp {
                 ));
             }
         }
+        self.open_dialog(AppDialogKind::Admin);
     }
 
     fn save_admin_baseline(&mut self) {
@@ -1049,7 +1125,7 @@ impl SwitcherApp {
         match save_admin_profile(&admin_store, &self.config) {
             Ok(status) => {
                 self.admin_profile_status = Some(status);
-                self.confirm_replace_admin_baseline = false;
+                self.open_dialog(AppDialogKind::Admin);
                 self.log.write(
                     "info",
                     "configuration",
@@ -1090,8 +1166,7 @@ impl SwitcherApp {
         match admin_store.remove() {
             Ok(_) => {
                 self.admin_profile_status = None;
-                self.confirm_remove_admin_baseline = false;
-                self.confirm_replace_admin_baseline = false;
+                self.open_dialog(AppDialogKind::Admin);
                 self.log.write(
                     "info",
                     "configuration",
@@ -1160,17 +1235,13 @@ impl SwitcherApp {
     }
 
     fn request_log_clear(&mut self) {
-        self.confirm_clear_logs = true;
-    }
-
-    fn cancel_log_clear(&mut self) {
-        self.confirm_clear_logs = false;
+        self.open_dialog(AppDialogKind::ClearLogs);
     }
 
     fn confirm_log_clear(&mut self) {
-        if self.confirm_clear_logs {
+        if self.dialog_is(AppDialogKind::ClearLogs) {
             self.clear_logs();
-            self.confirm_clear_logs = false;
+            self.dismiss_dialog();
         }
     }
 
@@ -1186,8 +1257,7 @@ impl SwitcherApp {
                 content_rect
             })
             .inner;
-        self.admin_configuration_window(&context);
-        self.exit_confirmation(&context);
+        self.dialog(&context);
         content_rect
     }
 
@@ -1513,8 +1583,7 @@ impl SwitcherApp {
     }
 
     fn settings_view(&mut self, context: &egui::Context, ui: &mut egui::Ui) {
-        if !self.show_exit_confirmation
-            && !self.show_admin_configuration
+        if self.active_dialog.is_none()
             && context.input(|input| input.key_pressed(egui::Key::Escape))
         {
             self.close_settings();
@@ -1630,7 +1699,7 @@ impl SwitcherApp {
                     primary_navigation.push(response.rect);
                     if response.clicked() && self.settings_tab != tab {
                         self.settings_tab = tab;
-                        self.confirm_clear_logs = false;
+                        self.dismiss_dialog();
                         self.settings_section_changed_at = Some(Instant::now());
                     }
                     if index + 1 < SettingsTab::PRIMARY.len() {
@@ -1646,7 +1715,7 @@ impl SwitcherApp {
                         let response = settings_nav_button(ui, tab, icon, label, self.settings_tab);
                         if response.clicked() && self.settings_tab != tab {
                             self.settings_tab = tab;
-                            self.confirm_clear_logs = false;
+                            self.dismiss_dialog();
                             self.settings_section_changed_at = Some(Instant::now());
                         }
                         (response.rect, save_status)
@@ -2264,28 +2333,14 @@ impl SwitcherApp {
             "Logs are retained for 14 days.",
             |ui| {
                 ui.horizontal(|ui| {
-                    if self.confirm_clear_logs {
-                        if ui.button("Cancel").clicked() {
-                            self.cancel_log_clear();
-                        }
-                        if ui
-                            .button(
-                                RichText::new("Clear logs").color(Color32::from_rgb(244, 133, 133)),
-                            )
-                            .clicked()
-                        {
-                            self.confirm_log_clear();
-                        }
-                    } else {
-                        if ui.button("Open folder").clicked() {
-                            self.open_log_directory();
-                        }
-                        if ui.button("Export…").clicked() {
-                            self.export_logs();
-                        }
-                        if ui.button("Clear…").clicked() {
-                            self.request_log_clear();
-                        }
+                    if ui.button("Open folder").clicked() {
+                        self.open_log_directory();
+                    }
+                    if ui.button("Export…").clicked() {
+                        self.export_logs();
+                    }
+                    if ui.button("Clear…").clicked() {
+                        self.request_log_clear();
                     }
                 });
             },
@@ -2409,177 +2464,80 @@ impl SwitcherApp {
         .inner
     }
 
-    fn admin_configuration_window(&mut self, context: &egui::Context) {
-        if !self.show_admin_configuration {
+    fn dialog(&mut self, context: &egui::Context) {
+        let Some(active) = self.active_dialog else {
             return;
+        };
+        let progress = animation_progress(Some(active.opened_at), DIALOG_ENTRANCE_DURATION);
+        if progress < 1.0 {
+            context.request_repaint();
         }
-        let mut open = true;
+        let available_width = context.content_rect().width();
+        let width = active
+            .kind
+            .preferred_width()
+            .min((available_width - 32.0).max(280.0));
+        let frame = egui::Frame::new()
+            .fill(Color32::from_rgb(24, 27, 33))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(57, 63, 75)))
+            .corner_radius(12)
+            .inner_margin(24)
+            .shadow(egui::Shadow {
+                offset: [0, 8],
+                blur: 28,
+                spread: 2,
+                color: Color32::from_black_alpha(150),
+            });
+        let area = egui::Modal::default_area(egui::Id::new(("stageswap-dialog", active.kind)))
+            .anchor(
+                Align2::CENTER_CENTER,
+                egui::vec2(0.0, 8.0 * (1.0 - progress)),
+            );
         let status = self.admin_profile_status;
-        egui::Window::new("Admin configuration")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .open(&mut open)
+        let response = egui::Modal::new(egui::Id::new(("stageswap-dialog", active.kind)))
+            .area(area)
+            .frame(frame)
+            .backdrop_color(Color32::from_black_alpha((145.0 * progress) as u8))
             .show(context, |ui| {
-                if self.confirm_replace_admin_baseline || self.confirm_remove_admin_baseline {
-                    ui.disable();
-                }
-                ui.set_width(440.0);
-
-                match status {
-                    None => {
-                        if ui
-                            .add_sized(
-                                [ui.available_width(), 36.0],
-                                egui::Button::new("Save current setup as admin baseline"),
-                            )
-                            .clicked()
-                        {
-                            self.save_admin_baseline();
-                        }
-                    }
-                    Some(status) => {
-                        let gap = ui.spacing().item_spacing.x;
-                        let button_width = ((ui.available_width() - gap) / 2.0).max(1.0);
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_sized(
-                                    [button_width, 36.0],
-                                    egui::Button::new("Replace admin baseline…"),
-                                )
-                                .clicked()
-                            {
-                                self.confirm_replace_admin_baseline = true;
-                                self.confirm_remove_admin_baseline = false;
-                            }
-                            if ui
-                                .add_sized(
-                                    [button_width, 36.0],
-                                    egui::Button::new(
-                                        RichText::new("Remove admin baseline…")
-                                            .color(Color32::from_rgb(244, 143, 143)),
-                                    ),
-                                )
-                                .clicked()
-                            {
-                                self.confirm_remove_admin_baseline = true;
-                                self.confirm_replace_admin_baseline = false;
-                            }
-                        });
-
-                        ui.add_space(8.0);
-                        let mut auto_restore = status.auto_restore_on_launch;
-                        settings_toggle_row_without_separator(
-                            ui,
-                            &mut auto_restore,
-                            "Auto-restore on launch",
-                            "Replace session changes with the admin baseline whenever StageSwap starts.",
-                        );
-                        if auto_restore != status.auto_restore_on_launch {
-                            self.set_admin_auto_restore(auto_restore);
-                        }
-                    }
-                }
-
+                ui.set_width(width);
+                ui.set_opacity(0.72 + progress * 0.28);
+                dialog_content(ui, active.kind, status, active.focus_safe_action)
             });
-        self.show_admin_configuration = open;
-        if open {
-            self.admin_confirmation_dialogs(context);
-        } else {
-            self.confirm_replace_admin_baseline = false;
-            self.confirm_remove_admin_baseline = false;
-        }
-    }
-
-    fn admin_confirmation_dialogs(&mut self, context: &egui::Context) {
-        if self.confirm_replace_admin_baseline {
-            egui::Window::new("Replace admin baseline?")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(context, |ui| {
-                    ui.set_width(360.0);
-                    ui.label(
-                        "Replace the saved baseline with the setup currently shown in Settings?",
-                    );
-                    ui.add_space(8.0);
-                    let gap = ui.spacing().item_spacing.x;
-                    let button_width = ((ui.available_width() - gap) / 2.0).max(1.0);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_sized([button_width, 34.0], egui::Button::new("Cancel"))
-                            .clicked()
-                        {
-                            self.confirm_replace_admin_baseline = false;
-                        }
-                        if ui
-                            .add_sized([button_width, 34.0], egui::Button::new("Replace baseline"))
-                            .clicked()
-                        {
-                            self.save_admin_baseline();
-                        }
-                    });
-                });
+        if let Some(dialog) = self
+            .active_dialog
+            .as_mut()
+            .filter(|dialog| dialog.opened_at == active.opened_at)
+        {
+            dialog.focus_safe_action = false;
         }
 
-        if self.confirm_remove_admin_baseline {
-            egui::Window::new("Remove admin baseline?")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(context, |ui| {
-                    ui.set_width(360.0);
-                    ui.label(
-                        "Remove the saved baseline and turn off automatic restoration on launch?",
-                    );
-                    ui.add_space(8.0);
-                    let gap = ui.spacing().item_spacing.x;
-                    let button_width = ((ui.available_width() - gap) / 2.0).max(1.0);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_sized([button_width, 34.0], egui::Button::new("Cancel"))
-                            .clicked()
-                        {
-                            self.confirm_remove_admin_baseline = false;
-                        }
-                        if ui
-                            .add_sized(
-                                [button_width, 34.0],
-                                egui::Button::new(
-                                    RichText::new("Remove baseline")
-                                        .color(Color32::from_rgb(244, 133, 133)),
-                                ),
-                            )
-                            .clicked()
-                        {
-                            self.remove_admin_baseline();
-                        }
-                    });
-                });
+        let action = response
+            .inner
+            .or_else(|| response.should_close().then_some(DialogAction::Dismiss));
+        match action {
+            None => {}
+            Some(DialogAction::Dismiss) => self.dismiss_dialog(),
+            Some(DialogAction::Exit) => {
+                self.exit_requested = true;
+                self.dismiss_dialog();
+                context.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Some(DialogAction::ClearLogs) => self.confirm_log_clear(),
+            Some(DialogAction::SaveAdminBaseline) => self.save_admin_baseline(),
+            Some(DialogAction::ReplaceAdminBaseline) => {
+                self.open_dialog(AppDialogKind::ReplaceAdminBaseline);
+            }
+            Some(DialogAction::RemoveAdminBaseline) => {
+                if active.kind == AppDialogKind::RemoveAdminBaseline {
+                    self.remove_admin_baseline();
+                } else {
+                    self.open_dialog(AppDialogKind::RemoveAdminBaseline);
+                }
+            }
+            Some(DialogAction::SetAdminAutoRestore(enabled)) => {
+                self.set_admin_auto_restore(enabled);
+            }
         }
-    }
-
-    fn exit_confirmation(&mut self, context: &egui::Context) {
-        if !self.show_exit_confirmation {
-            return;
-        }
-        egui::Window::new("Exit StageSwap?")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .show(context, |ui| {
-                ui.label("The virtual camera will remain registered and show the branded off screen when the publisher stops.");
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        self.show_exit_confirmation = false;
-                    }
-                    if ui.button("Exit").clicked() {
-                        self.exit_requested = true;
-                        self.show_exit_confirmation = false;
-                        context.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-            });
     }
 
     fn preview_cell(
@@ -2712,6 +2670,358 @@ impl SwitcherApp {
     }
 }
 
+impl AppDialogKind {
+    const fn preferred_width(self) -> f32 {
+        match self {
+            Self::Admin => 440.0,
+            Self::Exit
+            | Self::ClearLogs
+            | Self::ReplaceAdminBaseline
+            | Self::RemoveAdminBaseline => 400.0,
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Exit => "Exit StageSwap?",
+            Self::ClearLogs => "Clear diagnostic logs?",
+            Self::Admin => "Admin configuration",
+            Self::ReplaceAdminBaseline => "Replace admin baseline?",
+            Self::RemoveAdminBaseline => "Remove admin baseline?",
+        }
+    }
+
+    const fn icon(self) -> UiIcon {
+        match self {
+            Self::Exit => UiIcon::Stop,
+            Self::ClearLogs => UiIcon::Folder,
+            Self::Admin => UiIcon::Wrench,
+            Self::ReplaceAdminBaseline => UiIcon::Refresh,
+            Self::RemoveAdminBaseline => UiIcon::Error,
+        }
+    }
+
+    const fn accent(self) -> Color32 {
+        match self {
+            Self::Admin | Self::ReplaceAdminBaseline => SETTINGS_BLUE,
+            Self::Exit | Self::ClearLogs | Self::RemoveAdminBaseline => {
+                Color32::from_rgb(222, 90, 98)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DialogButtonTone {
+    Secondary,
+    Primary,
+    Danger,
+}
+
+fn dialog_content(
+    ui: &mut egui::Ui,
+    kind: AppDialogKind,
+    admin_status: Option<AdminProfileStatus>,
+    focus_safe_action: bool,
+) -> Option<DialogAction> {
+    dialog_header(ui, kind);
+    ui.add_space(18.0);
+    if kind == AppDialogKind::Admin {
+        return admin_dialog_content(ui, admin_status, focus_safe_action);
+    }
+
+    let body = match kind {
+        AppDialogKind::Exit => {
+            "StageSwap will stop publishing. The virtual camera stays installed and shows the StageSwap off screen until the app starts again."
+        }
+        AppDialogKind::ClearLogs => {
+            "This permanently removes locally stored diagnostic logs. New logs will continue to be recorded."
+        }
+        AppDialogKind::ReplaceAdminBaseline => {
+            "Replace the saved baseline with the setup currently shown in Settings?"
+        }
+        AppDialogKind::RemoveAdminBaseline => {
+            "Auto-restore will turn off. Your current settings and reference image will stay unchanged."
+        }
+        AppDialogKind::Admin => unreachable!(),
+    };
+    ui.label(
+        RichText::new(body)
+            .size(14.0)
+            .line_height(Some(21.0))
+            .color(Color32::from_rgb(184, 191, 203)),
+    );
+    ui.add_space(24.0);
+
+    let (safe_icon, safe_label, primary_icon, primary_label, primary_action, primary_tone) =
+        match kind {
+            AppDialogKind::Exit => (
+                UiIcon::Window,
+                "Stay open",
+                UiIcon::Stop,
+                "Exit StageSwap",
+                DialogAction::Exit,
+                DialogButtonTone::Danger,
+            ),
+            AppDialogKind::ClearLogs => (
+                UiIcon::Folder,
+                "Keep logs",
+                UiIcon::Error,
+                "Clear logs",
+                DialogAction::ClearLogs,
+                DialogButtonTone::Danger,
+            ),
+            AppDialogKind::ReplaceAdminBaseline => (
+                UiIcon::Check,
+                "Keep baseline",
+                UiIcon::Refresh,
+                "Replace baseline",
+                DialogAction::SaveAdminBaseline,
+                DialogButtonTone::Primary,
+            ),
+            AppDialogKind::RemoveAdminBaseline => (
+                UiIcon::Check,
+                "Keep baseline",
+                UiIcon::Error,
+                "Remove baseline",
+                DialogAction::RemoveAdminBaseline,
+                DialogButtonTone::Danger,
+            ),
+            AppDialogKind::Admin => unreachable!(),
+        };
+    let mut action = None;
+    let button_width = dialog_action_width(ui.available_width(), ui.spacing().item_spacing.x, 2);
+    ui.horizontal(|ui| {
+        let safe = dialog_button(
+            ui,
+            safe_icon,
+            safe_label,
+            DialogButtonTone::Secondary,
+            button_width,
+        );
+        if focus_safe_action {
+            safe.request_focus();
+        }
+        if safe.clicked() {
+            action = Some(DialogAction::Dismiss);
+        }
+        if dialog_button(ui, primary_icon, primary_label, primary_tone, button_width).clicked() {
+            action = Some(primary_action);
+        }
+    });
+    action
+}
+
+fn dialog_header(ui: &mut egui::Ui, kind: AppDialogKind) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(38.0, 38.0), Sense::hover());
+        let accent = kind.accent();
+        ui.painter().circle_filled(
+            rect.center(),
+            18.0,
+            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38),
+        );
+        draw_icon(ui.painter(), rect.shrink(9.0), kind.icon(), accent, 1.7);
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(kind.title())
+                .size(19.0)
+                .strong()
+                .color(Color32::from_rgb(235, 238, 244)),
+        );
+    });
+}
+
+fn admin_dialog_content(
+    ui: &mut egui::Ui,
+    status: Option<AdminProfileStatus>,
+    focus_safe_action: bool,
+) -> Option<DialogAction> {
+    ui.label(
+        RichText::new(
+            "Keep a protected local copy of the current settings and reference image for managed setups.",
+        )
+        .size(14.0)
+        .line_height(Some(21.0))
+        .color(Color32::from_rgb(184, 191, 203)),
+    );
+    ui.add_space(20.0);
+    match status {
+        None => {
+            ui.label(
+                RichText::new("No admin baseline is saved.")
+                    .size(13.0)
+                    .color(Color32::from_rgb(137, 146, 160)),
+            );
+            ui.add_space(22.0);
+            let mut action = None;
+            let button_width =
+                dialog_action_width(ui.available_width(), ui.spacing().item_spacing.x, 2);
+            ui.horizontal(|ui| {
+                let close = dialog_button(
+                    ui,
+                    UiIcon::Back,
+                    "Close",
+                    DialogButtonTone::Secondary,
+                    button_width,
+                );
+                if focus_safe_action {
+                    close.request_focus();
+                }
+                if close.clicked() {
+                    action = Some(DialogAction::Dismiss);
+                }
+                if dialog_button(
+                    ui,
+                    UiIcon::Check,
+                    "Save baseline",
+                    DialogButtonTone::Primary,
+                    button_width,
+                )
+                .clicked()
+                {
+                    action = Some(DialogAction::SaveAdminBaseline);
+                }
+            });
+            action
+        }
+        Some(status) => {
+            let reference = if status.reference_included {
+                "Settings and reference image saved"
+            } else {
+                "Settings saved without a reference image"
+            };
+            icon_text(
+                ui,
+                UiIcon::Check,
+                reference,
+                Color32::from_rgb(116, 205, 157),
+                false,
+            );
+            ui.add_space(14.0);
+            let mut auto_restore = status.auto_restore_on_launch;
+            settings_toggle_row_without_separator(
+                ui,
+                &mut auto_restore,
+                "Auto-restore on launch",
+                "Replace session changes with this baseline whenever StageSwap starts.",
+            );
+            if auto_restore != status.auto_restore_on_launch {
+                return Some(DialogAction::SetAdminAutoRestore(auto_restore));
+            }
+            ui.add_space(18.0);
+            let mut action = None;
+            let button_width =
+                dialog_action_width(ui.available_width(), ui.spacing().item_spacing.x, 3);
+            ui.horizontal(|ui| {
+                if dialog_button(
+                    ui,
+                    UiIcon::Error,
+                    "Remove…",
+                    DialogButtonTone::Danger,
+                    button_width,
+                )
+                .clicked()
+                {
+                    action = Some(DialogAction::RemoveAdminBaseline);
+                }
+                let close = dialog_button(
+                    ui,
+                    UiIcon::Back,
+                    "Close",
+                    DialogButtonTone::Secondary,
+                    button_width,
+                );
+                if focus_safe_action {
+                    close.request_focus();
+                }
+                if close.clicked() {
+                    action = Some(DialogAction::Dismiss);
+                }
+                if dialog_button(
+                    ui,
+                    UiIcon::Refresh,
+                    "Replace…",
+                    DialogButtonTone::Primary,
+                    button_width,
+                )
+                .clicked()
+                {
+                    action = Some(DialogAction::ReplaceAdminBaseline);
+                }
+            });
+            action
+        }
+    }
+}
+
+fn dialog_button(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    label: &str,
+    tone: DialogButtonTone,
+    width: f32,
+) -> egui::Response {
+    let (base_fill, base_stroke, text_color) = match tone {
+        DialogButtonTone::Secondary => (
+            Color32::from_rgb(40, 44, 53),
+            Stroke::new(1.0, Color32::from_rgb(66, 73, 87)),
+            Color32::from_rgb(224, 228, 235),
+        ),
+        DialogButtonTone::Primary => (SETTINGS_BLUE, Stroke::NONE, Color32::WHITE),
+        DialogButtonTone::Danger => (Color32::from_rgb(174, 58, 69), Stroke::NONE, Color32::WHITE),
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 38.0), Sense::click());
+    let interaction = if response.is_pointer_button_down_on() {
+        0.14
+    } else if response.hovered() {
+        0.08
+    } else {
+        0.0
+    };
+    let fill = mix_color(base_fill, Color32::WHITE, interaction);
+    let stroke = if response.has_focus() {
+        Stroke::new(1.5, Color32::from_rgb(225, 232, 245))
+    } else {
+        base_stroke
+    };
+    ui.painter().rect_filled(rect, 7, fill);
+    ui.painter()
+        .rect_stroke(rect, 7, stroke, StrokeKind::Inside);
+
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), FontId::proportional(14.0), text_color);
+    let icon_size = 15.0;
+    let gap = 7.0;
+    let content_width = icon_size + gap + galley.size().x;
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(
+            rect.center().x - content_width / 2.0,
+            rect.center().y - icon_size / 2.0,
+        ),
+        egui::vec2(icon_size, icon_size),
+    );
+    draw_icon(ui.painter(), icon_rect, icon, text_color, 1.45);
+    ui.painter().galley(
+        Pos2::new(
+            icon_rect.right() + gap,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        text_color,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn dialog_action_width(available_width: f32, gap: f32, action_count: usize) -> f32 {
+    ((available_width - gap * (action_count.saturating_sub(1) as f32)) / action_count as f32)
+        .max(1.0)
+}
+
 impl eframe::App for SwitcherApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(windows)]
@@ -2731,7 +3041,7 @@ impl eframe::App for SwitcherApp {
                     stageswap_windows::InstanceCommand::ShutdownForReplacement => {
                         let _ = save_config(&self.store, &self.config);
                         self.exit_requested = true;
-                        self.show_exit_confirmation = false;
+                        self.dismiss_dialog();
                         context.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 }
@@ -2781,7 +3091,14 @@ impl eframe::App for SwitcherApp {
             && let Some(warning) = snapshot.warning.as_ref()
             && self.last_notified_warning.as_ref() != Some(warning)
         {
-            stageswap_windows::notify_warning(warning.clone());
+            if let Err(error) = stageswap_windows::notify_warning(warning) {
+                self.log.write(
+                    "warning",
+                    "notification",
+                    "WINDOWS_NOTIFICATION_FAILED",
+                    &error,
+                );
+            }
             self.last_notified_warning = Some(warning.clone());
         }
         #[cfg(windows)]
@@ -2816,7 +3133,7 @@ impl eframe::App for SwitcherApp {
                 tray::TrayAction::SetMode(mode) => self.set_mode(mode),
                 tray::TrayAction::Exit => {
                     if self.config.confirm_exit {
-                        self.show_exit_confirmation = true;
+                        self.open_dialog(AppDialogKind::Exit);
                         context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                         context.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -2856,7 +3173,9 @@ impl eframe::App for SwitcherApp {
             context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         } else if close_requested && self.config.confirm_exit && !self.exit_requested {
             context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.show_exit_confirmation = true;
+            if !self.dialog_is(AppDialogKind::Exit) {
+                self.open_dialog(AppDialogKind::Exit);
+            }
         }
         context.request_repaint_after(repaint_interval(false));
     }
@@ -4969,16 +5288,40 @@ mod tests {
             ];
             assert_eq!(
                 parse_ui_preview_request(&args).unwrap(),
-                Some(UiPreviewRequest { tab })
+                Some(UiPreviewRequest {
+                    target: UiPreviewTarget::Settings(tab),
+                })
             );
         }
         let default_page = vec!["StageSwap".to_owned(), "--ui-preview".to_owned()];
         assert_eq!(
             parse_ui_preview_request(&default_page).unwrap(),
             Some(UiPreviewRequest {
-                tab: SettingsTab::General,
+                target: UiPreviewTarget::Settings(SettingsTab::General),
             })
         );
+        for (name, kind) in [
+            ("dialog-exit", AppDialogKind::Exit),
+            ("dialog-clear-logs", AppDialogKind::ClearLogs),
+            ("dialog-admin", AppDialogKind::Admin),
+            (
+                "dialog-replace-baseline",
+                AppDialogKind::ReplaceAdminBaseline,
+            ),
+            ("dialog-remove-baseline", AppDialogKind::RemoveAdminBaseline),
+        ] {
+            let args = vec![
+                "StageSwap".to_owned(),
+                "--ui-preview".to_owned(),
+                name.to_owned(),
+            ];
+            assert_eq!(
+                parse_ui_preview_request(&args).unwrap(),
+                Some(UiPreviewRequest {
+                    target: UiPreviewTarget::Dialog(kind),
+                })
+            );
+        }
         assert!(
             parse_ui_preview_request(&["StageSwap".to_owned()])
                 .unwrap()
@@ -5383,9 +5726,9 @@ mod tests {
         assert!(std::fs::read_to_string(&before).unwrap().contains("KEEP"));
 
         app.request_log_clear();
-        assert!(app.confirm_clear_logs);
-        app.cancel_log_clear();
-        assert!(!app.confirm_clear_logs);
+        assert!(app.dialog_is(AppDialogKind::ClearLogs));
+        app.dismiss_dialog();
+        assert!(app.active_dialog.is_none());
         let after_cancel = directory.path().join("after-cancel.jsonl");
         app.log.export_to(&after_cancel).unwrap();
         assert!(
@@ -5396,12 +5739,92 @@ mod tests {
 
         app.request_log_clear();
         app.confirm_log_clear();
-        assert!(!app.confirm_clear_logs);
+        assert!(app.active_dialog.is_none());
         let after_clear = directory.path().join("after-clear.jsonl");
         app.log.export_to(&after_clear).unwrap();
         let contents = std::fs::read_to_string(&after_clear).unwrap();
         assert!(!contents.contains("KEEP"));
         assert!(contents.contains("LOGS_CLEARED"));
+    }
+
+    #[test]
+    fn polished_dialogs_render_responsively_and_escape_cancels() {
+        for kind in [
+            AppDialogKind::Exit,
+            AppDialogKind::ClearLogs,
+            AppDialogKind::Admin,
+            AppDialogKind::ReplaceAdminBaseline,
+            AppDialogKind::RemoveAdminBaseline,
+        ] {
+            for (viewport, dpi_scale) in [
+                (egui::vec2(820.0, 600.0), 1.0),
+                (egui::vec2(820.0, 600.0), 1.5),
+                (egui::vec2(1280.0, 720.0), 1.5),
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                let mut app = SwitcherApp::new(
+                    AppConfig::default(),
+                    Vec::new(),
+                    ConfigStore::new(directory.path()),
+                );
+                app.admin_profile_status = Some(AdminProfileStatus {
+                    auto_restore_on_launch: true,
+                    reference_included: true,
+                });
+                app.active_dialog = Some(ActiveDialog {
+                    kind,
+                    opened_at: Instant::now() - DIALOG_ENTRANCE_DURATION,
+                    focus_safe_action: true,
+                });
+                let context = egui::Context::default();
+                let mut input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
+                    ..egui::RawInput::default()
+                };
+                input
+                    .viewports
+                    .get_mut(&egui::ViewportId::ROOT)
+                    .unwrap()
+                    .native_pixels_per_point = Some(dpi_scale);
+                let output = context.run_ui(input, |_ui| app.dialog(&context));
+                assert!(
+                    !output.shapes.is_empty(),
+                    "{kind:?} did not render its backdrop, surface, and controls"
+                );
+                assert!(app.dialog_is(kind));
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            AppConfig::default(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        );
+        app.open_dialog(AppDialogKind::RemoveAdminBaseline);
+        let context = egui::Context::default();
+        let _ = context.run_ui(egui::RawInput::default(), |_ui| app.dialog(&context));
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..egui::RawInput::default()
+        };
+        let _ = context.run_ui(input, |_ui| app.dialog(&context));
+        assert!(app.active_dialog.is_none());
+    }
+
+    #[test]
+    fn dialog_actions_fill_the_available_width() {
+        for (available, gap, count) in [(352.0, 10.0, 2), (392.0, 10.0, 2), (392.0, 10.0, 3)] {
+            let width = dialog_action_width(available, gap, count);
+            let used = width * count as f32 + gap * (count - 1) as f32;
+            assert!((used - available).abs() < 0.01);
+        }
     }
 
     #[test]
