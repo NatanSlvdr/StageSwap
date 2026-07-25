@@ -27,6 +27,7 @@ pub enum RestartTarget {
 pub enum Command {
     Start,
     Stop,
+    ToggleDisco,
     SetMode(OutputMode),
     UpdateSettings(Box<AppConfig>),
     CaptureReference,
@@ -49,6 +50,7 @@ pub struct PreviewFrames {
 #[derive(Clone, Debug, Default)]
 pub struct AppSnapshot {
     pub run_state: RunState,
+    pub disco_enabled: bool,
     pub mode: OutputMode,
     pub detection: DetectionState,
     pub automatic_target: Source,

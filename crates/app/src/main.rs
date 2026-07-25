@@ -33,6 +33,7 @@ const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const SETTINGS_ENTRANCE_DURATION: Duration = Duration::from_millis(160);
 const SETTINGS_SECTION_DURATION: Duration = Duration::from_millis(120);
 const DIALOG_ENTRANCE_DURATION: Duration = Duration::from_millis(150);
+const DISCO_GESTURE_WINDOW: Duration = Duration::from_secs(3);
 const SETTINGS_SIDEBAR_WIDTH: f32 = 196.0;
 const SETTINGS_CONTENT_WIDTH: f32 = 960.0;
 const SETTINGS_PREVIEW_WIDTH: f32 = 480.0;
@@ -434,6 +435,36 @@ enum SettingsSaveState {
     Saved,
     Pending(Instant),
     Failed(String),
+}
+
+#[derive(Default)]
+struct DiscoDiagnosticsGesture {
+    first_click_at: Option<Instant>,
+    click_count: u8,
+}
+
+impl DiscoDiagnosticsGesture {
+    fn register_primary_click(&mut self, now: Instant) -> bool {
+        if self
+            .first_click_at
+            .is_none_or(|started| now.saturating_duration_since(started) > DISCO_GESTURE_WINDOW)
+        {
+            self.first_click_at = Some(now);
+            self.click_count = 1;
+            return false;
+        }
+        self.click_count += 1;
+        if self.click_count < 5 {
+            return false;
+        }
+        self.reset();
+        true
+    }
+
+    fn reset(&mut self) {
+        self.first_click_at = None;
+        self.click_count = 0;
+    }
 }
 
 struct PreviewTexture {
@@ -902,6 +933,9 @@ struct SwitcherApp {
     ui_preview: Option<UiPreviewSession>,
     exit_requested: bool,
     last_window_size: Option<Vec2>,
+    disco_diagnostics_gesture: DiscoDiagnosticsGesture,
+    disco_ui_activated_at: Option<Instant>,
+    ui_animation_started_at: Instant,
 }
 
 impl SwitcherApp {
@@ -958,6 +992,9 @@ impl SwitcherApp {
             ui_preview: None,
             exit_requested: false,
             last_window_size: None,
+            disco_diagnostics_gesture: DiscoDiagnosticsGesture::default(),
+            disco_ui_activated_at: None,
+            ui_animation_started_at: Instant::now(),
         }
     }
 
@@ -1019,6 +1056,23 @@ impl SwitcherApp {
         let _ = self.runtime.send(command);
     }
 
+    fn toggle_disco(&mut self) {
+        #[cfg(not(windows))]
+        if let Some(preview) = self.ui_preview.as_mut() {
+            let enabled = !preview.snapshot.disco_enabled;
+            preview.snapshot.disco_enabled = enabled;
+            let now = Instant::now();
+            self.disco_ui_activated_at = enabled.then_some(now);
+            return;
+        }
+
+        let enabled = !self.snapshot().disco_enabled;
+        if self.runtime.send(Command::ToggleDisco).is_ok() {
+            let now = Instant::now();
+            self.disco_ui_activated_at = enabled.then_some(now);
+        }
+    }
+
     fn set_mode(&mut self, mode: OutputMode) {
         if self.config.output_mode == mode {
             return;
@@ -1073,6 +1127,7 @@ impl SwitcherApp {
 
     fn open_settings(&mut self) {
         self.view = AppView::Settings;
+        self.disco_diagnostics_gesture.reset();
         self.settings_opened_at = Some(Instant::now());
         self.settings_section_changed_at = Some(Instant::now());
         self.send(Command::RefreshVideoDevices);
@@ -1084,6 +1139,7 @@ impl SwitcherApp {
     fn close_settings(&mut self) {
         self.flush_settings();
         self.view = AppView::Dashboard;
+        self.disco_diagnostics_gesture.reset();
         self.active_dialog = None;
         self.settings_opened_at = None;
         self.settings_section_changed_at = None;
@@ -1247,18 +1303,61 @@ impl SwitcherApp {
 
     fn root_ui(&mut self, ui: &mut egui::Ui) -> Rect {
         let context = ui.ctx().clone();
-        let content_rect = egui::CentralPanel::default()
-            .show(ui, |ui| {
-                let content_rect = ui.max_rect();
-                match self.view {
-                    AppView::Dashboard => self.dashboard(ui),
-                    AppView::Settings => self.settings_view(&context, ui),
+        let disco_enabled = self.snapshot().disco_enabled;
+        let content_rect = ui
+            .scope(|ui| {
+                if disco_enabled {
+                    let accent = disco_ui_color(
+                        Instant::now().saturating_duration_since(self.ui_animation_started_at),
+                        0.0,
+                    );
+                    ui.visuals_mut().selection.bg_fill = accent;
+                    ui.visuals_mut().widgets.hovered.bg_fill =
+                        mix_color(Color32::from_rgb(48, 53, 63), accent, 0.22);
+                    ui.visuals_mut().widgets.active.bg_fill =
+                        mix_color(Color32::from_rgb(59, 67, 82), accent, 0.32);
+                    ui.visuals_mut().panel_fill =
+                        mix_color(Color32::from_rgb(18, 20, 24), accent, 0.08);
                 }
-                content_rect
+                egui::CentralPanel::default()
+                    .show(ui, |ui| {
+                        let content_rect = ui.max_rect();
+                        match self.view {
+                            AppView::Dashboard => self.dashboard(ui),
+                            AppView::Settings => self.settings_view(&context, ui),
+                        }
+                        content_rect
+                    })
+                    .inner
             })
             .inner;
         self.dialog(&context);
+        self.paint_disco_interface(&context, content_rect, disco_enabled);
         content_rect
+    }
+
+    fn paint_disco_interface(
+        &mut self,
+        context: &egui::Context,
+        content_rect: Rect,
+        disco_enabled: bool,
+    ) {
+        let now = Instant::now();
+        if !disco_enabled {
+            return;
+        }
+        let elapsed = now.saturating_duration_since(self.ui_animation_started_at);
+        let activation_elapsed = self
+            .disco_ui_activated_at
+            .map(|activated_at| now.saturating_duration_since(activated_at))
+            .unwrap_or(Duration::from_secs(2));
+        paint_disco_interface(
+            context,
+            content_rect,
+            elapsed,
+            activation_elapsed,
+            disco_enabled,
+        );
     }
 
     fn dashboard(&mut self, ui: &mut egui::Ui) {
@@ -1637,8 +1736,19 @@ impl SwitcherApp {
 
     fn settings_sidebar(&mut self, ui: &mut egui::Ui, height: f32) -> SettingsSidebarLayout {
         let app_icon_texture = self.app_icon_texture(ui.ctx());
+        let disco_enabled = self.snapshot().disco_enabled;
+        let disco_elapsed = Instant::now().saturating_duration_since(self.ui_animation_started_at);
+        let sidebar_fill = if disco_enabled {
+            mix_color(
+                SETTINGS_SIDEBAR_FILL,
+                disco_ui_color(disco_elapsed, 0.58),
+                0.12,
+            )
+        } else {
+            SETTINGS_SIDEBAR_FILL
+        };
         egui::Frame::new()
-            .fill(SETTINGS_SIDEBAR_FILL)
+            .fill(sidebar_fill)
             .inner_margin(egui::Margin::symmetric(10, 12))
             .show(ui, |ui| {
                 ui.set_width(SETTINGS_SIDEBAR_WIDTH - 20.0);
@@ -1651,12 +1761,35 @@ impl SwitcherApp {
                         |ui| {
                             let (rect, response) =
                                 ui.allocate_exact_size(egui::vec2(96.0, 96.0), Sense::click());
+                            if disco_enabled {
+                                for ring in 0..3 {
+                                    let color = disco_ui_color(disco_elapsed, ring as f32 / 3.0);
+                                    ui.painter().circle_stroke(
+                                        rect.center(),
+                                        rect.width() * (0.51 + ring as f32 * 0.035),
+                                        Stroke::new(
+                                            3.0 - ring as f32 * 0.7,
+                                            Color32::from_rgba_unmultiplied(
+                                                color.r(),
+                                                color.g(),
+                                                color.b(),
+                                                (190 - ring * 45) as u8,
+                                            ),
+                                        ),
+                                    );
+                                }
+                            }
                             ui.painter().image(
                                 app_icon_texture,
                                 rect,
                                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                                 Color32::WHITE,
                             );
+                            if response.clicked()
+                                || response.clicked_by(egui::PointerButton::Secondary)
+                            {
+                                self.disco_diagnostics_gesture.reset();
+                            }
                             if admin_logo_activated(&response) {
                                 self.open_admin_configuration();
                             }
@@ -1685,6 +1818,9 @@ impl SwitcherApp {
                 ui.add_space(8.0);
                 let back = settings_back_button(ui);
                 let go_back = back.clicked();
+                if go_back {
+                    self.disco_diagnostics_gesture.reset();
+                }
                 ui.add_space(10.0);
                 ui.label(
                     RichText::new("PREFERENCES")
@@ -1695,8 +1831,18 @@ impl SwitcherApp {
                 ui.add_space(8.0);
                 let mut primary_navigation = Vec::with_capacity(SettingsTab::PRIMARY.len());
                 for (index, (tab, icon, label)) in SettingsTab::PRIMARY.into_iter().enumerate() {
-                    let response = settings_nav_button(ui, tab, icon, label, self.settings_tab);
+                    let response = settings_nav_button(
+                        ui,
+                        tab,
+                        icon,
+                        label,
+                        self.settings_tab,
+                        disco_enabled.then(|| disco_ui_color(disco_elapsed, index as f32 * 0.13)),
+                    );
                     primary_navigation.push(response.rect);
+                    if response.clicked() {
+                        self.disco_diagnostics_gesture.reset();
+                    }
                     if response.clicked() && self.settings_tab != tab {
                         self.settings_tab = tab;
                         self.dismiss_dialog();
@@ -1712,7 +1858,24 @@ impl SwitcherApp {
                         let save_status = self.settings_save_indicator(ui);
                         ui.add_space(10.0);
                         let (tab, icon, label) = SettingsTab::DIAGNOSTICS;
-                        let response = settings_nav_button(ui, tab, icon, label, self.settings_tab);
+                        let response = settings_nav_button(
+                            ui,
+                            tab,
+                            icon,
+                            label,
+                            self.settings_tab,
+                            disco_enabled.then(|| disco_ui_color(disco_elapsed, 0.76)),
+                        );
+                        if response.clicked_by(egui::PointerButton::Secondary) {
+                            self.disco_diagnostics_gesture.reset();
+                        }
+                        if response.clicked_by(egui::PointerButton::Primary)
+                            && self
+                                .disco_diagnostics_gesture
+                                .register_primary_click(Instant::now())
+                        {
+                            self.toggle_disco();
+                        }
                         if response.clicked() && self.settings_tab != tab {
                             self.settings_tab = tab;
                             self.dismiss_dialog();
@@ -2573,20 +2736,37 @@ impl SwitcherApp {
     ) -> Rect {
         let available = Vec2::new(maximum[0].min(ui.available_width()), maximum[1]);
         let contour = preview_contour(kind, actual_output);
+        let disco_enabled = self.snapshot().disco_enabled;
+        let disco_elapsed = Instant::now().saturating_duration_since(self.ui_animation_started_at);
         let active_amount = ui.ctx().animate_bool_with_time(
             ui.make_persistent_id((kind.key(), "active-contour")),
             contour == PreviewContour::Active,
             0.14,
         );
-        let contour_color = match contour {
-            PreviewContour::Live => LIVE_RED,
-            PreviewContour::Active | PreviewContour::Neutral => {
-                mix_color(PREVIEW_NEUTRAL, ACTIVE_GREEN, active_amount)
+        let disco_offset = match kind {
+            PreviewKind::Webcam => 0.0,
+            PreviewKind::Screen => 0.22,
+            PreviewKind::Reference => 0.46,
+            PreviewKind::Output => 0.7,
+        };
+        let contour_color = if disco_enabled {
+            disco_ui_color(disco_elapsed, disco_offset)
+        } else {
+            match contour {
+                PreviewContour::Live => LIVE_RED,
+                PreviewContour::Active | PreviewContour::Neutral => {
+                    mix_color(PREVIEW_NEUTRAL, ACTIVE_GREEN, active_amount)
+                }
             }
         };
-        let contour_width = 3.0;
+        let contour_width = if disco_enabled { 4.0 } else { 3.0 };
+        let frame_fill = if disco_enabled {
+            mix_color(Color32::from_rgb(12, 14, 18), contour_color, 0.14)
+        } else {
+            Color32::from_rgb(12, 14, 18)
+        };
         let preview_frame = egui::Frame::new()
-            .fill(Color32::from_rgb(12, 14, 18))
+            .fill(frame_fill)
             .stroke(Stroke::new(contour_width, contour_color))
             .corner_radius(8)
             .inner_margin(3);
@@ -3325,6 +3505,7 @@ fn settings_nav_button(
     icon: UiIcon,
     label: &str,
     selected: SettingsTab,
+    disco_accent: Option<Color32>,
 ) -> egui::Response {
     let active = tab == selected;
     let amount =
@@ -3337,16 +3518,20 @@ fn settings_nav_button(
     } else {
         SETTINGS_SIDEBAR_FILL
     };
+    let selected_fill = disco_accent.map_or(SETTINGS_NAV_SELECTED, |accent| {
+        mix_color(SETTINGS_NAV_SELECTED, accent, 0.42)
+    });
     ui.painter()
-        .rect_filled(rect, 6, mix_color(base, SETTINGS_NAV_SELECTED, amount));
+        .rect_filled(rect, 6, mix_color(base, selected_fill, amount));
     if amount > 0.0 {
         let indicator_height = 16.0 + 10.0 * amount;
         let indicator = Rect::from_center_size(
             Pos2::new(rect.left() + 2.0, rect.center().y),
             egui::vec2(3.0, indicator_height),
         );
+        let indicator_color = disco_accent.unwrap_or(SETTINGS_NAV_INDICATOR);
         ui.painter()
-            .rect_filled(indicator, 2, SETTINGS_NAV_INDICATOR.gamma_multiply(amount));
+            .rect_filled(indicator, 2, indicator_color.gamma_multiply(amount));
     }
     let foreground = mix_color(Color32::from_rgb(161, 168, 181), Color32::WHITE, amount);
     let icon_rect = Rect::from_center_size(
@@ -4830,6 +5015,559 @@ fn mix_color(from: Color32, to: Color32, amount: f32) -> Color32 {
     )
 }
 
+fn disco_ui_color(elapsed: Duration, offset: f32) -> Color32 {
+    const COLORS: [Color32; 6] = [
+        Color32::from_rgb(255, 28, 190),
+        Color32::from_rgb(110, 70, 255),
+        Color32::from_rgb(24, 176, 255),
+        Color32::from_rgb(36, 245, 82),
+        Color32::from_rgb(255, 224, 34),
+        Color32::from_rgb(255, 70, 38),
+    ];
+    let position = ((elapsed.as_secs_f32() * 0.42 + offset).rem_euclid(1.0)) * COLORS.len() as f32;
+    let index = position.floor() as usize % COLORS.len();
+    mix_color(
+        COLORS[index],
+        COLORS[(index + 1) % COLORS.len()],
+        position.fract(),
+    )
+}
+
+fn disco_flash_envelope(elapsed: Duration) -> f32 {
+    let seconds = elapsed.as_secs_f32();
+    let beat = (seconds / 1.2).fract();
+    let primary = if beat < 0.1 { 1.0 - beat / 0.1 } else { 0.0 };
+    let secondary = if (0.22..0.29).contains(&beat) {
+        1.0 - (beat - 0.22) / 0.07
+    } else {
+        0.0
+    };
+    let major = (seconds / 3.0).fract();
+    let major = if major < 0.055 {
+        1.0 - major / 0.055
+    } else {
+        0.0
+    };
+    primary.max(secondary * 0.72).max(major)
+}
+
+fn disco_ball_drop_progress(elapsed: Duration) -> f32 {
+    let progress = (elapsed.as_secs_f32() / 1.35).clamp(0.0, 1.0);
+    let shifted = progress - 1.0;
+    1.0 + 2.701_58 * shifted.powi(3) + 1.701_58 * shifted.powi(2)
+}
+
+fn disco_ball_center(rect: Rect, activation_elapsed: Duration) -> Pos2 {
+    let progress = disco_ball_drop_progress(activation_elapsed);
+    Pos2::new(
+        rect.center().x,
+        rect.top() - 72.0 + (rect.top() + 158.0 - (rect.top() - 72.0)) * progress,
+    )
+}
+
+fn paint_disco_ball(
+    painter: &egui::Painter,
+    rect: Rect,
+    elapsed: Duration,
+    activation_elapsed: Duration,
+) {
+    let center = disco_ball_center(rect, activation_elapsed);
+    let radius = (rect.height() * 0.075).clamp(44.0, 62.0);
+    let motor = Rect::from_center_size(
+        Pos2::new(center.x, rect.top() + 11.0),
+        egui::vec2(52.0, 22.0),
+    );
+    painter.rect_filled(motor, 5, Color32::from_rgb(54, 58, 68));
+    painter.rect_stroke(
+        motor,
+        5,
+        Stroke::new(1.5, Color32::from_rgb(154, 161, 174)),
+        StrokeKind::Inside,
+    );
+    painter.rect_filled(
+        Rect::from_center_size(
+            Pos2::new(center.x, motor.bottom() + 4.0),
+            egui::vec2(13.0, 8.0),
+        ),
+        2,
+        Color32::from_rgb(104, 111, 123),
+    );
+    if center.y - radius > motor.bottom() {
+        painter.line_segment(
+            [
+                Pos2::new(center.x - 1.2, motor.bottom() + 8.0),
+                Pos2::new(center.x - 1.2, center.y - radius),
+            ],
+            Stroke::new(3.2, Color32::from_rgb(72, 76, 86)),
+        );
+        painter.line_segment(
+            [
+                Pos2::new(center.x + 1.1, motor.bottom() + 8.0),
+                Pos2::new(center.x + 1.1, center.y - radius),
+            ],
+            Stroke::new(1.1, Color32::from_rgb(196, 201, 211)),
+        );
+    }
+    let t = elapsed.as_secs_f32();
+    let flash = disco_flash_envelope(elapsed);
+    let shimmer = (t * 2.1).sin().mul_add(0.5, 0.5);
+    painter.circle_filled(
+        center,
+        radius + 38.0 + shimmer * 5.0,
+        Color32::from_rgba_unmultiplied(230, 240, 255, 9),
+    );
+    painter.circle_filled(
+        center,
+        radius + 25.0 + shimmer * 3.0,
+        Color32::from_rgba_unmultiplied(220, 235, 255, 17),
+    );
+    painter.circle_filled(
+        center,
+        radius + 14.0,
+        Color32::from_rgba_unmultiplied(245, 250, 255, 34),
+    );
+    painter.circle_filled(center, radius + 5.0, Color32::from_rgb(45, 50, 62));
+    painter.circle_filled(center, radius, Color32::from_rgb(72, 78, 91));
+
+    const LATITUDE_BANDS: usize = 12;
+    const LONGITUDE_BANDS: usize = 16;
+    let project = |latitude: f32, longitude: f32| {
+        Pos2::new(
+            center.x + radius * latitude.cos() * longitude.sin(),
+            center.y + radius * latitude.sin(),
+        )
+    };
+    for row in 0..LATITUDE_BANDS {
+        let latitude_top = -std::f32::consts::FRAC_PI_2
+            + row as f32 * std::f32::consts::PI / LATITUDE_BANDS as f32;
+        let latitude_bottom = -std::f32::consts::FRAC_PI_2
+            + (row + 1) as f32 * std::f32::consts::PI / LATITUDE_BANDS as f32;
+        let latitude = (latitude_top + latitude_bottom) * 0.5;
+        for column in 0..LONGITUDE_BANDS {
+            let longitude_left = -std::f32::consts::FRAC_PI_2
+                + column as f32 * std::f32::consts::PI / LONGITUDE_BANDS as f32;
+            let longitude_right = -std::f32::consts::FRAC_PI_2
+                + (column + 1) as f32 * std::f32::consts::PI / LONGITUDE_BANDS as f32;
+            let longitude = (longitude_left + longitude_right) * 0.5;
+            let normal_x = latitude.cos() * longitude.sin();
+            let normal_y = latitude.sin();
+            let normal_z = latitude.cos() * longitude.cos();
+            let diffuse = (normal_x * -0.38 + normal_y * -0.48 + normal_z * 0.79).clamp(0.0, 1.0);
+            let specular = diffuse.powi(7);
+            let reflection =
+                ((longitude * 3.2 + latitude * 1.6 + t * 1.15).sin() * 0.5 + 0.5).powi(6);
+            let moving_glint =
+                ((longitude * 5.4 - latitude * 2.7 + t * 1.85).sin() * 0.5 + 0.5).powi(14);
+            let rim = (1.0 - normal_z.max(0.0)).powi(3);
+            let brightness = (58.0
+                + diffuse * 142.0
+                + specular * 105.0
+                + reflection * 52.0
+                + moving_glint * 112.0
+                + rim * 26.0)
+                .min(255.0) as u8;
+            let silver = Color32::from_rgb(
+                brightness.saturating_sub(5),
+                brightness,
+                brightness.saturating_add(5),
+            );
+            let accent = disco_ui_color(
+                elapsed,
+                (column as f32 / LONGITUDE_BANDS as f32
+                    + row as f32 / LATITUDE_BANDS as f32 * 0.31
+                    + t * 0.035)
+                    .fract(),
+            );
+            let reflected = mix_color(
+                silver,
+                accent,
+                (0.03 + reflection * 0.48 + moving_glint * 0.12).min(0.62),
+            );
+            let reflected = mix_color(
+                reflected,
+                Color32::WHITE,
+                (specular * 0.74 + reflection * 0.24 + moving_glint * 0.92 + flash * 0.11)
+                    .min(0.96),
+            );
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    project(latitude_top, longitude_left),
+                    project(latitude_top, longitude_right),
+                    project(latitude_bottom, longitude_right),
+                    project(latitude_bottom, longitude_left),
+                ],
+                reflected,
+                Stroke::new(0.65, Color32::from_rgba_unmultiplied(24, 28, 36, 135)),
+            ));
+        }
+    }
+    painter.circle_stroke(
+        center,
+        radius + 1.5,
+        Stroke::new(5.0, Color32::from_rgba_unmultiplied(245, 250, 255, 116)),
+    );
+    painter.circle_stroke(
+        center,
+        radius,
+        Stroke::new(
+            2.5,
+            mix_color(Color32::WHITE, disco_ui_color(elapsed, 0.12), 0.34),
+        ),
+    );
+    if flash > 0.0 {
+        painter.circle_stroke(
+            center,
+            radius + flash * 3.0,
+            Stroke::new(
+                2.0 + flash * 1.5,
+                Color32::from_rgba_unmultiplied(255, 255, 255, (flash * 80.0) as u8),
+            ),
+        );
+    }
+    painter.circle_stroke(
+        center,
+        radius * 0.72,
+        Stroke::new(1.4, Color32::from_rgba_unmultiplied(245, 250, 255, 150)),
+    );
+    painter.circle_filled(
+        Pos2::new(center.x - radius * 0.3, center.y - radius * 0.34),
+        radius * 0.24,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 105),
+    );
+    painter.circle_filled(
+        Pos2::new(center.x - radius * 0.34, center.y - radius * 0.38),
+        radius * 0.085,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 242),
+    );
+    let glint_center = Pos2::new(
+        center.x + (t * 1.25).sin() * radius * 0.48,
+        center.y - radius * 0.12 + (t * 0.8).cos() * radius * 0.23,
+    );
+    painter.circle_filled(
+        glint_center,
+        radius * 0.055,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 250),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(glint_center.x - radius * 0.22, glint_center.y),
+            Pos2::new(glint_center.x + radius * 0.22, glint_center.y),
+        ],
+        Stroke::new(2.2, Color32::from_rgba_unmultiplied(255, 255, 255, 205)),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(glint_center.x, glint_center.y - radius * 0.22),
+            Pos2::new(glint_center.x, glint_center.y + radius * 0.22),
+        ],
+        Stroke::new(2.2, Color32::from_rgba_unmultiplied(255, 255, 255, 205)),
+    );
+}
+
+fn paint_disco_interface(
+    context: &egui::Context,
+    rect: Rect,
+    elapsed: Duration,
+    activation_elapsed: Duration,
+    enabled: bool,
+) {
+    let painter = context.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("disco-interface-overlay"),
+    ));
+    if enabled {
+        let t = elapsed.as_secs_f32();
+        let flash = disco_flash_envelope(elapsed);
+        let pulse_color = disco_ui_color(elapsed, 0.88);
+        let pulse_alpha = (10.0 + (t * 1.7).sin().mul_add(0.5, 0.5) * 16.0 + flash * 24.0) as u8;
+        painter.rect_filled(
+            rect,
+            0,
+            Color32::from_rgba_unmultiplied(
+                pulse_color.r(),
+                pulse_color.g(),
+                pulse_color.b(),
+                pulse_alpha,
+            ),
+        );
+        if flash > 0.0 {
+            painter.rect_filled(
+                rect,
+                0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, (flash * 4.0) as u8),
+            );
+        }
+
+        let ball_center = disco_ball_center(rect, activation_elapsed);
+        if flash > 0.0 {
+            painter.circle_filled(
+                ball_center,
+                82.0 + flash * 45.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, (flash * 16.0) as u8),
+            );
+            for index in 0..20 {
+                let angle = index as f32 * std::f32::consts::TAU / 20.0 + t * 0.18;
+                let start = Pos2::new(
+                    ball_center.x + angle.cos() * 58.0,
+                    ball_center.y + angle.sin() * 58.0,
+                );
+                let end = Pos2::new(
+                    ball_center.x + angle.cos() * (95.0 + flash * 65.0),
+                    ball_center.y + angle.sin() * (95.0 + flash * 65.0),
+                );
+                painter.line_segment(
+                    [start, end],
+                    Stroke::new(
+                        1.0 + flash * 1.2,
+                        Color32::from_rgba_unmultiplied(255, 255, 255, (flash * 72.0) as u8),
+                    ),
+                );
+            }
+        }
+        for index in 0..28 {
+            let angle = t * 0.48 + index as f32 * std::f32::consts::TAU / 28.0;
+            let length = rect.width().max(rect.height()) * 1.2;
+            let end = Pos2::new(
+                ball_center.x + angle.cos() * length,
+                ball_center.y + angle.sin() * length,
+            );
+            let color = disco_ui_color(elapsed, index as f32 / 28.0);
+            painter.line_segment(
+                [ball_center, end],
+                Stroke::new(
+                    1.4 + (index % 4) as f32,
+                    Color32::from_rgba_unmultiplied(
+                        color.r(),
+                        color.g(),
+                        color.b(),
+                        (72.0 + flash * 32.0) as u8,
+                    ),
+                ),
+            );
+        }
+
+        for index in 0..13 {
+            let origin_x =
+                ball_center.x + (t * 0.31 + index as f32 * 1.4).sin() * rect.width() * 0.012;
+            let target_x = rect.left()
+                + rect.width() * (index as f32 + 0.5) / 13.0
+                + (t * 0.47 + index as f32).cos() * rect.width() * 0.11;
+            let half_width = rect.width() * (0.035 + (index % 3) as f32 * 0.012);
+            let color = disco_ui_color(elapsed, index as f32 / 13.0);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(origin_x - 3.0, ball_center.y),
+                    Pos2::new(origin_x + 3.0, ball_center.y),
+                    Pos2::new(target_x + half_width, rect.bottom()),
+                    Pos2::new(target_x - half_width, rect.bottom()),
+                ],
+                Color32::from_rgba_unmultiplied(
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    (42.0 + flash * 22.0) as u8,
+                ),
+                Stroke::NONE,
+            ));
+        }
+
+        let border = rect.shrink(2.0);
+        for (index, segment) in [
+            [border.left_top(), border.right_top()],
+            [border.right_top(), border.right_bottom()],
+            [border.right_bottom(), border.left_bottom()],
+            [border.left_bottom(), border.left_top()],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            painter.line_segment(
+                segment,
+                Stroke::new(
+                    4.0 + (t * 2.0 + index as f32).sin().abs() * 2.0,
+                    disco_ui_color(elapsed, index as f32 * 0.19),
+                ),
+            );
+        }
+
+        for ring in 0..5 {
+            let color = disco_ui_color(elapsed, ring as f32 * 0.17);
+            let radius = 82.0 + ring as f32 * 36.0 + (t * 1.4 + ring as f32).sin() * 9.0;
+            painter.circle_stroke(
+                ball_center,
+                radius,
+                Stroke::new(
+                    8.0 - ring as f32,
+                    Color32::from_rgba_unmultiplied(
+                        color.r(),
+                        color.g(),
+                        color.b(),
+                        48_u8.saturating_sub(ring * 6),
+                    ),
+                ),
+            );
+        }
+
+        for index in 0..46 {
+            let angle = t * (0.52 + (index % 4) as f32 * 0.035) + index as f32 * 2.399_963;
+            let distance = 110.0 + (index % 11) as f32 * rect.width().min(rect.height()) * 0.055;
+            let position = Pos2::new(
+                ball_center.x + angle.cos() * distance,
+                ball_center.y + angle.sin() * distance * 0.74,
+            );
+            let color = disco_ui_color(elapsed, index as f32 / 46.0);
+            let pulse = (((t * 2.7 + index as f32 * 0.91).sin() * 0.5 + 0.5).powi(4)
+                + flash * if index % 3 == 0 { 0.28 } else { 0.1 })
+            .min(1.0);
+            painter.circle_filled(
+                position,
+                9.0 + pulse * 16.0,
+                Color32::from_rgba_unmultiplied(
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    (20.0 + pulse * 46.0) as u8,
+                ),
+            );
+            painter.circle_filled(
+                position,
+                1.8 + pulse * 3.8,
+                Color32::from_rgba_unmultiplied(255, 255, 255, (125.0 + pulse * 130.0) as u8),
+            );
+        }
+
+        for index in 0..6 {
+            let angle = t * 0.19 + index as f32 * std::f32::consts::TAU / 6.0;
+            let position = Pos2::new(
+                ball_center.x + angle.cos() * rect.width() * 0.42,
+                ball_center.y + angle.sin() * rect.height() * 0.46,
+            );
+            let color = disco_ui_color(elapsed, index as f32 / 6.0);
+            painter.circle_filled(
+                position,
+                rect.width().min(rect.height()) * (0.13 + (index % 2) as f32 * 0.04),
+                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 34),
+            );
+        }
+
+        let dance_floor_top = rect.bottom() - 54.0;
+        for row in 0..3 {
+            for column in 0..18 {
+                let tile_width = rect.width() / 18.0;
+                let tile = Rect::from_min_max(
+                    Pos2::new(
+                        rect.left() + column as f32 * tile_width + 1.0,
+                        dance_floor_top + row as f32 * 18.0 + 1.0,
+                    ),
+                    Pos2::new(
+                        rect.left() + (column + 1) as f32 * tile_width - 1.0,
+                        dance_floor_top + (row + 1) as f32 * 18.0 - 1.0,
+                    ),
+                );
+                let color =
+                    disco_ui_color(elapsed, (column as f32 * 0.08 + row as f32 * 0.21).fract());
+                let alpha = if (column + row + (t * 4.0) as usize).is_multiple_of(3) {
+                    105
+                } else {
+                    48
+                };
+                painter.rect_filled(
+                    tile,
+                    2,
+                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha),
+                );
+            }
+        }
+
+        for index in 0..110 {
+            let seed = ((index * 73 + 19) % 997) as f32 / 997.0;
+            let speed = 0.08 + ((index * 41 + 7) % 100) as f32 / 720.0;
+            let travel = (seed + t * speed).fract();
+            let direction = if index % 2 == 0 { -1.0 } else { 1.0 };
+            let spread = direction * travel * rect.width() * (0.14 + seed * 0.34);
+            let sway = (t * (0.8 + seed) + index as f32 * 0.73).sin() * 18.0;
+            let center = Pos2::new(
+                ball_center.x + spread + sway,
+                ball_center.y + 24.0 + travel * (rect.bottom() - ball_center.y + 30.0),
+            );
+            let angle = t * (1.1 + seed * 2.2) + index as f32;
+            let length = 5.0 + ((index * 17) % 9) as f32;
+            let delta = egui::vec2(angle.cos() * length, angle.sin() * length);
+            let color = disco_ui_color(elapsed, seed);
+            painter.line_segment(
+                [center - delta, center + delta],
+                Stroke::new(
+                    2.0 + (index % 3) as f32 * 0.7,
+                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 220),
+                ),
+            );
+        }
+
+        for index in 0..56 {
+            let orbit_angle = t * (0.42 + (index % 5) as f32 * 0.08) + index as f32 * 2.399_963;
+            let orbit_radius = 72.0 + (index % 7) as f32 * 31.0;
+            let center = Pos2::new(
+                ball_center.x + orbit_angle.cos() * orbit_radius,
+                ball_center.y + orbit_angle.sin() * orbit_radius * 0.62,
+            );
+            let pulse = ((t * 2.2 + index as f32 * 1.7).sin() * 0.5 + 0.5).powi(3);
+            let radius = 3.0 + pulse * 8.0;
+            let color = disco_ui_color(elapsed, index as f32 / 56.0);
+            let color = Color32::from_rgba_unmultiplied(
+                color.r(),
+                color.g(),
+                color.b(),
+                (55.0 + pulse * 155.0) as u8,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x - radius, center.y),
+                    Pos2::new(center.x + radius, center.y),
+                ],
+                Stroke::new(1.3, color),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x, center.y - radius),
+                    Pos2::new(center.x, center.y + radius),
+                ],
+                Stroke::new(1.3, color),
+            );
+        }
+
+        for index in 0..52 {
+            let x = rect.left() + ((index * 149 + 43) % 1021) as f32 / 1021.0 * rect.width();
+            let y = rect.top() + ((index * 263 + 71) % 1013) as f32 / 1013.0 * rect.height();
+            let pulse = ((t * 2.5 + index as f32 * 1.31).sin() * 0.5 + 0.5).powi(5);
+            let radius = 1.5 + pulse * 7.5;
+            let center = Pos2::new(x, y);
+            let color = disco_ui_color(elapsed, index as f32 / 52.0);
+            let color = Color32::from_rgba_unmultiplied(
+                color.r(),
+                color.g(),
+                color.b(),
+                (60.0 + pulse * 190.0) as u8,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x - radius, center.y),
+                    Pos2::new(center.x + radius, center.y),
+                ],
+                Stroke::new(1.5, color),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x, center.y - radius),
+                    Pos2::new(center.x, center.y + radius),
+                ],
+                Stroke::new(1.5, color),
+            );
+        }
+
+        paint_disco_ball(&painter, rect, elapsed, activation_elapsed);
+    }
+}
+
 fn preview_texture_size(frame: &Frame, maximum: Vec2, pixels_per_point: f32) -> [usize; 2] {
     let maximum_width =
         ((maximum.x * pixels_per_point).round().max(1.0) as u32).min(MAX_PREVIEW_TEXTURE_WIDTH);
@@ -4916,6 +5654,49 @@ mod tests {
         assert_eq!(repaint_interval(false), HIDDEN_REFRESH);
         assert_eq!(VISIBLE_REFRESH, Duration::from_nanos(1_000_000_000 / 30));
         assert_eq!(HIDDEN_REFRESH, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn active_disco_interface_renders_ball_beams_particles_and_borders() {
+        let context = egui::Context::default();
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                paint_disco_interface(
+                    ui.ctx(),
+                    screen_rect,
+                    Duration::from_millis(750),
+                    Duration::from_millis(750),
+                    true,
+                );
+            },
+        );
+        assert!(
+            output.shapes.len() >= 600,
+            "the active disco overlay should include dense reflections and effects"
+        );
+    }
+
+    #[test]
+    fn disco_ball_lowers_from_above_the_window_and_settles_on_screen() {
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        let hidden = disco_ball_center(rect, Duration::ZERO);
+        let settled = disco_ball_center(rect, Duration::from_secs(2));
+        assert!(hidden.y < rect.top());
+        assert!((settled.y - (rect.top() + 158.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn disco_flash_envelope_produces_double_hits_and_quiet_gaps() {
+        assert_eq!(disco_flash_envelope(Duration::ZERO), 1.0);
+        assert_eq!(disco_flash_envelope(Duration::from_millis(180)), 0.0);
+        assert!(disco_flash_envelope(Duration::from_millis(270)) > 0.6);
+        assert_eq!(disco_flash_envelope(Duration::from_millis(600)), 0.0);
+        assert_eq!(disco_flash_envelope(Duration::from_secs(3)), 1.0);
     }
 
     #[test]
@@ -5353,6 +6134,27 @@ mod tests {
         assert!(snapshot.previews.final_output.is_some());
         assert_eq!(snapshot.video_devices.len(), 2);
         assert_eq!(snapshot.monitors.len(), 2);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn ui_preview_disco_state_stays_enabled_until_toggled_off() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            AppConfig::default(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        )
+        .with_ui_preview(UiPreviewRequest {
+            target: UiPreviewTarget::Settings(SettingsTab::Diagnostics),
+        });
+
+        assert!(!app.snapshot().disco_enabled);
+        app.toggle_disco();
+        assert!(app.snapshot().disco_enabled);
+        assert!(app.snapshot().disco_enabled);
+        app.toggle_disco();
+        assert!(!app.snapshot().disco_enabled);
     }
 
     #[test]
@@ -6071,6 +6873,32 @@ mod tests {
             &primary,
             click_input(0.1, egui::PointerButton::Primary)
         ));
+    }
+
+    #[test]
+    fn five_primary_diagnostics_clicks_toggle_disco_without_mixed_sequences() {
+        let start = Instant::now();
+        let mut gesture = DiscoDiagnosticsGesture::default();
+        for click in 0..4 {
+            assert!(!gesture.register_primary_click(start + Duration::from_millis(click * 200)));
+        }
+        assert!(gesture.register_primary_click(start + Duration::from_millis(800)));
+
+        let mut slow_gesture = DiscoDiagnosticsGesture::default();
+        for click in 0..5 {
+            assert!(!slow_gesture.register_primary_click(
+                start + Duration::from_secs(3) + Duration::from_millis(click * 800)
+            ));
+        }
+
+        for click in 0..4 {
+            assert!(!gesture.register_primary_click(
+                start + Duration::from_secs(4) + Duration::from_millis(click * 100)
+            ));
+        }
+        // A click on another control resets the hidden Diagnostics sequence.
+        gesture.reset();
+        assert!(!gesture.register_primary_click(start + Duration::from_secs(5)));
     }
 
     #[test]

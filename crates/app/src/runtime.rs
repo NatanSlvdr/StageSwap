@@ -1,8 +1,8 @@
 use stageswap_core::{
     AppConfig, AppSnapshot, Command, DebouncedDetector, DetectorSettings, DeviceState, Frame,
-    FrameCompositor, FrameMetadata, FramePacer, GrayImage, PIPELINE_FPS, RunState, Size, Source,
-    SourceAvailability, TransitionController, bgra_to_gray, decide, image_similarity, off_frame,
-    resize_bgra_to_gray, resize_bilinear,
+    FrameCompositor, FrameMetadata, FramePacer, GrayImage, PIPELINE_FPS, PIPELINE_SIZE, RunState,
+    Size, Source, SourceAvailability, TransitionController, bgra_to_gray, decide, image_similarity,
+    off_frame, resize_bgra_to_gray, resize_bilinear,
 };
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -37,6 +37,180 @@ const BLACK_PIXEL_PERCENT: usize = 99;
 const BLACK_SCAN_CONFIRMATIONS: u8 = 2;
 #[cfg(any(windows, test))]
 const AUTOMATIC_SCREEN_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
+const DISCO_PALETTE_BGRA: [[u8; 3]; 6] = [
+    [190, 28, 255],
+    [255, 176, 24],
+    [82, 245, 36],
+    [34, 224, 255],
+    [255, 70, 110],
+    [214, 38, 255],
+];
+
+struct DiscoEffect {
+    x_band: Vec<u8>,
+    x_boost: Vec<u8>,
+    y_boost: Vec<u8>,
+}
+
+impl DiscoEffect {
+    fn new(size: Size) -> Self {
+        Self {
+            x_band: vec![0; size.width as usize],
+            x_boost: vec![0; size.width as usize],
+            y_boost: vec![0; size.height as usize],
+        }
+    }
+
+    fn apply(&mut self, source: &Frame, elapsed: Duration) -> Frame {
+        let width = source.size.width as usize;
+        let height = source.size.height as usize;
+        self.x_band.resize(width, 0);
+        self.x_boost.resize(width, 0);
+        self.y_boost.resize(height, 0);
+
+        let frame_phase = usize::try_from(elapsed.as_millis() / 33).unwrap_or(usize::MAX);
+        let palette_len = DISCO_PALETTE_BGRA.len();
+        let horizontal_offset = frame_phase.wrapping_mul(13) % width.max(1);
+        let horizontal_sweep = reflected_position(frame_phase.wrapping_mul(23), width);
+        let vertical_sweep = reflected_position(frame_phase.wrapping_mul(11), height);
+        let horizontal_radius = (width / 7).max(1);
+        let vertical_radius = (height / 6).max(1);
+
+        for x in 0..width {
+            self.x_band[x] = ((((x + horizontal_offset) % width.max(1)) * palette_len
+                / width.max(1)
+                + frame_phase / 18)
+                % palette_len) as u8;
+            self.x_boost[x] = beam_boost(x, horizontal_sweep, horizontal_radius);
+        }
+        for y in 0..height {
+            self.y_boost[y] = beam_boost(y, vertical_sweep, vertical_radius);
+        }
+
+        let pulse_position = frame_phase % 60;
+        let pulse = pulse_position.min(60 - pulse_position) as u16;
+        let base_strength = 76_u16 + pulse * 2;
+        let flash_lift = disco_flash_lift(frame_phase);
+        let mut pixels = Vec::with_capacity(source.pixels().len());
+        pixels.extend_from_slice(source.pixels());
+        for y in 0..height {
+            let row_shift = (y * palette_len / height.max(1) + frame_phase / 12) % palette_len;
+            let row_offset = y * source.stride as usize;
+            for x in 0..width {
+                let offset = row_offset + x * 4;
+                let palette =
+                    DISCO_PALETTE_BGRA[(self.x_band[x] as usize + row_shift) % palette_len];
+                let strength =
+                    (base_strength + u16::from(self.x_boost[x]) + u16::from(self.y_boost[y]))
+                        .min(188);
+                let inverse = 256 - strength;
+                for channel in 0..3 {
+                    let tinted = ((u16::from(pixels[offset + channel]) * inverse
+                        + u16::from(palette[channel]) * strength
+                        + 128)
+                        >> 8) as u8;
+                    pixels[offset + channel] = (u16::from(tinted)
+                        + ((255 - u16::from(tinted)) * flash_lift + 128) / 256)
+                        .min(255) as u8;
+                }
+            }
+        }
+
+        paint_disco_sparkles(
+            &mut pixels,
+            source.stride as usize,
+            width,
+            height,
+            frame_phase / 3,
+        );
+        Frame::new(
+            pixels.into(),
+            source.size,
+            source.stride,
+            source.sequence,
+            source.timestamp_100ns,
+            source.received_at,
+        )
+        .expect("disco output preserves the source frame layout")
+    }
+}
+
+fn reflected_position(phase: usize, length: usize) -> usize {
+    if length <= 1 {
+        return 0;
+    }
+    let span = length * 2 - 2;
+    let position = phase % span;
+    if position < length {
+        position
+    } else {
+        span - position
+    }
+}
+
+fn beam_boost(position: usize, center: usize, radius: usize) -> u8 {
+    let distance = position.abs_diff(center);
+    if distance >= radius {
+        0
+    } else {
+        (((radius - distance) * 48) / radius) as u8
+    }
+}
+
+fn disco_flash_lift(frame_phase: usize) -> u16 {
+    let beat = match frame_phase % 36 {
+        0 => 30,
+        1 => 20,
+        2 => 9,
+        8 => 22,
+        9 => 8,
+        _ => 0,
+    };
+    let major = match frame_phase % 90 {
+        0 => 38,
+        1 => 26,
+        2 => 14,
+        3 => 6,
+        _ => 0,
+    };
+    beat.max(major)
+}
+
+fn paint_disco_sparkles(
+    pixels: &mut [u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    phase: usize,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    for index in 0..18_usize {
+        let seed = phase
+            .wrapping_mul(1_103_515_245)
+            .wrapping_add(index.wrapping_mul(12_345))
+            .wrapping_add(0x9e37_79b9);
+        let x = seed % width;
+        let y = seed.rotate_left(13) % height;
+        let radius = 3 + seed.rotate_left(7) % 5;
+        for distance in 0..=radius {
+            let intensity = 224_u8.saturating_sub((distance * 18) as u8);
+            for (sparkle_x, sparkle_y) in [
+                (x.saturating_sub(distance), y),
+                ((x + distance).min(width - 1), y),
+                (x, y.saturating_sub(distance)),
+                (x, (y + distance).min(height - 1)),
+            ] {
+                let offset = sparkle_y * stride + sparkle_x * 4;
+                pixels[offset] = pixels[offset].max(intensity);
+                pixels[offset + 1] = pixels[offset + 1].max(intensity);
+                pixels[offset + 2] = pixels[offset + 2].max(intensity);
+            }
+        }
+    }
+}
 
 pub struct RuntimeHandle {
     commands: SyncSender<Command>,
@@ -263,6 +437,7 @@ struct RuntimeState {
     snapshot: AppSnapshot,
     transition: TransitionController,
     compositor: FrameCompositor,
+    disco: Option<DiscoEffect>,
     webcam_fps: SourceFpsTracker,
     screen_fps: SourceFpsTracker,
     output_fps: OutputFpsTracker,
@@ -309,6 +484,7 @@ impl RuntimeState {
             config,
             transition,
             compositor: FrameCompositor::default(),
+            disco: None,
             webcam_fps: SourceFpsTracker::default(),
             screen_fps: SourceFpsTracker::default(),
             output_fps: OutputFpsTracker::default(),
@@ -341,6 +517,17 @@ impl RuntimeState {
                 self.snapshot.run_state = RunState::Stopped;
                 self.show_off_output(Instant::now());
                 self.record("Automation stopped");
+            }
+            Command::ToggleDisco => {
+                if self.disco.is_some() {
+                    self.disco = None;
+                    self.snapshot.disco_enabled = false;
+                    self.record("Disco mode disabled");
+                } else {
+                    self.disco = Some(DiscoEffect::new(PIPELINE_SIZE));
+                    self.snapshot.disco_enabled = true;
+                    self.record("Disco mode enabled");
+                }
             }
             Command::SetMode(mode) => {
                 self.snapshot.mode = mode;
@@ -421,6 +608,11 @@ impl RuntimeState {
                 received_at: now,
             },
         );
+        let output = if let Some(disco) = self.disco.as_mut() {
+            disco.apply(&output, now.saturating_duration_since(self.started_at))
+        } else {
+            output
+        };
         self.snapshot.previews.final_output = Some(Arc::new(output));
     }
 
@@ -1448,6 +1640,55 @@ mod tests {
     }
 
     #[test]
+    fn disco_effect_changes_only_rgb_and_preserves_frame_metadata() {
+        let now = Instant::now();
+        let source = Frame::placeholder(Size::new(32, 18), 0xff30_6090, 17, 42, now);
+        let mut effect = DiscoEffect::new(source.size);
+
+        let first = effect.apply(&source, Duration::ZERO);
+        let later = effect.apply(&source, Duration::from_millis(990));
+
+        assert_eq!(first.size, source.size);
+        assert_eq!(first.stride, source.stride);
+        assert_eq!(first.sequence, source.sequence);
+        assert_eq!(first.timestamp_100ns, source.timestamp_100ns);
+        assert_eq!(first.received_at, source.received_at);
+        assert!(first.pixels().chunks_exact(4).all(|pixel| pixel[3] == 0xff));
+        assert!(later.pixels().chunks_exact(4).all(|pixel| pixel[3] == 0xff));
+        assert_ne!(first.pixels(), source.pixels());
+        assert_ne!(later.pixels(), first.pixels());
+    }
+
+    #[test]
+    fn disco_flash_pattern_has_primary_secondary_and_major_hits() {
+        assert_eq!(disco_flash_lift(0), 38);
+        assert_eq!(disco_flash_lift(1), 26);
+        assert_eq!(disco_flash_lift(8), 22);
+        assert_eq!(disco_flash_lift(9), 8);
+        assert_eq!(disco_flash_lift(12), 0);
+        assert_eq!(disco_flash_lift(36), 30);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn disco_effect_keeps_release_720p_processing_inside_the_frame_budget() {
+        let now = Instant::now();
+        let source = Frame::placeholder(PIPELINE_SIZE, 0xff30_6090, 1, 0, now);
+        let mut effect = DiscoEffect::new(PIPELINE_SIZE);
+        let started_at = Instant::now();
+        for sequence in 0..300 {
+            std::hint::black_box(effect.apply(
+                &source,
+                Duration::from_nanos(sequence * 1_000_000_000 / u64::from(PIPELINE_FPS)),
+            ));
+        }
+        assert!(
+            started_at.elapsed() <= Duration::from_secs(10),
+            "300 disco frames exceeded the 30 fps processing budget"
+        );
+    }
+
+    #[test]
     fn source_fps_tracker_measures_capture_rate_and_reports_stalls() {
         let start = Instant::now();
         let mut tracker = SourceFpsTracker::default();
@@ -1707,6 +1948,44 @@ mod tests {
         assert_eq!(snapshot.mode, OutputMode::ForceScreen);
         assert_eq!(snapshot.actual_output, Source::Placeholder);
         assert!(snapshot.previews.final_output.is_some());
+    }
+
+    #[test]
+    fn disco_mode_is_session_only_and_never_decorates_the_stopped_output() {
+        let runtime = RuntimeHandle::spawn(AppConfig {
+            start_automatically: false,
+            ..AppConfig::default()
+        });
+        assert!(!runtime.snapshot().disco_enabled);
+
+        runtime.send(Command::ToggleDisco).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let enabled = loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.disco_enabled {
+                break snapshot;
+            }
+            assert!(Instant::now() < deadline, "disco mode was not enabled");
+            thread::yield_now();
+        };
+        assert_eq!(enabled.run_state, RunState::Stopped);
+        assert_eq!(
+            enabled
+                .previews
+                .final_output
+                .expect("stopped output is present")
+                .pixels(),
+            stageswap_core::off_frame_pixels().as_ref()
+        );
+
+        runtime.send(Command::ToggleDisco).unwrap();
+        loop {
+            if !runtime.snapshot().disco_enabled {
+                break;
+            }
+            assert!(Instant::now() < deadline, "disco mode was not disabled");
+            thread::yield_now();
+        }
     }
 
     #[test]
