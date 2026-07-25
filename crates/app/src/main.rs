@@ -1408,6 +1408,14 @@ impl SwitcherApp {
     fn general_settings(&mut self, ui: &mut egui::Ui) {
         settings_section_heading(
             ui,
+            UiIcon::Route,
+            "How StageSwap works",
+            "StageSwap publishes one virtual-camera feed. Camera and Display force that source; Automatic shows Camera while the selected display matches the reference and Display when it changes. Stopping automation shows the StageSwap off screen, while hiding the dashboard can leave capture and output running in the tray.",
+        );
+
+        settings_section_gap(ui);
+        settings_section_heading(
+            ui,
             UiIcon::Play,
             "Startup",
             "These choices take effect the next time Windows or the app starts.",
@@ -1430,31 +1438,46 @@ impl SwitcherApp {
                     .push(format!("Could not start installation: {error}"));
             }
         } else {
-            settings_toggle_row(
+            let result = start_with_windows_result(self.config.start_with_windows);
+            settings_explained_toggle_row(
                 ui,
                 &mut self.config.start_with_windows,
                 "Start with Windows",
                 "Launch automatically after you sign in to Windows.",
+                result,
             );
         }
         #[cfg(not(windows))]
-        settings_toggle_row(
-            ui,
-            &mut self.config.start_with_windows,
-            "Start with Windows",
-            "Launch automatically after you sign in to Windows.",
-        );
-        settings_toggle_row(
+        {
+            let result = start_with_windows_result(self.config.start_with_windows);
+            settings_explained_toggle_row(
+                ui,
+                &mut self.config.start_with_windows,
+                "Start with Windows",
+                "Launch automatically after you sign in to Windows.",
+                result,
+            );
+        }
+        let minimized_result =
+            start_minimized_result(self.config.start_minimized, self.config.start_with_windows);
+        settings_explained_toggle_row(
             ui,
             &mut self.config.start_minimized,
             "Start minimized",
             "Open in the system tray instead of showing the main window.",
+            minimized_result,
         );
-        settings_toggle_row(
+        let automatic_result = start_automatically_result(
+            self.config.start_automatically,
+            self.config.start_minimized,
+            self.config.output_mode,
+        );
+        settings_explained_toggle_row(
             ui,
             &mut self.config.start_automatically,
             "Start automation on launch",
             "Begin monitoring and switching after the app is ready.",
+            &automatic_result,
         );
 
         settings_section_gap(ui);
@@ -1464,17 +1487,23 @@ impl SwitcherApp {
             "Window behavior",
             "Control what happens when you close or fully exit the app.",
         );
-        settings_toggle_row(
+        let close_result =
+            close_to_tray_result(self.config.close_to_tray, self.config.confirm_exit);
+        settings_explained_toggle_row(
             ui,
             &mut self.config.close_to_tray,
             "Close window to tray",
             "Keep capture and virtual-camera output running after closing the window.",
+            close_result,
         );
-        settings_toggle_row(
+        let confirm_result =
+            confirm_exit_result(self.config.confirm_exit, self.config.close_to_tray);
+        settings_explained_toggle_row(
             ui,
             &mut self.config.confirm_exit,
             "Confirm before exit",
             "Ask before stopping the app and its active capture pipeline.",
+            confirm_result,
         );
 
         settings_section_gap(ui);
@@ -1511,7 +1540,7 @@ impl SwitcherApp {
             SettingsSection {
                 icon: UiIcon::Camera,
                 title: "Camera input",
-                description: "Preview and choose the camera used whenever webcam output is active.",
+                description: "This camera is used by Camera mode and whenever Automatic mode selects Camera. StageSwap publishes it in the fixed 1280×720 virtual-camera frame.",
             },
             SettingsPreview {
                 kind: PreviewKind::Webcam,
@@ -1570,11 +1599,13 @@ impl SwitcherApp {
                         .color(Color32::from_rgb(126, 134, 148)),
                 );
                 ui.add_space(8.0);
-                settings_toggle_row(
+                let crop_result = webcam_crop_result(app.config.crop_webcam_to_16_9);
+                settings_explained_toggle_row(
                     ui,
                     &mut app.config.crop_webcam_to_16_9,
                     "Crop webcam to 16:9",
-                    "Zoom and center the camera image so it fills the 16:9 frame.",
+                    "Choose whether non-16:9 camera signals are cropped to fill the output frame.",
+                    crop_result,
                 );
             },
         );
@@ -1591,7 +1622,7 @@ impl SwitcherApp {
             SettingsSection {
                 icon: UiIcon::Monitor,
                 title: "Screen capture",
-                description: "Preview and choose the display Automatic mode watches.",
+                description: "This display is used by Display mode and watched by Automatic mode for reference changes.",
             },
             SettingsPreview {
                 kind: PreviewKind::Screen,
@@ -1627,18 +1658,37 @@ impl SwitcherApp {
                             }
                         }
                     });
-                ui.add_space(8.0);
-                settings_toggle_row(
+                ui.add_space(12.0);
+                settings_group_label(ui, "Capture behavior");
+                let cursor_result = cursor_visibility_result(app.config.cursor_visible);
+                settings_explained_toggle_row(
                     ui,
                     &mut app.config.cursor_visible,
                     "Include mouse cursor",
-                    "Also add it to new references.",
+                    "Choose whether screen capture includes the pointer. Existing and imported references are not changed.",
+                    cursor_result,
                 );
-                settings_toggle_row(
+
+                ui.add_space(12.0);
+                settings_group_label(ui, "Automatic discovery and recovery");
+                let discovery_result =
+                    automatic_display_discovery_result(app.config.automatic_monitor_rescans);
+                settings_explained_toggle_row(
                     ui,
                     &mut app.config.automatic_monitor_rescans,
-                    "Automatic display rescans",
-                    "Find the reference display at startup, after reference changes, and every 30 seconds. Manual Rescan remains available.",
+                    "Find reference display automatically",
+                    "Search connected displays for the saved reference and select the matching display.",
+                    discovery_result,
+                );
+                let recovery_result = automatic_screen_recovery_result(
+                    app.config.automatic_screen_capture_recovery,
+                );
+                settings_explained_toggle_row(
+                    ui,
+                    &mut app.config.automatic_screen_capture_recovery,
+                    "Recover black screen capture automatically",
+                    "Check the selected display for a persistently black capture without scanning other displays.",
+                    recovery_result,
                 );
             },
         );
@@ -1652,7 +1702,7 @@ impl SwitcherApp {
                 icon: UiIcon::Target,
                 title: "Reference matching",
                 description:
-                    "Automatic mode shows the webcam while the screen resembles this reference.",
+                    "Reference matches → Camera. Reference changes → Display. Without a usable reference, Automatic mode stays on Camera.",
             },
             SettingsPreview {
                 kind: PreviewKind::Reference,
@@ -1667,6 +1717,17 @@ impl SwitcherApp {
                     ui.add_space(8.0);
                     settings_detection_status(ui, snapshot.detection);
                 });
+                ui.add_space(7.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "StageSwap compares four times per second. It confirms five matches or three mismatches before switching, then uses a reversible 0.5-second fade.",
+                        )
+                        .size(10.0)
+                        .color(Color32::from_rgb(126, 134, 148)),
+                    )
+                    .wrap(),
+                );
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     let geometry = reference_control_geometry(
@@ -1714,7 +1775,9 @@ impl SwitcherApp {
                     });
                 });
                 ui.label(
-                    RichText::new("Higher values require a closer visual match.")
+                    RichText::new(
+                        "Sets the minimum similarity used by Automatic mode and reference-display discovery.",
+                    )
                         .size(10.5)
                         .color(Color32::from_rgb(126, 134, 148)),
                 );
@@ -1726,6 +1789,13 @@ impl SwitcherApp {
                     ui,
                     &mut app.config.similarity_threshold,
                     geometry.slider_width,
+                );
+                let explanation =
+                    match_strictness_explanation(app.config.similarity_threshold);
+                ui.add_space(3.0);
+                settings_result_text(
+                    ui,
+                    &format!("{} — {}", explanation.level, explanation.effect),
                 );
             },
         );
@@ -1748,13 +1818,23 @@ impl SwitcherApp {
             snapshot.virtual_camera_state,
         );
         settings_detection_status(ui, snapshot.detection);
+        ui.add_space(6.0);
+        settings_result_text(
+            ui,
+            component_health_guidance(
+                snapshot.webcam_state,
+                snapshot.screen_state,
+                snapshot.virtual_camera_state,
+                snapshot.detection,
+            ),
+        );
 
         settings_section_gap(ui);
         settings_section_heading(
             ui,
             UiIcon::Wrench,
             "Recovery",
-            "Reconnect one component, rescan displays, or restart the complete pipeline.",
+            "Rescan only searches for the reference display. Restart actions reconnect the named component without changing saved settings.",
         );
         ui.horizontal_wrapped(|ui| {
             if icon_button(
@@ -1775,6 +1855,17 @@ impl SwitcherApp {
                 }
             }
         });
+        ui.add_space(7.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Restart webcam reconnects camera input. Restart screen capture reconnects the selected display. Restart virtual camera reconnects meeting-app output. Restart all performs all three actions.",
+                )
+                .size(10.0)
+                .color(Color32::from_rgb(126, 134, 148)),
+            )
+            .wrap(),
+        );
 
         settings_section_gap(ui);
         settings_section_heading(
@@ -1833,7 +1924,7 @@ impl SwitcherApp {
             ui,
             UiIcon::Folder,
             "Storage and logs",
-            "Configuration, reference images, and logs remain on this computer.",
+            "Settings, references, and diagnostic logs stay on this computer and are never uploaded. Logs are retained for 14 days.",
         );
         settings_info_row(
             ui,
@@ -2484,20 +2575,246 @@ fn settings_section_gap(ui: &mut egui::Ui) {
     ui.add_space(24.0);
 }
 
+fn settings_group_label(ui: &mut egui::Ui, label: &str) {
+    ui.label(
+        RichText::new(label)
+            .size(11.5)
+            .strong()
+            .color(Color32::from_rgb(190, 196, 207)),
+    );
+    ui.add_space(3.0);
+}
+
+fn settings_result_text(ui: &mut egui::Ui, text: &str) -> Rect {
+    ui.add(
+        egui::Label::new(
+            RichText::new(text)
+                .size(10.0)
+                .color(Color32::from_rgb(145, 165, 199)),
+        )
+        .wrap(),
+    )
+    .rect
+}
+
+const fn output_mode_name(mode: OutputMode) -> &'static str {
+    match mode {
+        OutputMode::Automatic => "Automatic",
+        OutputMode::ForceCamera => "Camera",
+        OutputMode::ForceScreen => "Display",
+    }
+}
+
+const fn start_with_windows_result(enabled: bool) -> &'static str {
+    if enabled {
+        "Current: StageSwap will launch automatically after you sign in."
+    } else {
+        "Current: StageSwap will launch only when you open it."
+    }
+}
+
+const fn start_minimized_result(enabled: bool, start_with_windows: bool) -> &'static str {
+    match (enabled, start_with_windows) {
+        (true, true) => {
+            "Current: At sign-in, StageSwap opens in the tray without showing the dashboard."
+        }
+        (true, false) => {
+            "Current: When you open StageSwap, it starts in the tray without showing the dashboard."
+        }
+        (false, true) => "Current: At sign-in, StageSwap opens with the dashboard visible.",
+        (false, false) => "Current: When you open StageSwap, the dashboard is shown.",
+    }
+}
+
+fn start_automatically_result(
+    enabled: bool,
+    start_minimized: bool,
+    output_mode: OutputMode,
+) -> String {
+    if enabled {
+        format!(
+            "Current: Automation starts in {} mode{}.",
+            output_mode_name(output_mode),
+            if start_minimized {
+                " while StageSwap is in the tray"
+            } else {
+                " after the dashboard opens"
+            }
+        )
+    } else {
+        "Current: The virtual camera stays on the StageSwap off screen until you start automation."
+            .into()
+    }
+}
+
+const fn close_to_tray_result(close_to_tray: bool, confirm_exit: bool) -> &'static str {
+    match (close_to_tray, confirm_exit) {
+        (true, _) => {
+            "Current: Closing the dashboard hides it in the tray; capture and output keep running."
+        }
+        (false, true) => {
+            "Current: Closing the dashboard asks before exiting and stopping the capture pipeline."
+        }
+        (false, false) => {
+            "Current: Closing the dashboard immediately exits StageSwap and stops its output."
+        }
+    }
+}
+
+const fn confirm_exit_result(confirm_exit: bool, close_to_tray: bool) -> &'static str {
+    match (confirm_exit, close_to_tray) {
+        (true, true) => {
+            "Current: Closing hides the dashboard; choosing Exit from the tray asks for confirmation."
+        }
+        (true, false) => {
+            "Current: Closing the dashboard or choosing Exit asks before StageSwap stops."
+        }
+        (false, true) => {
+            "Current: Closing hides the dashboard; choosing Exit from the tray stops immediately."
+        }
+        (false, false) => {
+            "Current: Closing the dashboard or choosing Exit stops StageSwap immediately."
+        }
+    }
+}
+
+const fn webcam_crop_result(enabled: bool) -> &'static str {
+    if enabled {
+        "Current: Non-16:9 camera signals are centered and cropped; native 16:9 signals are unchanged."
+    } else {
+        "Current: StageSwap keeps the camera's full view without zooming or cropping it."
+    }
+}
+
+const fn cursor_visibility_result(enabled: bool) -> &'static str {
+    if enabled {
+        "Current: The cursor appears in Display output and in references captured from now on."
+    } else {
+        "Current: The cursor is hidden from Display output and references captured from now on."
+    }
+}
+
+const fn automatic_display_discovery_result(enabled: bool) -> &'static str {
+    if enabled {
+        "Current: StageSwap searches at launch, when Settings opens, after reference changes, and every 30 seconds; the same display must win twice."
+    } else {
+        "Current: StageSwap keeps the selected display until you choose one or use Rescan displays."
+    }
+}
+
+const fn automatic_screen_recovery_result(enabled: bool) -> &'static str {
+    if enabled {
+        "Current: Every 30 seconds, StageSwap checks the selected display and restarts capture after two black checks. Intentionally black content can trigger recovery."
+    } else {
+        "Current: Black capture is not restarted automatically; use Restart screen capture in Diagnostics."
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MatchStrictnessExplanation {
+    level: &'static str,
+    effect: &'static str,
+}
+
+fn match_strictness_explanation(value: f64) -> MatchStrictnessExplanation {
+    let percentage = (value * 100.0).round();
+    if percentage >= 99.0 {
+        MatchStrictnessExplanation {
+            level: "Very strict",
+            effect: "Small visual changes can switch Automatic mode to Display.",
+        }
+    } else if percentage >= 97.0 {
+        MatchStrictnessExplanation {
+            level: "Balanced",
+            effect: "Minor rendering or cursor differences can still match the reference.",
+        }
+    } else if percentage >= 90.0 {
+        MatchStrictnessExplanation {
+            level: "Forgiving",
+            effect: "Larger differences may still count as the reference.",
+        }
+    } else {
+        MatchStrictnessExplanation {
+            level: "Very forgiving",
+            effect: "Meaningful changes may still be treated as a match.",
+        }
+    }
+}
+
+const fn component_health_guidance(
+    webcam: DeviceState,
+    screen: DeviceState,
+    virtual_camera: DeviceState,
+    detection: DetectionState,
+) -> &'static str {
+    if matches!(webcam, DeviceState::Failed | DeviceState::Unavailable) {
+        "The webcam needs attention. Choose or refresh the camera in Webcam, then restart it here if needed."
+    } else if matches!(screen, DeviceState::Failed | DeviceState::Unavailable) {
+        "Screen capture needs attention. Choose a display in Screen, then restart capture here if needed."
+    } else if matches!(
+        virtual_camera,
+        DeviceState::Failed | DeviceState::Unavailable
+    ) {
+        "The virtual camera needs attention. Restart it here, then reselect StageSwap in the meeting app if necessary."
+    } else if matches!(webcam, DeviceState::Initializing)
+        || matches!(screen, DeviceState::Initializing)
+        || matches!(virtual_camera, DeviceState::Initializing)
+    {
+        "One or more components are still starting. Wait briefly before using a recovery action."
+    } else {
+        match detection {
+            DetectionState::ReferenceMissing => {
+                "The pipeline is ready, but Automatic mode needs a captured or imported reference."
+            }
+            DetectionState::Unknown => {
+                "The components are ready; StageSwap is waiting for enough reference checks to decide."
+            }
+            DetectionState::Matching => {
+                "The components are ready and the selected display currently matches the reference."
+            }
+            DetectionState::NotMatching => {
+                "The components are ready and the selected display currently differs from the reference."
+            }
+        }
+    }
+}
+
 fn settings_toggle_row(
     ui: &mut egui::Ui,
     value: &mut bool,
     title: &str,
     description: &str,
 ) -> SettingsToggleLayout {
+    settings_toggle_row_with_result(ui, value, title, description, None)
+}
+
+fn settings_explained_toggle_row(
+    ui: &mut egui::Ui,
+    value: &mut bool,
+    title: &str,
+    description: &str,
+    result: &str,
+) -> SettingsToggleLayout {
+    settings_toggle_row_with_result(ui, value, title, description, Some(result))
+}
+
+fn settings_toggle_row_with_result(
+    ui: &mut egui::Ui,
+    value: &mut bool,
+    title: &str,
+    description: &str,
+    result: Option<&str>,
+) -> SettingsToggleLayout {
     const TEXT_CONTROL_GAP: f32 = 12.0;
     const CONTROL_WIDTH: f32 = 83.0;
     const VERTICAL_PADDING: f32 = 7.0;
     const TEXT_GAP: f32 = 3.0;
+    const RESULT_GAP: f32 = 4.0;
     let width = ui.available_width();
     let text_width = (width - CONTROL_WIDTH - TEXT_CONTROL_GAP).max(80.0);
     let title_color = Color32::from_rgb(224, 228, 235);
     let description_color = Color32::from_rgb(126, 134, 148);
+    let result_color = Color32::from_rgb(145, 165, 199);
     let title_galley =
         ui.painter()
             .layout_no_wrap(title.to_owned(), FontId::proportional(12.5), title_color);
@@ -2507,8 +2824,20 @@ fn settings_toggle_row(
         description_color,
         text_width,
     );
+    let result_galley = result.map(|result| {
+        ui.painter().layout(
+            result.to_owned(),
+            FontId::proportional(10.0),
+            result_color,
+            text_width,
+        )
+    });
     let title_height = title_galley.size().y;
-    let text_height = title_height + TEXT_GAP + description_galley.size().y;
+    let description_height = description_galley.size().y;
+    let result_height = result_galley
+        .as_ref()
+        .map_or(0.0, |galley| RESULT_GAP + galley.size().y);
+    let text_height = title_height + TEXT_GAP + description_height + result_height;
     let row_height = (text_height + VERTICAL_PADDING * 2.0).max(52.0);
     let (row, response) = ui.allocate_exact_size(egui::vec2(width, row_height), Sense::click());
     if response.clicked() {
@@ -2531,6 +2860,15 @@ fn settings_toggle_row(
     let description_rect = Rect::from_min_size(description_position, description_galley.size());
     ui.painter()
         .galley(description_position, description_galley, description_color);
+    let result_rect = result_galley.map(|galley| {
+        let result_position = Pos2::new(
+            row.left(),
+            description_position.y + description_height + RESULT_GAP,
+        );
+        let rect = Rect::from_min_size(result_position, galley.size());
+        ui.painter().galley(result_position, galley, result_color);
+        rect
+    });
     let (off, on) = settings_switch_colors();
     ui.painter().rect_filled(
         geometry.track,
@@ -2571,6 +2909,7 @@ fn settings_toggle_row(
     SettingsToggleLayout {
         row,
         description: description_rect,
+        result: result_rect,
         state: geometry.state,
         track: geometry.track,
     }
@@ -2581,6 +2920,7 @@ fn settings_toggle_row(
 struct SettingsToggleLayout {
     row: Rect,
     description: Rect,
+    result: Option<Rect>,
     state: Rect,
     track: Rect,
 }
@@ -4171,21 +4511,23 @@ mod tests {
     }
 
     #[test]
-    fn long_settings_toggle_descriptions_wrap_clear_of_the_switch() {
+    fn explanatory_settings_text_wraps_clear_of_the_switch() {
         let context = egui::Context::default();
         let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(300.0, 160.0))),
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(300.0, 220.0))),
             ..egui::RawInput::default()
         };
         let mut layout = None;
         let _ = context.run_ui(input, |ui| {
             ui.set_width(300.0);
             let mut enabled = true;
-            layout = Some(settings_toggle_row(
+            let result = automatic_screen_recovery_result(enabled);
+            layout = Some(settings_explained_toggle_row(
                 ui,
                 &mut enabled,
-                "Automatic display rescans",
-                "Find the reference display at startup, after reference changes, and every 30 seconds. Manual Rescan remains available.",
+                "Recover black screen capture automatically",
+                "Check the selected display for a persistently black capture without scanning other displays.",
+                result,
             ));
         });
         let layout = layout.unwrap();
@@ -4195,6 +4537,50 @@ mod tests {
         assert!(layout.description.right() < layout.state.left());
         assert!(!layout.description.intersects(layout.state));
         assert!(!layout.description.intersects(layout.track));
+        let result = layout.result.expect("conditional result is rendered");
+        assert!(result.height() > 12.0);
+        assert!(layout.row.contains_rect(result));
+        assert!(result.right() < layout.state.left());
+        assert!(!result.intersects(layout.state));
+        assert!(!result.intersects(layout.track));
+    }
+
+    #[test]
+    fn conditional_settings_copy_reflects_values_and_dependencies() {
+        assert!(start_with_windows_result(true).contains("sign in"));
+        assert!(start_with_windows_result(false).contains("only when"));
+        assert!(start_minimized_result(true, true).contains("At sign-in"));
+        assert!(start_minimized_result(true, false).contains("When you open"));
+        assert!(
+            start_automatically_result(true, true, OutputMode::ForceScreen)
+                .contains("Display mode")
+        );
+        assert!(
+            start_automatically_result(false, false, OutputMode::Automatic).contains("off screen")
+        );
+        assert!(close_to_tray_result(true, false).contains("keep running"));
+        assert!(close_to_tray_result(false, true).contains("asks before"));
+        assert!(confirm_exit_result(false, true).contains("tray stops immediately"));
+        assert!(webcam_crop_result(true).contains("Non-16:9"));
+        assert!(webcam_crop_result(false).contains("full view"));
+        assert!(cursor_visibility_result(true).contains("appears"));
+        assert!(cursor_visibility_result(false).contains("hidden"));
+        assert!(automatic_display_discovery_result(true).contains("every 30 seconds"));
+        assert!(automatic_display_discovery_result(false).contains("Rescan displays"));
+        assert!(automatic_screen_recovery_result(true).contains("two black checks"));
+        assert!(automatic_screen_recovery_result(false).contains("Diagnostics"));
+    }
+
+    #[test]
+    fn match_strictness_explanations_use_documented_boundaries() {
+        assert_eq!(match_strictness_explanation(1.0).level, "Very strict");
+        assert_eq!(match_strictness_explanation(0.99).level, "Very strict");
+        assert_eq!(match_strictness_explanation(0.98).level, "Balanced");
+        assert_eq!(match_strictness_explanation(0.97).level, "Balanced");
+        assert_eq!(match_strictness_explanation(0.96).level, "Forgiving");
+        assert_eq!(match_strictness_explanation(0.90).level, "Forgiving");
+        assert_eq!(match_strictness_explanation(0.89).level, "Very forgiving");
+        assert_eq!(match_strictness_explanation(0.50).level, "Very forgiving");
     }
 
     #[test]

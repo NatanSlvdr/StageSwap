@@ -79,11 +79,12 @@ StageSwap requires a 64-bit Windows 11 computer, a camera, and the display you w
 
 ### Displays and operation
 
-- 🖥️ **Display rescanning** looks for the reference at startup, after reference changes, and every 30 seconds by default.
+- 🖥️ **Display discovery** looks for the reference at startup, when Settings opens, after reference changes, and every 30 seconds by default.
+- 🩺 **Black-screen recovery** checks only the selected display every 30 seconds and restarts capture after two consecutive nearly-black checks.
 - 🛠️ **Recovery controls** restart the camera, display capture, virtual camera, or the complete pipeline.
 - 🔒 **Local processing** keeps frames on the computer and does not record or upload them.
 
-StageSwap can include or hide the mouse cursor, crop and center the camera to 16:9, start minimized, begin automation on launch, and continue running when the dashboard is closed to the system tray.
+StageSwap can include or hide the mouse cursor, intelligently crop non-16:9 camera signals while leaving native 16:9 video unchanged, start minimized, begin automation on launch, and continue running when the dashboard is closed to the system tray.
 
 ## Everyday controls
 
@@ -91,7 +92,7 @@ StageSwap can include or hide the mouse cursor, crop and center the camera to 16
 - **Stop automation** shows the StageSwap off screen without removing the virtual camera.
 - **Camera**, **Display**, and **Automatic** can be selected from the dashboard or tray menu.
 - **Capture reference** saves the current display view.
-- **Rescan screens** searches the connected displays for the saved reference.
+- **Rescan screens** searches the connected displays for the saved reference. It does not restart screen capture.
 - Closing the dashboard to the tray keeps capture and output running. Fully exiting stops capture; camera apps receive the StageSwap off screen.
 
 ## Privacy
@@ -115,6 +116,7 @@ This removes the installed app, shortcuts, startup entry, and virtual camera. Se
 ## Troubleshooting
 
 - **The camera or display stopped after being unplugged, reconnected, or waking from sleep:** select the source again or restart it under **Settings → Diagnostics**.
+- **Display capture stays black after an HDMI splitter or display change:** enable **Recover black screen capture automatically**, or use **Restart screen capture** under **Settings → Diagnostics**.
 - **Automatic mode switches at the wrong time:** capture the idle reference again and adjust **Match strictness**.
 - **The saved display is missing:** use **Rescan screens** or choose another display. StageSwap does not provide automatic hot-plug or docking recovery.
 - **A camera is missing:** refresh the camera list and select it again. StageSwap does not silently substitute another camera.

@@ -1,13 +1,12 @@
 use crate::OutputMode;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const SCHEMA_VERSION: u32 = 1;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AppConfig {
     pub schema_version: u32,
     pub selected_video_device_id: String,
@@ -17,6 +16,7 @@ pub struct AppConfig {
     pub similarity_threshold: f64,
     pub cursor_visible: bool,
     pub automatic_monitor_rescans: bool,
+    pub automatic_screen_capture_recovery: bool,
     pub start_with_windows: bool,
     pub start_minimized: bool,
     pub start_automatically: bool,
@@ -39,6 +39,7 @@ impl Default for AppConfig {
             similarity_threshold: 0.98,
             cursor_visible: false,
             automatic_monitor_rescans: true,
+            automatic_screen_capture_recovery: true,
             start_with_windows: false,
             start_minimized: true,
             start_automatically: true,
@@ -49,6 +50,86 @@ impl Default for AppConfig {
             output_mode: OutputMode::Automatic,
             placeholder_color_bgra: 0xff17_1719,
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AppConfigFile {
+    schema_version: u32,
+    selected_video_device_id: String,
+    crop_webcam_to_16_9: bool,
+    selected_monitor_label: String,
+    reference_image_path: String,
+    similarity_threshold: f64,
+    cursor_visible: bool,
+    automatic_monitor_rescans: bool,
+    automatic_screen_capture_recovery: Option<bool>,
+    start_with_windows: bool,
+    start_minimized: bool,
+    start_automatically: bool,
+    close_to_tray: bool,
+    show_notifications: bool,
+    interface_language: String,
+    confirm_exit: bool,
+    output_mode: OutputMode,
+    placeholder_color_bgra: u32,
+}
+
+impl Default for AppConfigFile {
+    fn default() -> Self {
+        let config = AppConfig::default();
+        Self {
+            schema_version: config.schema_version,
+            selected_video_device_id: config.selected_video_device_id,
+            crop_webcam_to_16_9: config.crop_webcam_to_16_9,
+            selected_monitor_label: config.selected_monitor_label,
+            reference_image_path: config.reference_image_path,
+            similarity_threshold: config.similarity_threshold,
+            cursor_visible: config.cursor_visible,
+            automatic_monitor_rescans: config.automatic_monitor_rescans,
+            automatic_screen_capture_recovery: None,
+            start_with_windows: config.start_with_windows,
+            start_minimized: config.start_minimized,
+            start_automatically: config.start_automatically,
+            close_to_tray: config.close_to_tray,
+            show_notifications: config.show_notifications,
+            interface_language: config.interface_language,
+            confirm_exit: config.confirm_exit,
+            output_mode: config.output_mode,
+            placeholder_color_bgra: config.placeholder_color_bgra,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AppConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let file = AppConfigFile::deserialize(deserializer)?;
+        Ok(Self {
+            schema_version: file.schema_version,
+            selected_video_device_id: file.selected_video_device_id,
+            crop_webcam_to_16_9: file.crop_webcam_to_16_9,
+            selected_monitor_label: file.selected_monitor_label,
+            reference_image_path: file.reference_image_path,
+            similarity_threshold: file.similarity_threshold,
+            cursor_visible: file.cursor_visible,
+            automatic_monitor_rescans: file.automatic_monitor_rescans,
+            automatic_screen_capture_recovery: file
+                .automatic_screen_capture_recovery
+                .unwrap_or(file.automatic_monitor_rescans),
+            start_with_windows: file.start_with_windows,
+            start_minimized: file.start_minimized,
+            start_automatically: file.start_automatically,
+            close_to_tray: file.close_to_tray,
+            show_notifications: file.show_notifications,
+            interface_language: file.interface_language,
+            confirm_exit: file.confirm_exit,
+            output_mode: file.output_mode,
+            placeholder_color_bgra: file.placeholder_color_bgra,
+        })
     }
 }
 
@@ -219,6 +300,43 @@ mod tests {
         assert!(config.crop_webcam_to_16_9);
         assert!(config.selected_monitor_label.is_empty());
         assert!(config.automatic_monitor_rescans);
+        assert!(config.automatic_screen_capture_recovery);
+    }
+
+    #[test]
+    fn legacy_rescan_choice_is_inherited_by_screen_capture_recovery() {
+        let disabled =
+            ConfigStore::parse(r#"{"schema_version":1,"automatic_monitor_rescans":false}"#)
+                .unwrap();
+        assert!(!disabled.automatic_monitor_rescans);
+        assert!(!disabled.automatic_screen_capture_recovery);
+
+        let enabled =
+            ConfigStore::parse(r#"{"schema_version":1,"automatic_monitor_rescans":true}"#).unwrap();
+        assert!(enabled.automatic_monitor_rescans);
+        assert!(enabled.automatic_screen_capture_recovery);
+    }
+
+    #[test]
+    fn explicit_screen_capture_recovery_choice_overrides_legacy_inheritance() {
+        for (automatic_monitor_rescans, automatic_screen_capture_recovery) in
+            [(false, true), (true, false)]
+        {
+            let config = ConfigStore::parse(
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "automatic_monitor_rescans": automatic_monitor_rescans,
+                    "automatic_screen_capture_recovery": automatic_screen_capture_recovery,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            assert_eq!(config.automatic_monitor_rescans, automatic_monitor_rescans);
+            assert_eq!(
+                config.automatic_screen_capture_recovery,
+                automatic_screen_capture_recovery
+            );
+        }
     }
 
     #[test]

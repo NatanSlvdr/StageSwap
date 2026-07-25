@@ -26,7 +26,17 @@ const COMMAND_CAPACITY: usize = 32;
 const ACTIVITY_LIMIT: usize = 20;
 const FPS_TRACKING_WINDOW: Duration = Duration::from_secs(1);
 #[cfg(any(windows, test))]
-const WEBCAM_CROP_ZOOM: f64 = 4.0 / 3.0;
+const TARGET_WEBCAM_ASPECT_RATIO: f64 = 16.0 / 9.0;
+#[cfg(any(windows, test))]
+const WEBCAM_ASPECT_RATIO_TOLERANCE: f64 = 0.01;
+#[cfg(any(windows, test))]
+const BLACK_LUMA_THRESHOLD: u8 = 16;
+#[cfg(any(windows, test))]
+const BLACK_PIXEL_PERCENT: usize = 99;
+#[cfg(any(windows, test))]
+const BLACK_SCAN_CONFIRMATIONS: u8 = 2;
+#[cfg(any(windows, test))]
+const AUTOMATIC_SCREEN_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct RuntimeHandle {
     commands: SyncSender<Command>,
@@ -94,32 +104,35 @@ impl Drop for RuntimeHandle {
 struct WebcamCropCache {
     source: Option<Arc<Frame>>,
     cropped: Option<Arc<Frame>>,
-    format: Option<(Size, u32)>,
+    format: Option<(Size, u32, u64)>,
     source_x: Vec<usize>,
     source_rows: Vec<usize>,
 }
 
 #[cfg(any(windows, test))]
 impl WebcamCropCache {
-    fn apply(&mut self, source: Arc<Frame>, enabled: bool) -> Arc<Frame> {
-        if !enabled {
+    fn apply(
+        &mut self,
+        source: Arc<Frame>,
+        enabled: bool,
+        native_aspect_ratio: Option<f64>,
+    ) -> Arc<Frame> {
+        let Some(zoom) = webcam_crop_zoom(enabled, native_aspect_ratio) else {
             return source;
-        }
+        };
+        let format = (source.size, source.stride, zoom.to_bits());
         if self
             .source
             .as_ref()
             .is_some_and(|cached| Arc::ptr_eq(cached, &source))
+            && self.format == Some(format)
             && let Some(cropped) = &self.cropped
         {
             return Arc::clone(cropped);
         }
-        if self.format != Some((source.size, source.stride)) {
-            let crop_width = (source.size.width as f64 / WEBCAM_CROP_ZOOM)
-                .round()
-                .max(1.0) as u32;
-            let crop_height = (source.size.height as f64 / WEBCAM_CROP_ZOOM)
-                .round()
-                .max(1.0) as u32;
+        if self.format != Some(format) {
+            let crop_width = (source.size.width as f64 / zoom).round().max(1.0) as u32;
+            let crop_height = (source.size.height as f64 / zoom).round().max(1.0) as u32;
             let x_offset = (source.size.width - crop_width) / 2;
             let y_offset = (source.size.height - crop_height) / 2;
             self.source_x = (0..source.size.width)
@@ -138,7 +151,7 @@ impl WebcamCropCache {
                     source_y as usize * source.stride as usize
                 })
                 .collect();
-            self.format = Some((source.size, source.stride));
+            self.format = Some(format);
         }
         let mut pixels = vec![0; source.pixels().len()];
         for (y, source_row) in self.source_rows.iter().copied().enumerate() {
@@ -165,6 +178,84 @@ impl WebcamCropCache {
         self.cropped = Some(Arc::clone(&cropped));
         cropped
     }
+}
+
+#[cfg(any(windows, test))]
+fn webcam_crop_zoom(enabled: bool, native_aspect_ratio: Option<f64>) -> Option<f64> {
+    let aspect_ratio = enabled
+        .then_some(native_aspect_ratio)
+        .flatten()
+        .filter(|ratio| ratio.is_finite() && *ratio > 0.0)?;
+    let relative_difference =
+        ((aspect_ratio - TARGET_WEBCAM_ASPECT_RATIO) / TARGET_WEBCAM_ASPECT_RATIO).abs();
+    (relative_difference > WEBCAM_ASPECT_RATIO_TOLERANCE).then(|| {
+        (aspect_ratio / TARGET_WEBCAM_ASPECT_RATIO).max(TARGET_WEBCAM_ASPECT_RATIO / aspect_ratio)
+    })
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlackScreenObservation {
+    Clear,
+    AwaitingConfirmation,
+    Restart,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct ScreenBlackRecovery {
+    consecutive_black_scans: u8,
+}
+
+#[cfg(any(windows, test))]
+impl ScreenBlackRecovery {
+    fn reset(&mut self) {
+        self.consecutive_black_scans = 0;
+    }
+
+    fn observe(&mut self, frame: Option<&Frame>) -> BlackScreenObservation {
+        if frame.is_none_or(|frame| !is_nearly_black(frame)) {
+            self.reset();
+            return BlackScreenObservation::Clear;
+        }
+        self.consecutive_black_scans = self.consecutive_black_scans.saturating_add(1);
+        if self.consecutive_black_scans < BLACK_SCAN_CONFIRMATIONS {
+            BlackScreenObservation::AwaitingConfirmation
+        } else {
+            self.reset();
+            BlackScreenObservation::Restart
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn is_nearly_black(frame: &Frame) -> bool {
+    let Some(thumbnail) = gray_thumbnail(frame) else {
+        return false;
+    };
+    let pixels = &thumbnail.pixels;
+    let black_pixels = pixels
+        .iter()
+        .filter(|pixel| **pixel <= BLACK_LUMA_THRESHOLD)
+        .count();
+    black_pixels * 100 >= pixels.len() * BLACK_PIXEL_PERCENT
+}
+
+#[cfg(any(windows, test))]
+fn automatic_screen_tasks_due(
+    automatic_monitor_rescans: bool,
+    automatic_screen_capture_recovery: bool,
+    last_monitor_scan: Instant,
+    last_screen_capture_recovery_check: Instant,
+    now: Instant,
+) -> (bool, bool) {
+    (
+        automatic_monitor_rescans
+            && now.duration_since(last_monitor_scan) >= AUTOMATIC_SCREEN_CHECK_INTERVAL,
+        automatic_screen_capture_recovery
+            && now.duration_since(last_screen_capture_recovery_check)
+                >= AUTOMATIC_SCREEN_CHECK_INTERVAL,
+    )
 }
 
 struct RuntimeState {
@@ -751,7 +842,9 @@ struct Platform {
     screen: WindowsGraphicsScreenInput,
     selected_monitor: Option<MonitorDescriptor>,
     monitor_tracker: MonitorTracker,
+    screen_black_recovery: ScreenBlackRecovery,
     last_monitor_scan: Instant,
+    last_screen_capture_recovery_check: Instant,
     monitor_scan_generation: u64,
     monitor_scan_worker: Option<MonitorScanWorker>,
 }
@@ -899,7 +992,9 @@ impl Platform {
             screen,
             selected_monitor,
             monitor_tracker,
+            screen_black_recovery: ScreenBlackRecovery::default(),
             last_monitor_scan: Instant::now(),
+            last_screen_capture_recovery_check: Instant::now(),
             monitor_scan_generation: 1,
             monitor_scan_worker,
         };
@@ -934,6 +1029,8 @@ impl Platform {
                     config.similarity_threshold != state.config.similarity_threshold;
                 let automatic_rescans_changed =
                     config.automatic_monitor_rescans != state.config.automatic_monitor_rescans;
+                let automatic_recovery_changed = config.automatic_screen_capture_recovery
+                    != state.config.automatic_screen_capture_recovery;
                 if cursor_changed {
                     let old = state.config.cursor_visible;
                     state.config.cursor_visible = config.cursor_visible;
@@ -945,6 +1042,10 @@ impl Platform {
                     if config.automatic_monitor_rescans {
                         self.request_monitor_scan(state, config.cursor_visible);
                     }
+                }
+                if automatic_recovery_changed {
+                    self.screen_black_recovery.reset();
+                    self.last_screen_capture_recovery_check = Instant::now();
                 }
             }
             Command::CaptureReference => {
@@ -1087,10 +1188,18 @@ impl Platform {
     fn refresh_inputs(&mut self, state: &mut RuntimeState) {
         let now = Instant::now();
         self.refresh_monitor_scan(state);
-        if state.config.automatic_monitor_rescans
-            && now.duration_since(self.last_monitor_scan) >= Duration::from_secs(30)
-        {
+        let (monitor_scan_due, screen_capture_recovery_due) = automatic_screen_tasks_due(
+            state.config.automatic_monitor_rescans,
+            state.config.automatic_screen_capture_recovery,
+            self.last_monitor_scan,
+            self.last_screen_capture_recovery_check,
+            now,
+        );
+        if monitor_scan_due {
             self.request_monitor_scan(state, state.config.cursor_visible);
+        }
+        if screen_capture_recovery_due {
+            self.check_screen_capture_recovery(state, now);
         }
         let webcam = self.webcam.latest_frame();
         state.snapshot.availability.camera_ready = webcam.is_some();
@@ -1104,11 +1213,11 @@ impl Platform {
             state.record("Webcam capture recovered");
         }
         if let Some(webcam) = webcam {
-            state.snapshot.previews.webcam = Some(
-                state
-                    .webcam_crop
-                    .apply(webcam, state.config.crop_webcam_to_16_9),
-            );
+            state.snapshot.previews.webcam = Some(state.webcam_crop.apply(
+                webcam,
+                state.config.crop_webcam_to_16_9,
+                self.webcam.native_display_aspect_ratio(),
+            ));
         }
         let screen = self.screen.latest_frame();
         state.snapshot.availability.screen_ready = screen.is_some();
@@ -1118,6 +1227,8 @@ impl Platform {
     }
 
     fn restart_screen(&mut self, state: &mut RuntimeState) {
+        self.screen_black_recovery.reset();
+        self.last_screen_capture_recovery_check = Instant::now();
         self.screen.stop();
         let Some(monitor) = self.selected_monitor.as_ref() else {
             state.snapshot.screen_state = DeviceState::Unavailable;
@@ -1147,9 +1258,32 @@ impl Platform {
         self.monitor_tracker = tracker;
     }
 
+    fn check_screen_capture_recovery(&mut self, state: &mut RuntimeState, now: Instant) {
+        self.last_screen_capture_recovery_check = now;
+        match self
+            .screen_black_recovery
+            .observe(self.screen.latest_frame().as_deref())
+        {
+            BlackScreenObservation::Clear => {}
+            BlackScreenObservation::AwaitingConfirmation => {
+                state.record("Black screen detected; awaiting the next automatic recovery check");
+            }
+            BlackScreenObservation::Restart => {
+                state.record("Persistent black screen detected; restarting screen capture");
+                self.restart_screen(state);
+            }
+        }
+    }
+
     fn request_monitor_scan(&mut self, state: &RuntimeState, cursor_visible: bool) {
+        if !self.queue_monitor_scan(state, cursor_visible) {
+            self.last_monitor_scan = Instant::now();
+        }
+    }
+
+    fn queue_monitor_scan(&mut self, state: &RuntimeState, cursor_visible: bool) -> bool {
         let Some(worker) = &mut self.monitor_scan_worker else {
-            return;
+            return false;
         };
         if worker.request(MonitorScanRequest {
             generation: self.monitor_scan_generation,
@@ -1157,6 +1291,9 @@ impl Platform {
             cursor_visible,
         }) {
             self.last_monitor_scan = Instant::now();
+            true
+        } else {
+            false
         }
     }
 
@@ -1177,7 +1314,7 @@ impl Platform {
         }
         let tracking = self.monitor_tracker.apply_scan(&result.scores);
         if tracking.confirmation_pending {
-            self.request_monitor_scan(state, state.config.cursor_visible);
+            self.queue_monitor_scan(state, state.config.cursor_visible);
             return;
         }
         if let Some(monitor) = tracking.tracked
@@ -1336,7 +1473,7 @@ mod tests {
     }
 
     #[test]
-    fn webcam_crop_cache_shares_processed_preview_with_camera_output() {
+    fn webcam_crop_is_aspect_aware_and_shares_processed_output() {
         let now = Instant::now();
         let size = Size::new(1280, 720);
         let mut pixels = vec![0; size.width as usize * size.height as usize * 4];
@@ -1354,8 +1491,12 @@ mod tests {
         }
         let raw = Arc::new(Frame::new(pixels.into(), size, size.width * 4, 9, 321, now).unwrap());
         let mut state = RuntimeState::new(AppConfig::default());
-        let processed = state.webcam_crop.apply(Arc::clone(&raw), true);
-        let cached = state.webcam_crop.apply(Arc::clone(&raw), true);
+        let processed = state
+            .webcam_crop
+            .apply(Arc::clone(&raw), true, Some(4.0 / 3.0));
+        let cached = state
+            .webcam_crop
+            .apply(Arc::clone(&raw), true, Some(4.0 / 3.0));
         assert!(!Arc::ptr_eq(&processed, &raw));
         assert!(Arc::ptr_eq(&processed, &cached));
         assert_eq!(processed.size, size);
@@ -1369,7 +1510,19 @@ mod tests {
                 .all(|pixel| pixel == [0, 255, 0, 255])
         );
         assert!(Arc::ptr_eq(
-            &state.webcam_crop.apply(Arc::clone(&raw), false),
+            &state
+                .webcam_crop
+                .apply(Arc::clone(&raw), false, Some(4.0 / 3.0)),
+            &raw
+        ));
+        assert!(Arc::ptr_eq(
+            &state
+                .webcam_crop
+                .apply(Arc::clone(&raw), true, Some(16.0 / 9.0)),
+            &raw
+        ));
+        assert!(Arc::ptr_eq(
+            &state.webcam_crop.apply(Arc::clone(&raw), true, None),
             &raw
         ));
 
@@ -1386,6 +1539,129 @@ mod tests {
             .as_ref()
             .expect("camera output is present");
         assert!(Arc::ptr_eq(&processed.pixels_arc(), &output.pixels_arc()));
+    }
+
+    #[test]
+    fn webcam_crop_tolerance_and_cache_include_native_aspect_ratio() {
+        let now = Instant::now();
+        let size = Size::new(1280, 720);
+        let pixels = (0..size.height)
+            .flat_map(|y| {
+                (0..size.width).flat_map(move |x| {
+                    let value = ((x + y) % 255) as u8;
+                    [value, value, value, 255]
+                })
+            })
+            .collect::<Vec<_>>();
+        let raw = Arc::new(Frame::new(pixels.into(), size, size.width * 4, 1, 2, now).unwrap());
+        let mut crop = WebcamCropCache::default();
+
+        let within_tolerance =
+            TARGET_WEBCAM_ASPECT_RATIO * (1.0 + WEBCAM_ASPECT_RATIO_TOLERANCE / 2.0);
+        assert!(Arc::ptr_eq(
+            &crop.apply(Arc::clone(&raw), true, Some(within_tolerance)),
+            &raw
+        ));
+
+        let four_by_three = crop.apply(Arc::clone(&raw), true, Some(4.0 / 3.0));
+        let square = crop.apply(Arc::clone(&raw), true, Some(1.0));
+        let wider = crop.apply(Arc::clone(&raw), true, Some(21.0 / 9.0));
+        assert!(!Arc::ptr_eq(&four_by_three, &square));
+        assert_ne!(four_by_three.pixels(), square.pixels());
+        assert_ne!(square.pixels(), wider.pixels());
+    }
+
+    fn frame_with_bright_pixels(bright_pixels: usize) -> Frame {
+        let size = Size::new(160, 90);
+        let mut pixels = vec![0; size.width as usize * size.height as usize * 4];
+        for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+            let value = u8::from(index < bright_pixels) * 255;
+            pixel.copy_from_slice(&[value, value, value, 255]);
+        }
+        Frame::new(pixels.into(), size, size.width * 4, 1, 0, Instant::now()).unwrap()
+    }
+
+    fn solid_frame(value: u8) -> Frame {
+        let size = Size::new(160, 90);
+        let mut pixels = vec![value; size.width as usize * size.height as usize * 4];
+        for alpha in pixels.iter_mut().skip(3).step_by(4) {
+            *alpha = 255;
+        }
+        Frame::new(pixels.into(), size, size.width * 4, 1, 0, Instant::now()).unwrap()
+    }
+
+    #[test]
+    fn black_screen_detection_allows_small_cursor_but_rejects_visible_content() {
+        assert!(is_nearly_black(&frame_with_bright_pixels(0)));
+        assert!(is_nearly_black(&solid_frame(BLACK_LUMA_THRESHOLD)));
+        assert!(!is_nearly_black(&solid_frame(BLACK_LUMA_THRESHOLD + 1)));
+        assert!(is_nearly_black(&frame_with_bright_pixels(100)));
+        assert!(!is_nearly_black(&frame_with_bright_pixels(200)));
+    }
+
+    #[test]
+    fn black_screen_recovery_requires_two_consecutive_scheduled_checks() {
+        let black = frame_with_bright_pixels(0);
+        let visible = frame_with_bright_pixels(200);
+        let mut recovery = ScreenBlackRecovery::default();
+
+        assert_eq!(
+            recovery.observe(Some(&black)),
+            BlackScreenObservation::AwaitingConfirmation
+        );
+        assert_eq!(recovery.observe(None), BlackScreenObservation::Clear);
+        assert_eq!(
+            recovery.observe(Some(&black)),
+            BlackScreenObservation::AwaitingConfirmation
+        );
+        assert_eq!(
+            recovery.observe(Some(&visible)),
+            BlackScreenObservation::Clear
+        );
+        assert_eq!(
+            recovery.observe(Some(&black)),
+            BlackScreenObservation::AwaitingConfirmation
+        );
+        assert_eq!(
+            recovery.observe(Some(&black)),
+            BlackScreenObservation::Restart
+        );
+        assert_eq!(
+            recovery.observe(Some(&black)),
+            BlackScreenObservation::AwaitingConfirmation
+        );
+    }
+
+    #[test]
+    fn display_discovery_and_black_screen_recovery_are_scheduled_independently() {
+        let started_at = Instant::now();
+        let due_at = started_at + AUTOMATIC_SCREEN_CHECK_INTERVAL;
+        assert_eq!(
+            automatic_screen_tasks_due(false, false, started_at, started_at, due_at),
+            (false, false)
+        );
+        assert_eq!(
+            automatic_screen_tasks_due(true, false, started_at, started_at, due_at),
+            (true, false)
+        );
+        assert_eq!(
+            automatic_screen_tasks_due(false, true, started_at, started_at, due_at),
+            (false, true)
+        );
+        assert_eq!(
+            automatic_screen_tasks_due(true, true, started_at, started_at, due_at),
+            (true, true)
+        );
+        assert_eq!(
+            automatic_screen_tasks_due(
+                true,
+                true,
+                due_at,
+                started_at,
+                due_at + Duration::from_millis(1),
+            ),
+            (false, true)
+        );
     }
 
     #[test]

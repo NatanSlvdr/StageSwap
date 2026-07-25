@@ -8,12 +8,14 @@ use windows::Win32::Media::MediaFoundation::{
     IMFSourceReaderCallback_Impl, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_DEFAULT_STRIDE,
-    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-    MF_SOURCE_READER_ASYNC_CALLBACK, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
-    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ERROR, MF_VERSION, MFCreateAttributes,
-    MFCreateDeviceSource, MFCreateMediaType, MFCreateSourceReaderFromMediaSource,
-    MFEnumDeviceSources, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup,
-    MFVideoFormat_RGB32, MFVideoInterlace_Progressive,
+    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_GEOMETRIC_APERTURE, MF_MT_INTERLACE_MODE,
+    MF_MT_MAJOR_TYPE, MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
+    MF_SOURCE_READER_ASYNC_CALLBACK, MF_SOURCE_READER_CURRENT_TYPE_INDEX,
+    MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+    MF_SOURCE_READERF_ERROR, MF_VERSION, MFCreateAttributes, MFCreateDeviceSource,
+    MFCreateMediaType, MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video,
+    MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoArea, MFVideoFormat_RGB32,
+    MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -21,6 +23,52 @@ use windows::Win32::System::Com::{
 use windows_core::{HRESULT, PCWSTR, PWSTR, Ref, implement};
 
 const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+
+fn media_type_display_aspect_ratio(media_type: &IMFMediaType) -> Option<f64> {
+    let display_size = [&MF_MT_MINIMUM_DISPLAY_APERTURE, &MF_MT_GEOMETRIC_APERTURE]
+        .into_iter()
+        .find_map(|attribute| {
+            let mut bytes = [0u8; size_of::<MFVideoArea>()];
+            // SAFETY: bytes is writable storage of exactly the expected structure size.
+            unsafe { media_type.GetBlob(attribute, &mut bytes, None) }
+                .ok()
+                .and_then(|()| {
+                    // SAFETY: Media Foundation wrote an MFVideoArea blob; read_unaligned handles
+                    // the byte buffer's alignment.
+                    let area =
+                        unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<MFVideoArea>()) };
+                    (area.Area.cx > 0 && area.Area.cy > 0)
+                        .then_some((area.Area.cx as u32, area.Area.cy as u32))
+                })
+        })
+        .or_else(|| {
+            // SAFETY: media_type is a live IMFMediaType and the key stores a packed ratio.
+            let frame_size = unsafe { media_type.GetUINT64(&MF_MT_FRAME_SIZE) }.ok()?;
+            let width = (frame_size >> 32) as u32;
+            let height = frame_size as u32;
+            (width > 0 && height > 0).then_some((width, height))
+        })?;
+    // SAFETY: media_type is live; a missing pixel-aspect attribute means square pixels.
+    let pixel_aspect = unsafe { media_type.GetUINT64(&MF_MT_PIXEL_ASPECT_RATIO) }
+        .ok()
+        .and_then(|ratio| {
+            let numerator = (ratio >> 32) as u32;
+            let denominator = ratio as u32;
+            (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+        })
+        .unwrap_or((1, 1));
+    let ratio = display_size.0 as f64 / display_size.1 as f64 * pixel_aspect.0 as f64
+        / pixel_aspect.1 as f64;
+    ratio.is_finite().then_some(ratio)
+}
+
+fn current_native_display_aspect_ratio(reader: &IMFSourceReader) -> Option<f64> {
+    // SAFETY: reader is live and CURRENT_TYPE_INDEX requests a copy of its current native type.
+    let media_type =
+        unsafe { reader.GetNativeMediaType(STREAM, MF_SOURCE_READER_CURRENT_TYPE_INDEX.0 as u32) }
+            .ok()?;
+    media_type_display_aspect_ratio(&media_type)
+}
 
 pub fn enumerate_video_devices() -> Result<Vec<InputDevice>, String> {
     Ok(enumerate_all_video_devices()?
@@ -243,6 +291,7 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
 pub struct MediaFoundationVideoInput {
     state: Arc<CaptureState>,
     callback: Option<IMFSourceReaderCallback>,
+    native_display_aspect_ratio: Option<f64>,
     initialization_error: Option<String>,
     mf_started: bool,
     com_initialized: bool,
@@ -273,6 +322,7 @@ impl Default for MediaFoundationVideoInput {
         Self {
             state: Arc::new(CaptureState::default()),
             callback: None,
+            native_display_aspect_ratio: None,
             initialization_error,
             mf_started,
             com_initialized,
@@ -372,6 +422,7 @@ impl VideoInput for MediaFoundationVideoInput {
         if size.width == 0 || size.height == 0 {
             return Err("negotiated webcam format has empty dimensions".into());
         }
+        self.native_display_aspect_ratio = current_native_display_aspect_ratio(&reader);
         *self
             .state
             .format
@@ -401,6 +452,7 @@ impl VideoInput for MediaFoundationVideoInput {
             let _ = unsafe { reader.Flush(STREAM) };
         }
         self.callback = None;
+        self.native_display_aspect_ratio = None;
         if let Ok(mut latest) = self.state.latest.lock() {
             *latest = None;
         }
@@ -416,6 +468,10 @@ impl VideoInput for MediaFoundationVideoInput {
 }
 
 impl MediaFoundationVideoInput {
+    pub fn native_display_aspect_ratio(&self) -> Option<f64> {
+        self.native_display_aspect_ratio
+    }
+
     pub fn last_error(&self) -> Option<String> {
         self.state
             .failure

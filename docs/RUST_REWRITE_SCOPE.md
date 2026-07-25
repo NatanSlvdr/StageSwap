@@ -6,7 +6,7 @@ This scope replaced the former production application directly. The repository n
 
 - One self-contained Windows 11 x64 application. The executable may embed and deploy its matching camera-source DLL; users install neither OBS nor another runtime application.
 - One webcam input. Store its identifier, open it at startup, and use a fixed internal BGRA/RGB32 1280×720 at 30 fps contract.
-- One screen capture restored by its saved friendly label, with secondary-monitor fallback and optional reference-based replacement. Compare a 160×90 grayscale image every 250 ms, with five matches and three mismatches. Automatic display rescans run at startup, every 30 seconds, and after reference changes by default, can be disabled, and never disable explicit Rescan.
+- One screen capture restored by its saved friendly label, with secondary-monitor fallback and optional reference-based replacement. Compare a 160×90 grayscale image every 250 ms, with five matches and three mismatches. Automatic display rescans run at startup, when Settings opens, every 30 seconds, and after reference changes by default, can be disabled, and never disable explicit Rescan. Independent selected-capture recovery checks every 30 seconds and restarts screen capture after two consecutive near-black checks.
 - Automatic, Force Webcam, and Force Screen modes, with the current 500 ms reversible fade, configurable missing-source fallback, and fixed branded off screen.
 - One per-user frame transport from the application to a Media Foundation custom source DLL.
 - Virtual-camera output prefers RGB32 1280×720 at 30 fps and retains selectable NV12 720p for Windows Camera and Zoom compatibility; do not restore 1080p without evidence.
@@ -16,13 +16,13 @@ This is a new installation with source CLSID `{4ABA794D-7B23-449C-8467-CE74A41C2
 
 ## Deliberate non-goals
 
-- No background supervisor, health polling, retry backoff, or automatic component graph reconstruction.
+- No continuous background supervisor, general health polling, retry backoff, or automatic component graph reconstruction. The bounded screen-black check is an independent 30-second timer in the existing runtime loop.
 - No webcam or display hot-plug support. If a source is disconnected, the user may relaunch the application or select it again.
 - No continuous webcam enumeration. At startup, use the saved identifier if present; as a small usability improvement, automatically choose the sole physical webcam when no saved device can be opened. If several candidates exist, require an explicit choice.
 - No sleep/resume, docking, display-reordering, D3D-device-loss, camera-contention, or vendor-driver recovery guarantees.
 - No input format matrix. Request one internal format and let the capture backend perform the conversion.
 - No GPU compositor, zero-copy pipeline, encoder, audio, recording, network service, OBS integration, kernel driver, or plugin system.
-- Persist only the selected monitor's friendly label; do not persist EDID or physical-monitor identity. Display scanning exists only to find the saved visual reference and can be disabled outside explicit rescans.
+- Persist only the selected monitor's friendly label; do not persist EDID or physical-monitor identity. Display scanning only finds the saved visual reference. Selected-capture black recovery is independently configurable, and automatic scans can be disabled without disabling explicit rescans.
 - Do not preserve `WM_DEVICECHANGE`/`WM_DPICHANGED` restart behavior merely because the current Win32 window happens to contain it.
 
 ## Dependency boundary
