@@ -49,22 +49,23 @@ StageSwap requires a 64-bit Windows 11 computer, a camera, and the display you w
 <p align="center"><em>First launch lets you install StageSwap or run the downloaded copy once.</em></p>
 
 3. Approve the administrator prompt. This is required only to add or update the virtual camera; normal launches run without administrator access.
-4. Choose the camera and display StageSwap should use.
+4. On a fresh installation, follow the short dashboard tutorial. It explains Automatic mode, the four previews, component health, and the main controls. You can skip it or open it again later under **Settings → General → Open tutorial**.
+5. Choose the camera and display StageSwap should use.
 
 <p align="center">
   <img src="docs/images/readme/dashboard.svg" width="760" alt="Placeholder for the StageSwap dashboard">
 </p>
 <p align="center"><em>The dashboard shows the four previews, component status, output mode, and automation controls.</em></p>
 
-5. Show the idle view on the selected display and select **Capture reference**. An existing image can also be imported.
+6. Show the idle view on the selected display and select **Capture reference**. An existing image can also be imported.
 
 <p align="center">
   <img src="docs/images/readme/matching-settings.svg" width="760" alt="Placeholder for the StageSwap reference-matching settings">
 </p>
 <p align="center"><em>Matching settings are used to capture or import the reference and adjust match strictness.</em></p>
 
-6. Select **StageSwap** as the camera in the meeting app.
-7. Select **Start automation**.
+7. Select **StageSwap** as the camera in the meeting app.
+8. Select **Start automation**.
 
 > [!NOTE]
 > Current releases are unsigned, so Windows may show a security warning. Continue only when the file came from the official StageSwap releases page.
@@ -93,6 +94,7 @@ StageSwap can include or hide the mouse cursor, intelligently crop non-16:9 came
 - **Camera**, **Display**, and **Automatic** can be selected from the dashboard or tray menu.
 - **Capture reference** saves the current display view.
 - **Rescan screens** searches the connected displays for the saved reference. It does not restart screen capture.
+- **Open tutorial** under General Settings reviews the dashboard and everyday workflow at any time.
 - Closing the dashboard to the tray keeps capture and output running. Fully exiting stops capture; camera apps receive the StageSwap off screen.
 
 ## Privacy

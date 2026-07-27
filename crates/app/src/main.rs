@@ -33,6 +33,8 @@ const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const SETTINGS_ENTRANCE_DURATION: Duration = Duration::from_millis(160);
 const SETTINGS_SECTION_DURATION: Duration = Duration::from_millis(120);
 const DIALOG_ENTRANCE_DURATION: Duration = Duration::from_millis(150);
+const TUTORIAL_ENTRANCE_DURATION: Duration = Duration::from_millis(180);
+const TUTORIAL_STEP_DURATION: Duration = Duration::from_millis(140);
 const DISCO_GESTURE_WINDOW: Duration = Duration::from_secs(3);
 const SETTINGS_SIDEBAR_WIDTH: f32 = 196.0;
 const SETTINGS_CONTENT_WIDTH: f32 = 960.0;
@@ -49,8 +51,13 @@ mod deployment_payload;
 mod local_log;
 #[cfg(windows)]
 mod tray;
+mod tutorial;
 mod ui_icon;
 use local_log::LocalLog;
+use tutorial::{
+    TutorialReturnView, TutorialSession, TutorialStartup, TutorialStateStore, TutorialStep,
+    has_existing_user_data,
+};
 use ui_icon::UiIcon;
 
 fn main() -> eframe::Result {
@@ -61,7 +68,7 @@ fn main() -> eframe::Result {
         Err(error) => {
             eprintln!("StageSwap UI preview: {error}");
             eprintln!(
-                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|dialog-*]"
+                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|tutorial-1..7|dialog-*]"
             );
             return Ok(());
         }
@@ -142,6 +149,16 @@ fn main() -> eframe::Result {
     } else {
         local_data_directory()
     });
+    let existing_install = has_existing_user_data(store.directory());
+    #[cfg(windows)]
+    let tutorial_startup = TutorialStateStore::new(store.directory()).initialize(existing_install);
+    #[cfg(not(windows))]
+    let tutorial_startup = if ui_preview_request.is_some() {
+        TutorialStartup::suppressed()
+    } else {
+        TutorialStateStore::new(store.directory()).initialize(existing_install)
+    };
+    let show_first_run_tutorial = tutorial_startup.show_tutorial;
     #[cfg(windows)]
     let loaded = load_config_with_admin_restore(&store);
     #[cfg(not(windows))]
@@ -163,9 +180,11 @@ fn main() -> eframe::Result {
         let _ = stageswap_windows::save_config_atomic(&store, &loaded.config);
     }
     #[cfg(windows)]
-    let start_visible = launch_context.force_visible || !loaded.config.start_minimized;
+    let start_visible =
+        show_first_run_tutorial || launch_context.force_visible || !loaded.config.start_minimized;
     #[cfg(not(windows))]
-    let start_visible = ui_preview_request.is_some() || !loaded.config.start_minimized;
+    let start_visible =
+        show_first_run_tutorial || ui_preview_request.is_some() || !loaded.config.start_minimized;
     let app_icon = app_icon::load(None).expect("embedded app icon should decode");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -199,7 +218,8 @@ fn main() -> eframe::Result {
                 style.spacing.item_spacing = egui::vec2(10.0, 10.0);
                 style.spacing.button_padding = egui::vec2(14.0, 8.0);
             });
-            let app = SwitcherApp::new(loaded.config, loaded.warnings, store);
+            let app = SwitcherApp::new(loaded.config, loaded.warnings, store)
+                .with_tutorial_startup(tutorial_startup);
             #[cfg(not(windows))]
             let app = if let Some(request) = ui_preview_request {
                 app.with_ui_preview(request)
@@ -353,6 +373,7 @@ struct UiPreviewRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UiPreviewTarget {
     Settings(SettingsTab),
+    Tutorial(TutorialStep),
     Dialog(AppDialogKind),
 }
 
@@ -396,6 +417,17 @@ fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>,
         Some("dialog-load-admin-config") => UiPreviewTarget::Dialog(AppDialogKind::LoadAdminConfig),
         Some("dialog-remove-baseline") => {
             UiPreviewTarget::Dialog(AppDialogKind::RemoveAdminBaseline)
+        }
+        Some(value) if value.starts_with("tutorial-") => {
+            let number = value
+                .strip_prefix("tutorial-")
+                .and_then(|value| value.parse::<usize>().ok());
+            let step = number.and_then(TutorialStep::from_number).ok_or_else(|| {
+                format!(
+                    "unknown tutorial preview '{value}'; expected tutorial-1 through tutorial-7"
+                )
+            })?;
+            UiPreviewTarget::Tutorial(step)
         }
         Some(value) if !value.starts_with("--") => SettingsTab::from_preview_name(value)
             .map(UiPreviewTarget::Settings)
@@ -821,6 +853,28 @@ struct ControlsWorkspaceLayout {
     footer: Rect,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PreviewGridLayout {
+    cells: [Rect; 4],
+    grid: Rect,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DashboardTutorialTargets {
+    reference_preview: Rect,
+    preview_grid: Rect,
+    health: Rect,
+    controls: Rect,
+    prepare: Rect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TutorialAction {
+    Previous,
+    Next,
+    Close,
+}
+
 #[derive(Clone, Copy)]
 struct SettingsSection {
     icon: UiIcon,
@@ -893,6 +947,8 @@ struct SwitcherApp {
     config: AppConfig,
     runtime: RuntimeHandle,
     store: ConfigStore,
+    tutorial_store: TutorialStateStore,
+    tutorial_session: Option<TutorialSession>,
     load_warnings: Vec<String>,
     view: AppView,
     settings_tab: SettingsTab,
@@ -952,7 +1008,9 @@ impl SwitcherApp {
         Self {
             runtime: RuntimeHandle::spawn(config.clone()),
             config,
+            tutorial_store: TutorialStateStore::new(store.directory()),
             store,
+            tutorial_session: None,
             load_warnings,
             view: AppView::Dashboard,
             settings_tab: SettingsTab::General,
@@ -988,6 +1046,18 @@ impl SwitcherApp {
         }
     }
 
+    fn with_tutorial_startup(mut self, startup: TutorialStartup) -> Self {
+        for warning in startup.warnings {
+            self.log
+                .write("warning", "tutorial", "TUTORIAL_STATE_WARNING", &warning);
+            self.load_warnings.push(warning);
+        }
+        if startup.show_tutorial {
+            self.tutorial_session = Some(TutorialSession::live(TutorialReturnView::Dashboard));
+        }
+        self
+    }
+
     #[cfg(windows)]
     fn with_launch_context(
         mut self,
@@ -1003,10 +1073,17 @@ impl SwitcherApp {
 
     #[cfg(not(windows))]
     fn with_ui_preview(mut self, request: UiPreviewRequest) -> Self {
-        self.view = AppView::Settings;
         match request.target {
-            UiPreviewTarget::Settings(tab) => self.settings_tab = tab,
+            UiPreviewTarget::Settings(tab) => {
+                self.view = AppView::Settings;
+                self.settings_tab = tab;
+            }
+            UiPreviewTarget::Tutorial(step) => {
+                self.view = AppView::Dashboard;
+                self.tutorial_session = Some(TutorialSession::preview(step));
+            }
             UiPreviewTarget::Dialog(kind) => {
+                self.view = AppView::Settings;
                 self.settings_tab = if kind == AppDialogKind::ClearLogs {
                     SettingsTab::Diagnostics
                 } else {
@@ -1124,6 +1201,63 @@ impl SwitcherApp {
         self.send(Command::RefreshVideoDevices);
         if self.config.automatic_monitor_rescans {
             self.send(Command::Rescan);
+        }
+    }
+
+    fn start_tutorial(&mut self, return_view: TutorialReturnView) {
+        self.flush_settings();
+        self.dismiss_dialog();
+        self.view = AppView::Dashboard;
+        self.tutorial_session = Some(TutorialSession::live(return_view));
+    }
+
+    fn apply_tutorial_action(&mut self, action: TutorialAction) {
+        let Some(mut session) = self.tutorial_session else {
+            return;
+        };
+        match action {
+            TutorialAction::Previous => {
+                if let Some(step) = session.step.previous() {
+                    session.go_to(step);
+                    self.tutorial_session = Some(session);
+                }
+            }
+            TutorialAction::Next => {
+                if let Some(step) = session.step.next() {
+                    session.go_to(step);
+                    self.tutorial_session = Some(session);
+                } else {
+                    self.finish_tutorial(session.return_view);
+                }
+            }
+            TutorialAction::Close => self.finish_tutorial(session.return_view),
+        }
+    }
+
+    fn finish_tutorial(&mut self, return_view: TutorialReturnView) {
+        if let Err(error) = self.tutorial_store.mark_completed() {
+            let warning = format!(
+                "Could not remember tutorial completion; you can still reopen it in Settings: {error}"
+            );
+            self.log.write(
+                "warning",
+                "tutorial",
+                "TUTORIAL_COMPLETION_SAVE_FAILED",
+                &warning,
+            );
+            self.load_warnings.push(warning);
+        }
+        self.tutorial_session = None;
+        match return_view {
+            TutorialReturnView::Dashboard => {
+                self.view = AppView::Dashboard;
+            }
+            TutorialReturnView::Settings => {
+                self.view = AppView::Settings;
+                self.settings_tab = SettingsTab::General;
+                self.settings_opened_at = Some(Instant::now());
+                self.settings_section_changed_at = Some(Instant::now());
+            }
         }
     }
 
@@ -1351,7 +1485,7 @@ impl SwitcherApp {
     fn root_ui(&mut self, ui: &mut egui::Ui) -> Rect {
         let context = ui.ctx().clone();
         let disco_enabled = self.snapshot().disco_enabled;
-        let content_rect = ui
+        let (content_rect, tutorial_targets) = ui
             .scope(|ui| {
                 if disco_enabled {
                     let accent = disco_ui_color(
@@ -1369,17 +1503,23 @@ impl SwitcherApp {
                 egui::CentralPanel::default()
                     .show(ui, |ui| {
                         let content_rect = ui.max_rect();
-                        match self.view {
-                            AppView::Dashboard => self.dashboard(ui),
-                            AppView::Settings => self.settings_view(&context, ui),
-                        }
-                        content_rect
+                        let tutorial_targets = match self.view {
+                            AppView::Dashboard => Some(self.dashboard(ui)),
+                            AppView::Settings => {
+                                self.settings_view(&context, ui);
+                                None
+                            }
+                        };
+                        (content_rect, tutorial_targets)
                     })
                     .inner
             })
             .inner;
         self.dialog(&context);
         self.paint_disco_interface(&context, content_rect, disco_enabled);
+        if let Some(targets) = tutorial_targets {
+            self.tutorial_overlay(&context, content_rect, targets);
+        }
         content_rect
     }
 
@@ -1407,7 +1547,238 @@ impl SwitcherApp {
         );
     }
 
-    fn dashboard(&mut self, ui: &mut egui::Ui) {
+    fn tutorial_overlay(
+        &mut self,
+        context: &egui::Context,
+        content_rect: Rect,
+        targets: DashboardTutorialTargets,
+    ) {
+        let Some(session) = self.tutorial_session else {
+            return;
+        };
+        let step = session.step;
+        let entrance = animation_progress(session.opened_at, TUTORIAL_ENTRANCE_DURATION);
+        let step_progress = animation_progress(session.step_changed_at, TUTORIAL_STEP_DURATION);
+        if entrance < 1.0 || step_progress < 1.0 {
+            context.request_repaint();
+        }
+
+        let target = match step {
+            TutorialStep::Welcome | TutorialStep::Ready => None,
+            TutorialStep::Automatic => Some(targets.reference_preview),
+            TutorialStep::Previews => Some(targets.preview_grid),
+            TutorialStep::Health => Some(targets.health),
+            TutorialStep::Controls => Some(targets.controls),
+            TutorialStep::Prepare => Some(targets.prepare),
+        }
+        .map(|rect| {
+            let expanded = rect.expand(8.0).intersect(content_rect.shrink(4.0));
+            animate_tutorial_rect(context, expanded)
+        });
+
+        let paint_layer = egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("tutorial-spotlight-paint"),
+        );
+        let painter = context.layer_painter(paint_layer);
+        paint_tutorial_backdrop(&painter, content_rect, target, entrance);
+
+        egui::Area::new(egui::Id::new("tutorial-input-blocker"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(content_rect.min)
+            .default_size(content_rect.size())
+            .movable(false)
+            .sense(Sense::click_and_drag())
+            .fade_in(false)
+            .show(context, |ui| {
+                ui.set_min_size(content_rect.size());
+                ui.allocate_rect(
+                    Rect::from_min_size(ui.min_rect().min, content_rect.size()),
+                    Sense::click_and_drag(),
+                );
+            });
+
+        let desired_width = tutorial_callout_width(content_rect, target.is_some());
+        let desired_size = egui::vec2(desired_width, step.callout_height());
+        let callout_rect = tutorial::callout_rect(content_rect, target, desired_size);
+        let callout_offset = egui::vec2(0.0, 7.0 * (1.0 - step_progress));
+        let mut action = tutorial_keyboard_action(context, step);
+        egui::Area::new(egui::Id::new("tutorial-callout"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(callout_rect.min + callout_offset)
+            .default_size(callout_rect.size())
+            .movable(false)
+            .fade_in(false)
+            .show(context, |ui| {
+                ui.set_opacity((0.72 + step_progress * 0.28) * entrance);
+                ui.set_width(callout_rect.width());
+                ui.set_height(callout_rect.height());
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(24, 27, 33))
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(65, 72, 86)))
+                    .corner_radius(12)
+                    .inner_margin(24)
+                    .shadow(egui::Shadow {
+                        offset: [0, 10],
+                        blur: 30,
+                        spread: 2,
+                        color: Color32::from_black_alpha(165),
+                    })
+                    .show(ui, |ui| {
+                        let inner_height = (callout_rect.height() - 48.0).max(1.0);
+                        ui.set_width((callout_rect.width() - 48.0).max(1.0));
+                        ui.set_height(inner_height);
+                        let content_top = ui.cursor().top();
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "STEP {} OF {}",
+                                    step.number(),
+                                    TutorialStep::ALL.len()
+                                ))
+                                .size(10.0)
+                                .strong()
+                                .color(Color32::from_rgb(123, 164, 240)),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .link(
+                                            RichText::new("Skip tutorial")
+                                                .size(11.5)
+                                                .color(Color32::from_rgb(172, 180, 194)),
+                                        )
+                                        .clicked()
+                                    {
+                                        action = Some(TutorialAction::Close);
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(13.0);
+                        const FOOTER_HEIGHT: f32 = 32.0;
+                        const FOOTER_GAP: f32 = 12.0;
+                        let header_height = ui.cursor().top() - content_top;
+                        let body_height =
+                            (inner_height - header_height - FOOTER_GAP - FOOTER_HEIGHT).max(64.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt(("tutorial-body", step.number()))
+                            .auto_shrink([false, false])
+                            .max_height(body_height)
+                            .min_scrolled_height(body_height)
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal_top(|ui| {
+                                    let (icon_rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(28.0, 28.0),
+                                        Sense::hover(),
+                                    );
+                                    ui.painter().rect_filled(
+                                        icon_rect,
+                                        7,
+                                        Color32::from_rgb(39, 63, 104),
+                                    );
+                                    ui_icon::paint(
+                                        ui.painter(),
+                                        icon_rect.shrink(5.0),
+                                        step.icon(),
+                                        Color32::from_rgb(151, 188, 252),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(step.title())
+                                                .size(21.0)
+                                                .strong()
+                                                .color(Color32::WHITE),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                                ui.add_space(10.0);
+                                for (index, paragraph) in step.paragraphs().iter().enumerate() {
+                                    let (_, heading_color) =
+                                        tutorial_accent_palette(paragraph.accent());
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(paragraph.heading)
+                                                .size(12.25)
+                                                .strong()
+                                                .color(heading_color),
+                                        )
+                                        .wrap(),
+                                    );
+                                    ui.add_space(3.0);
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(paragraph.explanation)
+                                                .size(11.75)
+                                                .color(Color32::from_rgb(184, 191, 203)),
+                                        )
+                                        .wrap(),
+                                    );
+                                    if index + 1 < step.paragraphs().len() {
+                                        ui.add_space(9.0);
+                                    }
+                                }
+                                if !step.details().is_empty() {
+                                    ui.add_space(14.0);
+                                    for (index, detail) in step.details().iter().enumerate() {
+                                        tutorial_detail(ui, detail);
+                                        if index + 1 < step.details().len() {
+                                            ui.add_space(7.0);
+                                        }
+                                    }
+                                }
+                            });
+
+                        ui.add_space(FOOTER_GAP);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), FOOTER_HEIGHT),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                if ui
+                                    .add_enabled(
+                                        step.previous().is_some(),
+                                        egui::Button::new("Back")
+                                            .min_size(egui::vec2(76.0, FOOTER_HEIGHT)),
+                                    )
+                                    .clicked()
+                                {
+                                    action = Some(TutorialAction::Previous);
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let label = if step.is_last() { "Finish" } else { "Next" };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new(label)
+                                                        .strong()
+                                                        .color(Color32::WHITE),
+                                                )
+                                                .fill(SETTINGS_BLUE)
+                                                .stroke(Stroke::NONE)
+                                                .min_size(egui::vec2(92.0, FOOTER_HEIGHT)),
+                                            )
+                                            .clicked()
+                                        {
+                                            action = Some(TutorialAction::Next);
+                                        }
+                                    },
+                                );
+                            },
+                        );
+                    });
+            });
+
+        if let Some(action) = action {
+            self.apply_tutorial_action(action);
+        }
+    }
+
+    fn dashboard(&mut self, ui: &mut egui::Ui) -> DashboardTutorialTargets {
         let snapshot = self.snapshot();
         for warning in self
             .load_warnings
@@ -1428,12 +1799,10 @@ impl SwitcherApp {
         let preview_width = available_width * 0.70;
         let workspace_height = ui.available_height().max(0.0);
         ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
+            let previews = ui.allocate_ui_with_layout(
                 egui::vec2(preview_width, workspace_height),
                 egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    self.preview_workspace(ui, &snapshot, preview_width, workspace_height);
-                },
+                |ui| self.preview_workspace(ui, &snapshot, preview_width, workspace_height),
             );
 
             ui.separator();
@@ -1445,7 +1814,15 @@ impl SwitcherApp {
             );
             debug_assert!(controls.inner.footer.is_positive());
             debug_assert!(controls.inner.body.sections.iter().all(Rect::is_positive));
-        });
+            DashboardTutorialTargets {
+                reference_preview: previews.inner.cells[2],
+                preview_grid: previews.inner.grid,
+                health: controls.inner.body.sections[0],
+                controls: controls.inner.body.sections[1],
+                prepare: controls.inner.body.sections[2].union(controls.inner.footer),
+            }
+        })
+        .inner
     }
 
     fn preview_workspace(
@@ -1454,7 +1831,7 @@ impl SwitcherApp {
         snapshot: &AppSnapshot,
         width: f32,
         height: f32,
-    ) {
+    ) -> PreviewGridLayout {
         const FOOTER_HEIGHT: f32 = 40.0;
         const FOOTER_GAP: f32 = 10.0;
         let app_icon_texture = self.app_icon_texture(ui.ctx());
@@ -1474,12 +1851,12 @@ impl SwitcherApp {
                 ui.allocate_ui_with_layout(
                     egui::vec2(width, body_height),
                     egui::Layout::top_down(egui::Align::Center),
-                    |ui| {
-                        self.preview_grid(ui, snapshot, width, body_height);
-                    },
-                );
+                    |ui| self.preview_grid(ui, snapshot, width, body_height),
+                )
+                .inner
             },
-        );
+        )
+        .inner
     }
 
     fn app_icon_texture(&mut self, context: &egui::Context) -> egui::TextureId {
@@ -1495,7 +1872,13 @@ impl SwitcherApp {
             .id()
     }
 
-    fn preview_grid(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot, width: f32, height: f32) {
+    fn preview_grid(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        width: f32,
+        height: f32,
+    ) -> PreviewGridLayout {
         let column_gap = ui.spacing().item_spacing.x;
         let row_gap = ui.spacing().item_spacing.y;
         let label_height = ui.text_style_height(&egui::TextStyle::Small);
@@ -1510,6 +1893,8 @@ impl SwitcherApp {
         let grid_height = cell_height * 2.0 + row_gap;
         ui.add_space(((height - grid_height) / 2.0).max(0.0));
 
+        let mut cells = [Rect::NOTHING; 4];
+        let mut cell_index = 0;
         for row in [
             [
                 (PreviewKind::Webcam, snapshot.previews.webcam.as_ref()),
@@ -1522,7 +1907,7 @@ impl SwitcherApp {
         ] {
             ui.horizontal_top(|ui| {
                 for (kind, frame) in row {
-                    ui.allocate_ui_with_layout(
+                    let cell = ui.allocate_ui_with_layout(
                         egui::vec2(cell_width, cell_height),
                         egui::Layout::top_down(egui::Align::Center),
                         |ui| {
@@ -1536,8 +1921,14 @@ impl SwitcherApp {
                             );
                         },
                     );
+                    cells[cell_index] = cell.response.rect;
+                    cell_index += 1;
                 }
             });
+        }
+        PreviewGridLayout {
+            cells,
+            grid: cells[0].union(cells[3]),
         }
     }
 
@@ -2053,6 +2444,22 @@ impl SwitcherApp {
             "How StageSwap works",
             "StageSwap watches your selected screen. While it matches your saved reference image, your video calls see your webcam. When the screen changes, StageSwap automatically switches to the screen. When the reference returns, it switches back to your webcam.",
         );
+        let mut open_tutorial = false;
+        if settings_single_button_row(
+            ui,
+            "Dashboard tutorial",
+            "Review the previews, status information, and everyday controls.",
+            "Open tutorial",
+            116.0,
+        )
+        .clicked()
+        {
+            open_tutorial = true;
+        }
+        if open_tutorial {
+            self.start_tutorial(TutorialReturnView::Settings);
+            return;
+        }
 
         settings_section_gap(ui);
         settings_section_heading(
@@ -3526,6 +3933,145 @@ fn animation_progress(started_at: Option<Instant>, duration: Duration) -> f32 {
     })
 }
 
+fn tutorial_keyboard_action(context: &egui::Context, step: TutorialStep) -> Option<TutorialAction> {
+    context.input_mut(|input| {
+        if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+            return Some(TutorialAction::Close);
+        }
+        if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
+            return step.previous().map(|_| TutorialAction::Previous);
+        }
+        if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
+            || input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+            || input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
+        {
+            return Some(TutorialAction::Next);
+        }
+        None
+    })
+}
+
+fn tutorial_callout_width(content: Rect, targeted: bool) -> f32 {
+    if targeted {
+        (content.width() * 0.28).clamp(300.0, 340.0)
+    } else {
+        520.0
+    }
+}
+
+fn animate_tutorial_rect(context: &egui::Context, target: Rect) -> Rect {
+    let duration = TUTORIAL_STEP_DURATION.as_secs_f32();
+    Rect::from_min_max(
+        Pos2::new(
+            context.animate_value_with_time(
+                egui::Id::new(("tutorial-target", "left")),
+                target.left(),
+                duration,
+            ),
+            context.animate_value_with_time(
+                egui::Id::new(("tutorial-target", "top")),
+                target.top(),
+                duration,
+            ),
+        ),
+        Pos2::new(
+            context.animate_value_with_time(
+                egui::Id::new(("tutorial-target", "right")),
+                target.right(),
+                duration,
+            ),
+            context.animate_value_with_time(
+                egui::Id::new(("tutorial-target", "bottom")),
+                target.bottom(),
+                duration,
+            ),
+        ),
+    )
+}
+
+fn paint_tutorial_backdrop(
+    painter: &egui::Painter,
+    content: Rect,
+    target: Option<Rect>,
+    progress: f32,
+) {
+    let shade = Color32::from_black_alpha((190.0 * progress) as u8);
+    let Some(target) = target else {
+        painter.rect_filled(content, 0, shade);
+        return;
+    };
+    let target = target.intersect(content);
+    for rect in [
+        Rect::from_min_max(content.min, Pos2::new(content.right(), target.top())),
+        Rect::from_min_max(
+            Pos2::new(content.left(), target.bottom()),
+            content.right_bottom(),
+        ),
+        Rect::from_min_max(
+            Pos2::new(content.left(), target.top()),
+            Pos2::new(target.left(), target.bottom()),
+        ),
+        Rect::from_min_max(
+            Pos2::new(target.right(), target.top()),
+            Pos2::new(content.right(), target.bottom()),
+        ),
+    ] {
+        if rect.is_positive() {
+            painter.rect_filled(rect, 0, shade);
+        }
+    }
+    painter.rect_stroke(
+        target,
+        10,
+        Stroke::new(
+            2.0,
+            Color32::from_rgba_unmultiplied(112, 160, 248, (245.0 * progress) as u8),
+        ),
+        StrokeKind::Outside,
+    );
+}
+
+fn tutorial_detail(ui: &mut egui::Ui, detail: &tutorial::TutorialDetail) {
+    let (fill, accent) = tutorial_accent_palette(detail.accent);
+    ui.horizontal_top(|ui| {
+        let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
+        ui.painter().rect_filled(icon_rect, 6, fill);
+        ui_icon::paint(ui.painter(), icon_rect.shrink(5.0), detail.icon, accent);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add(
+                egui::Label::new(
+                    RichText::new(detail.title)
+                        .size(11.75)
+                        .strong()
+                        .color(accent),
+                )
+                .wrap(),
+            );
+            ui.add(
+                egui::Label::new(
+                    RichText::new(detail.explanation)
+                        .size(10.75)
+                        .color(Color32::from_rgb(157, 165, 179)),
+                )
+                .wrap(),
+            );
+        });
+    });
+}
+
+fn tutorial_accent_palette(accent: tutorial::TutorialAccent) -> (Color32, Color32) {
+    match accent {
+        tutorial::TutorialAccent::Blue => (
+            Color32::from_rgb(33, 39, 50),
+            Color32::from_rgb(128, 169, 243),
+        ),
+        tutorial::TutorialAccent::Green => (Color32::from_rgb(34, 81, 58), ACTIVE_GREEN),
+        tutorial::TutorialAccent::Amber => (Color32::from_rgb(82, 67, 33), TRANSITION_AMBER),
+        tutorial::TutorialAccent::Red => (Color32::from_rgb(86, 38, 42), LIVE_RED),
+    }
+}
+
 fn controls_section_heading(ui: &mut egui::Ui, icon: UiIcon, title: &str) -> Rect {
     let heading = ui.horizontal(|ui| {
         let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
@@ -4088,6 +4634,50 @@ fn settings_action_row(
     add_action: impl FnOnce(&mut egui::Ui),
 ) {
     settings_control_row(ui, title, description, add_action);
+}
+
+fn settings_single_button_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    description: &str,
+    button_label: &str,
+    button_width: f32,
+) -> egui::Response {
+    let width = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(egui::vec2(width, 54.0), Sense::hover());
+    let button_size = egui::vec2(button_width.min(width).max(1.0), 32.0);
+    let button_rect = Rect::from_center_size(
+        Pos2::new(row.right() - button_size.x / 2.0, row.center().y),
+        button_size,
+    );
+    let label_rect = Rect::from_min_max(
+        row.min,
+        Pos2::new((button_rect.left() - 12.0).max(row.left()), row.bottom()),
+    );
+    let mut label_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("settings-single-button-label", title))
+            .max_rect(label_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    label_ui.add_space(4.0);
+    label_ui.label(
+        RichText::new(title)
+            .size(13.0)
+            .color(Color32::from_rgb(224, 228, 235)),
+    );
+    label_ui.add(
+        egui::Label::new(
+            RichText::new(description)
+                .size(10.5)
+                .color(Color32::from_rgb(126, 134, 148)),
+        )
+        .wrap(),
+    );
+
+    let response = ui.put(button_rect, egui::Button::new(button_label));
+    ui.separator();
+    response
 }
 
 fn settings_info_row(ui: &mut egui::Ui, title: &str, value: &str) {
@@ -5580,6 +6170,22 @@ mod tests {
     }
 
     #[test]
+    fn tutorial_color_explanations_use_the_dashboard_semantic_colors() {
+        assert_eq!(
+            tutorial_accent_palette(tutorial::TutorialAccent::Green),
+            (Color32::from_rgb(34, 81, 58), ACTIVE_GREEN)
+        );
+        assert_eq!(
+            tutorial_accent_palette(tutorial::TutorialAccent::Amber),
+            (Color32::from_rgb(82, 67, 33), TRANSITION_AMBER)
+        );
+        assert_eq!(
+            tutorial_accent_palette(tutorial::TutorialAccent::Red),
+            (Color32::from_rgb(86, 38, 42), LIVE_RED)
+        );
+    }
+
+    #[test]
     fn fps_overlays_use_runtime_metrics_for_all_live_pipelines() {
         assert!(PreviewKind::Webcam.shows_fps());
         assert!(PreviewKind::Screen.shows_fps());
@@ -5736,6 +6342,19 @@ mod tests {
                 })
             );
         }
+        for step in TutorialStep::ALL {
+            let args = vec![
+                "StageSwap".to_owned(),
+                "--ui-preview".to_owned(),
+                format!("tutorial-{}", step.number()),
+            ];
+            assert_eq!(
+                parse_ui_preview_request(&args).unwrap(),
+                Some(UiPreviewRequest {
+                    target: UiPreviewTarget::Tutorial(step),
+                })
+            );
+        }
         let default_page = vec!["StageSwap".to_owned(), "--ui-preview".to_owned()];
         assert_eq!(
             parse_ui_preview_request(&default_page).unwrap(),
@@ -5776,6 +6395,14 @@ mod tests {
                 "StageSwap".to_owned(),
                 "--ui-preview".to_owned(),
                 "unknown".to_owned(),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_ui_preview_request(&[
+                "StageSwap".to_owned(),
+                "--ui-preview".to_owned(),
+                "tutorial-8".to_owned(),
             ])
             .is_err()
         );
@@ -5845,6 +6472,36 @@ mod tests {
         assert_eq!(
             settings_switch_colors(),
             (SETTINGS_SWITCH_OFF, SETTINGS_BLUE)
+        );
+    }
+
+    #[test]
+    fn tutorial_settings_action_is_flush_with_the_right_control_edge() {
+        let context = egui::Context::default();
+        let mut button_rect = Rect::NOTHING;
+        let mut row_right = 0.0;
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 80.0))),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                ui.set_width(960.0);
+                row_right = ui.available_rect_before_wrap().right();
+                button_rect = settings_single_button_row(
+                    ui,
+                    "Dashboard tutorial",
+                    "Review the previews, status information, and everyday controls.",
+                    "Open tutorial",
+                    116.0,
+                )
+                .rect;
+            },
+        );
+        assert!(
+            (button_rect.right() - row_right).abs() <= 2.0,
+            "tutorial button should align with the full settings row: \
+             button={button_rect:?}, row_right={row_right}"
         );
     }
 
@@ -6617,6 +7274,218 @@ mod tests {
         // A click on another control resets the hidden Diagnostics sequence.
         gesture.reset();
         assert!(!gesture.register_primary_click(start + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn manual_tutorial_navigation_returns_to_general_settings_and_persists_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store);
+        app.view = AppView::Settings;
+        app.settings_tab = SettingsTab::General;
+
+        app.start_tutorial(TutorialReturnView::Settings);
+        assert_eq!(app.view, AppView::Dashboard);
+        assert_eq!(
+            app.tutorial_session.map(|session| session.step),
+            Some(TutorialStep::Welcome)
+        );
+
+        app.apply_tutorial_action(TutorialAction::Previous);
+        assert_eq!(
+            app.tutorial_session.map(|session| session.step),
+            Some(TutorialStep::Welcome)
+        );
+        app.apply_tutorial_action(TutorialAction::Next);
+        assert_eq!(
+            app.tutorial_session.map(|session| session.step),
+            Some(TutorialStep::Automatic)
+        );
+        app.apply_tutorial_action(TutorialAction::Previous);
+        for _ in 0..6 {
+            app.apply_tutorial_action(TutorialAction::Next);
+        }
+        assert_eq!(
+            app.tutorial_session.map(|session| session.step),
+            Some(TutorialStep::Ready)
+        );
+        app.apply_tutorial_action(TutorialAction::Next);
+
+        assert!(app.tutorial_session.is_none());
+        assert_eq!(app.view, AppView::Settings);
+        assert_eq!(app.settings_tab, SettingsTab::General);
+        assert!(
+            !TutorialStateStore::new(directory.path())
+                .initialize(false)
+                .show_tutorial
+        );
+    }
+
+    #[test]
+    fn tutorial_completion_is_independent_from_user_and_admin_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        let config = AppConfig {
+            selected_video_device_id: "tutorial-independent-camera".into(),
+            ..AppConfig::default()
+        };
+        save_config(&store, &config).unwrap();
+        let admin_store = AdminProfileStore::new(directory.path());
+        admin_store.save(&config).unwrap();
+        let admin_before = std::fs::read(admin_store.profile_path()).unwrap();
+
+        let mut app = SwitcherApp::new(config.clone(), Vec::new(), store.clone());
+        app.start_tutorial(TutorialReturnView::Dashboard);
+        app.apply_tutorial_action(TutorialAction::Close);
+
+        assert_eq!(store.load().config, config);
+        assert_eq!(
+            std::fs::read(admin_store.profile_path()).unwrap(),
+            admin_before
+        );
+    }
+
+    #[test]
+    fn tutorial_targets_and_callouts_stay_bounded_at_supported_dpi() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            AppConfig {
+                start_automatically: false,
+                ..AppConfig::default()
+            },
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        );
+        let context = egui::Context::default();
+        ui_icon::install_fonts(&context);
+        for viewport in [
+            egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
+            egui::vec2(1280.0, 720.0),
+        ] {
+            for dpi_scale in [1.0, 1.5] {
+                let mut input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
+                    ..egui::RawInput::default()
+                };
+                input
+                    .viewports
+                    .get_mut(&egui::ViewportId::ROOT)
+                    .unwrap()
+                    .native_pixels_per_point = Some(dpi_scale);
+                let _ = context.run_ui(input, |ui| {
+                    let content = ui.max_rect();
+                    let targets = app.dashboard(ui);
+                    for target in [
+                        targets.reference_preview,
+                        targets.preview_grid,
+                        targets.health,
+                        targets.controls,
+                        targets.prepare,
+                    ] {
+                        assert!(target.is_positive());
+                        assert!(content.contains_rect(target));
+                    }
+                    for step in TutorialStep::ALL {
+                        let target = match step {
+                            TutorialStep::Welcome | TutorialStep::Ready => None,
+                            TutorialStep::Automatic => Some(targets.reference_preview),
+                            TutorialStep::Previews => Some(targets.preview_grid),
+                            TutorialStep::Health => Some(targets.health),
+                            TutorialStep::Controls => Some(targets.controls),
+                            TutorialStep::Prepare => Some(targets.prepare),
+                        };
+                        let width = tutorial_callout_width(content, target.is_some());
+                        let callout = tutorial::callout_rect(
+                            content,
+                            target,
+                            egui::vec2(width, step.callout_height()),
+                        );
+                        assert!(
+                            content.contains_rect(callout),
+                            "{step:?} callout escaped {content:?}: {callout:?}"
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn all_tutorial_previews_render_and_the_overlay_blocks_dashboard_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            AppConfig {
+                start_automatically: false,
+                ..AppConfig::default()
+            },
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        );
+        let context = egui::Context::default();
+        ui_icon::install_fonts(&context);
+        let viewport = egui::vec2(1280.0, 720.0);
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, viewport);
+
+        for tutorial_viewport in [
+            egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
+            viewport,
+        ] {
+            let tutorial_screen = Rect::from_min_size(Pos2::ZERO, tutorial_viewport);
+            for step in TutorialStep::ALL {
+                app.tutorial_session = Some(TutorialSession::preview(step));
+                let output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(tutorial_screen),
+                        ..egui::RawInput::default()
+                    },
+                    |ui| {
+                        app.root_ui(ui);
+                    },
+                );
+                assert!(
+                    output.shapes.len() > 80,
+                    "{step:?} did not render the dashboard, spotlight, and callout at \
+                     {tutorial_viewport:?}"
+                );
+            }
+        }
+
+        app.tutorial_session = Some(TutorialSession::preview(TutorialStep::Controls));
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                app.root_ui(ui);
+            },
+        );
+        let settings_position = Pos2::new(1120.0, 675.0);
+        let click_input = egui::RawInput {
+            time: Some(1.0),
+            screen_rect: Some(screen_rect),
+            events: vec![
+                egui::Event::PointerMoved(settings_position),
+                egui::Event::PointerButton {
+                    pos: settings_position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: settings_position,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..egui::RawInput::default()
+        };
+        let _ = context.run_ui(click_input, |ui| {
+            app.root_ui(ui);
+        });
+        assert_eq!(app.view, AppView::Dashboard);
+        assert!(app.tutorial_session.is_some());
     }
 
     #[test]
