@@ -30,6 +30,7 @@ pub enum Command {
     ToggleDisco,
     SetMode(OutputMode),
     UpdateSettings(Box<AppConfig>),
+    ReloadSettings(Box<AppConfig>),
     CaptureReference,
     ImportReference(PathBuf),
     SelectMonitor(MonitorDescriptor),

@@ -429,12 +429,31 @@ impl AdminProfileStore {
 
     pub fn restore_on_launch_with_replace(
         &self,
+        replace: impl FnMut(&Path, &Path) -> io::Result<()>,
+    ) -> io::Result<AdminRestoreOutcome> {
+        self.restore_with_replace(true, replace)
+    }
+
+    pub fn restore_now(&self) -> io::Result<AdminRestoreOutcome> {
+        self.restore_now_with_replace(atomic_replace)
+    }
+
+    pub fn restore_now_with_replace(
+        &self,
+        replace: impl FnMut(&Path, &Path) -> io::Result<()>,
+    ) -> io::Result<AdminRestoreOutcome> {
+        self.restore_with_replace(false, replace)
+    }
+
+    fn restore_with_replace(
+        &self,
+        require_auto_restore: bool,
         mut replace: impl FnMut(&Path, &Path) -> io::Result<()>,
     ) -> io::Result<AdminRestoreOutcome> {
         let Some(profile) = self.load_profile()? else {
             return Ok(AdminRestoreOutcome::Missing);
         };
-        if !profile.auto_restore_on_launch {
+        if require_auto_restore && !profile.auto_restore_on_launch {
             return Ok(AdminRestoreOutcome::Disabled);
         }
 
@@ -805,6 +824,59 @@ mod tests {
     }
 
     #[test]
+    fn manual_admin_restore_ignores_auto_restore_and_replaces_working_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_store = ConfigStore::new(directory.path());
+        let admin_store = AdminProfileStore::new(directory.path());
+        write_reference(&config_store.reference_path(), [255, 0, 0, 255]);
+        let admin = AppConfig {
+            selected_video_device_id: "admin-camera".into(),
+            cursor_visible: true,
+            reference_image_path: config_store.reference_path().display().to_string(),
+            ..AppConfig::default()
+        };
+        let status = admin_store.save(&admin).unwrap();
+        assert!(!status.auto_restore_on_launch);
+
+        config_store
+            .save(&AppConfig {
+                selected_video_device_id: "user-camera".into(),
+                reference_image_path: config_store.reference_path().display().to_string(),
+                ..AppConfig::default()
+            })
+            .unwrap();
+        write_reference(&config_store.reference_path(), [0, 0, 255, 255]);
+
+        assert_eq!(
+            admin_store.restore_now().unwrap(),
+            AdminRestoreOutcome::Restored
+        );
+        assert_eq!(config_store.load().config, admin);
+        assert_eq!(
+            reference_color(&config_store.reference_path()),
+            [255, 0, 0, 255]
+        );
+        assert!(
+            !admin_store
+                .status()
+                .unwrap()
+                .unwrap()
+                .auto_restore_on_launch
+        );
+    }
+
+    #[test]
+    fn manual_admin_restore_reports_a_missing_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            AdminProfileStore::new(directory.path())
+                .restore_now()
+                .unwrap(),
+            AdminRestoreOutcome::Missing
+        );
+    }
+
+    #[test]
     fn baseline_without_reference_removes_a_later_session_reference() {
         let directory = tempfile::tempdir().unwrap();
         let config_store = ConfigStore::new(directory.path());
@@ -851,6 +923,7 @@ mod tests {
         fs::write(admin_store.profile_path(), "not valid json").unwrap();
 
         assert!(admin_store.restore_on_launch().is_err());
+        assert!(admin_store.restore_now().is_err());
         assert_eq!(fs::read(config_store.config_path()).unwrap(), config_before);
         assert_eq!(
             fs::read(config_store.reference_path()).unwrap(),
@@ -889,6 +962,7 @@ mod tests {
         fs::write(directory.path().join(protected_reference), "corrupt image").unwrap();
 
         assert!(admin_store.restore_on_launch().is_err());
+        assert!(admin_store.restore_now().is_err());
         assert_eq!(config_store.load().config, user);
         assert_eq!(
             reference_color(&config_store.reference_path()),

@@ -534,7 +534,7 @@ impl RuntimeState {
                 self.config.output_mode = mode;
                 self.record(format!("Output mode changed to {mode:?}"));
             }
-            Command::UpdateSettings(config) => {
+            Command::UpdateSettings(config) | Command::ReloadSettings(config) => {
                 self.config = *config;
                 self.snapshot.mode = self.config.output_mode;
                 self.snapshot.selected_video_device_id =
@@ -1198,7 +1198,8 @@ impl Platform {
 
     fn command(&mut self, command: &Command, state: &mut RuntimeState) {
         match command {
-            Command::UpdateSettings(config) => {
+            Command::UpdateSettings(config) | Command::ReloadSettings(config) => {
+                let reload_settings = matches!(command, Command::ReloadSettings(_));
                 if let Err(error) = configure_startup(config.start_with_windows) {
                     state.record(format!("Windows startup preference failed: {error}"));
                 }
@@ -1229,7 +1230,9 @@ impl Platform {
                     self.restart_screen(state);
                     state.config.cursor_visible = old;
                 }
-                if cursor_changed || threshold_changed || automatic_rescans_changed {
+                if reload_settings {
+                    self.invalidate_monitor_scans(config.similarity_threshold);
+                } else if cursor_changed || threshold_changed || automatic_rescans_changed {
                     self.invalidate_monitor_scans(config.similarity_threshold);
                     if config.automatic_monitor_rescans {
                         self.request_monitor_scan(state, config.cursor_visible);

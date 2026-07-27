@@ -264,6 +264,16 @@ fn restore_admin_profile(store: &AdminProfileStore) -> std::io::Result<AdminRest
     store.restore_on_launch()
 }
 
+#[cfg(windows)]
+fn restore_admin_profile_now(store: &AdminProfileStore) -> std::io::Result<AdminRestoreOutcome> {
+    store.restore_now_with_replace(stageswap_windows::replace_file_atomic)
+}
+
+#[cfg(not(windows))]
+fn restore_admin_profile_now(store: &AdminProfileStore) -> std::io::Result<AdminRestoreOutcome> {
+    store.restore_now()
+}
+
 fn aspect_locked_window_size(current: Vec2, previous: Option<Vec2>) -> Vec2 {
     let preserve_width = previous
         .is_none_or(|previous| (current.x - previous.x).abs() >= (current.y - previous.y).abs());
@@ -380,6 +390,7 @@ fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>,
         Some("dialog-replace-baseline") => {
             UiPreviewTarget::Dialog(AppDialogKind::ReplaceAdminBaseline)
         }
+        Some("dialog-load-admin-config") => UiPreviewTarget::Dialog(AppDialogKind::LoadAdminConfig),
         Some("dialog-remove-baseline") => {
             UiPreviewTarget::Dialog(AppDialogKind::RemoveAdminBaseline)
         }
@@ -408,6 +419,7 @@ enum AppDialogKind {
     ClearLogs,
     Admin,
     ReplaceAdminBaseline,
+    LoadAdminConfig,
     RemoveAdminBaseline,
 }
 
@@ -425,6 +437,7 @@ enum DialogAction {
     ClearLogs,
     SaveAdminBaseline,
     ReplaceAdminBaseline,
+    LoadAdminConfig,
     RemoveAdminBaseline,
     SetAdminAutoRestore(bool),
 }
@@ -912,6 +925,7 @@ struct SwitcherApp {
     admin_profile_status: Option<AdminProfileStatus>,
     active_dialog: Option<ActiveDialog>,
     awaiting_video_device_id: Option<String>,
+    awaiting_monitor_label: Option<String>,
     settings_opened_at: Option<Instant>,
     settings_section_changed_at: Option<Instant>,
     app_icon_texture: Option<TextureHandle>,
@@ -971,6 +985,7 @@ impl SwitcherApp {
             admin_profile_status,
             active_dialog: None,
             awaiting_video_device_id: None,
+            awaiting_monitor_label: None,
             settings_opened_at: None,
             settings_section_changed_at: None,
             app_icon_texture: None,
@@ -1026,6 +1041,7 @@ impl SwitcherApp {
                     kind,
                     AppDialogKind::Admin
                         | AppDialogKind::ReplaceAdminBaseline
+                        | AppDialogKind::LoadAdminConfig
                         | AppDialogKind::RemoveAdminBaseline
                 ) {
                     self.admin_profile_status = Some(AdminProfileStatus {
@@ -1169,7 +1185,7 @@ impl SwitcherApp {
             Err(error) => {
                 self.admin_profile_status = None;
                 self.record_admin_failure(format!(
-                    "Could not read the existing admin baseline: {error}"
+                    "Could not read the existing admin config: {error}"
                 ));
             }
         }
@@ -1186,11 +1202,67 @@ impl SwitcherApp {
                     "info",
                     "configuration",
                     "ADMIN_BASELINE_SAVED",
-                    "Admin baseline saved",
+                    "Admin config saved",
                 );
             }
             Err(error) => {
-                self.record_admin_failure(format!("Could not save the admin baseline: {error}"));
+                self.record_admin_failure(format!("Could not save the admin config: {error}"));
+            }
+        }
+    }
+
+    fn load_admin_config(&mut self) {
+        let admin_store = AdminProfileStore::new(self.store.directory());
+        match restore_admin_profile_now(&admin_store) {
+            Ok(AdminRestoreOutcome::Restored) => {
+                let mut loaded = self.store.load();
+                for warning in loaded.warnings.drain(..) {
+                    self.log
+                        .write("warning", "configuration", "LOAD_WARNING", &warning);
+                    self.load_warnings.push(warning);
+                }
+
+                let selected_monitor = {
+                    let snapshot = self.snapshot();
+                    snapshot
+                        .monitors
+                        .iter()
+                        .find(|monitor| monitor.label == loaded.config.selected_monitor_label)
+                        .or_else(|| snapshot.monitors.get(1))
+                        .or_else(|| snapshot.monitors.first())
+                        .cloned()
+                };
+                self.awaiting_video_device_id =
+                    Some(loaded.config.selected_video_device_id.clone());
+                self.awaiting_monitor_label = selected_monitor
+                    .as_ref()
+                    .map(|monitor| monitor.label.clone());
+                self.config = loaded.config;
+                self.settings_save_state = SettingsSaveState::Saved;
+                self.send(Command::ReloadSettings(Box::new(self.config.clone())));
+                if let Some(monitor) = selected_monitor {
+                    self.send(Command::SelectMonitor(monitor));
+                }
+                if self.config.automatic_monitor_rescans {
+                    self.send(Command::Rescan);
+                }
+                self.open_dialog(AppDialogKind::Admin);
+                self.log.write(
+                    "info",
+                    "configuration",
+                    "ADMIN_CONFIG_LOADED",
+                    "Admin config loaded",
+                );
+            }
+            Ok(AdminRestoreOutcome::Missing) => {
+                self.admin_profile_status = None;
+                self.record_admin_failure("No admin config is saved.".into());
+            }
+            Ok(AdminRestoreOutcome::Disabled) => {
+                self.record_admin_failure("Could not load the admin config.".into());
+            }
+            Err(error) => {
+                self.record_admin_failure(format!("Could not load the admin config: {error}"));
             }
         }
     }
@@ -1227,11 +1299,11 @@ impl SwitcherApp {
                     "info",
                     "configuration",
                     "ADMIN_BASELINE_REMOVED",
-                    "Admin baseline removed",
+                    "Admin config deleted",
                 );
             }
             Err(error) => {
-                self.record_admin_failure(format!("Could not remove the admin baseline: {error}"));
+                self.record_admin_failure(format!("Could not delete the admin config: {error}"));
             }
         }
     }
@@ -2690,6 +2762,13 @@ impl SwitcherApp {
             Some(DialogAction::ReplaceAdminBaseline) => {
                 self.open_dialog(AppDialogKind::ReplaceAdminBaseline);
             }
+            Some(DialogAction::LoadAdminConfig) => {
+                if active.kind == AppDialogKind::LoadAdminConfig {
+                    self.load_admin_config();
+                } else {
+                    self.open_dialog(AppDialogKind::LoadAdminConfig);
+                }
+            }
             Some(DialogAction::RemoveAdminBaseline) => {
                 if active.kind == AppDialogKind::RemoveAdminBaseline {
                     self.remove_admin_baseline();
@@ -2857,6 +2936,7 @@ impl AppDialogKind {
             Self::Exit
             | Self::ClearLogs
             | Self::ReplaceAdminBaseline
+            | Self::LoadAdminConfig
             | Self::RemoveAdminBaseline => 400.0,
         }
     }
@@ -2866,8 +2946,9 @@ impl AppDialogKind {
             Self::Exit => "Exit StageSwap?",
             Self::ClearLogs => "Clear diagnostic logs?",
             Self::Admin => "Admin configuration",
-            Self::ReplaceAdminBaseline => "Replace admin baseline?",
-            Self::RemoveAdminBaseline => "Remove admin baseline?",
+            Self::ReplaceAdminBaseline => "Replace saved configuration?",
+            Self::LoadAdminConfig => "Load saved configuration?",
+            Self::RemoveAdminBaseline => "Delete saved configuration?",
         }
     }
 
@@ -2877,13 +2958,14 @@ impl AppDialogKind {
             Self::ClearLogs => UiIcon::Folder,
             Self::Admin => UiIcon::Wrench,
             Self::ReplaceAdminBaseline => UiIcon::Refresh,
+            Self::LoadAdminConfig => UiIcon::Refresh,
             Self::RemoveAdminBaseline => UiIcon::Error,
         }
     }
 
     const fn accent(self) -> Color32 {
         match self {
-            Self::Admin | Self::ReplaceAdminBaseline => SETTINGS_BLUE,
+            Self::Admin | Self::ReplaceAdminBaseline | Self::LoadAdminConfig => SETTINGS_BLUE,
             Self::Exit | Self::ClearLogs | Self::RemoveAdminBaseline => {
                 Color32::from_rgb(222, 90, 98)
             }
@@ -2918,7 +3000,10 @@ fn dialog_content(
             "This permanently removes locally stored diagnostic logs. New logs will continue to be recorded."
         }
         AppDialogKind::ReplaceAdminBaseline => {
-            "Replace the saved baseline with the setup currently shown in Settings?"
+            "Replace the saved admin config with the setup currently shown in Settings?"
+        }
+        AppDialogKind::LoadAdminConfig => {
+            "Replace the current settings and reference image with the saved admin config? Current session changes will be lost."
         }
         AppDialogKind::RemoveAdminBaseline => {
             "Auto-restore will turn off. Your current settings and reference image will stay unchanged."
@@ -2953,17 +3038,25 @@ fn dialog_content(
             ),
             AppDialogKind::ReplaceAdminBaseline => (
                 UiIcon::Check,
-                "Keep baseline",
+                "Keep saved configuration",
                 UiIcon::Refresh,
-                "Replace baseline",
+                "Save current configuration",
                 DialogAction::SaveAdminBaseline,
+                DialogButtonTone::Primary,
+            ),
+            AppDialogKind::LoadAdminConfig => (
+                UiIcon::Check,
+                "Keep current config",
+                UiIcon::Refresh,
+                "Load saved configuration",
+                DialogAction::LoadAdminConfig,
                 DialogButtonTone::Primary,
             ),
             AppDialogKind::RemoveAdminBaseline => (
                 UiIcon::Check,
-                "Keep baseline",
+                "Keep saved configuration",
                 UiIcon::Error,
-                "Remove baseline",
+                "Delete saved configuration",
                 DialogAction::RemoveAdminBaseline,
                 DialogButtonTone::Danger,
             ),
@@ -3029,47 +3122,44 @@ fn admin_dialog_content(
     match status {
         None => {
             ui.label(
-                RichText::new("No admin baseline is saved.")
+                RichText::new("No admin config is saved.")
                     .size(13.0)
                     .color(Color32::from_rgb(137, 146, 160)),
             );
             ui.add_space(22.0);
             let mut action = None;
-            let button_width =
-                dialog_action_width(ui.available_width(), ui.spacing().item_spacing.x, 2);
-            ui.horizontal(|ui| {
-                let close = dialog_button(
-                    ui,
-                    UiIcon::Back,
-                    "Close",
-                    DialogButtonTone::Secondary,
-                    button_width,
-                );
-                if focus_safe_action {
-                    close.request_focus();
-                }
-                if close.clicked() {
-                    action = Some(DialogAction::Dismiss);
-                }
-                if dialog_button(
-                    ui,
-                    UiIcon::Check,
-                    "Save baseline",
-                    DialogButtonTone::Primary,
-                    button_width,
-                )
-                .clicked()
-                {
-                    action = Some(DialogAction::SaveAdminBaseline);
-                }
-            });
+            let button_width = ui.available_width();
+            if dialog_button(
+                ui,
+                UiIcon::Check,
+                "Save current configuration",
+                DialogButtonTone::Primary,
+                button_width,
+            )
+            .clicked()
+            {
+                action = Some(DialogAction::SaveAdminBaseline);
+            }
+            let back = dialog_button(
+                ui,
+                UiIcon::Back,
+                "Back",
+                DialogButtonTone::Secondary,
+                button_width,
+            );
+            if focus_safe_action {
+                back.request_focus();
+            }
+            if back.clicked() {
+                action = Some(DialogAction::Dismiss);
+            }
             action
         }
         Some(status) => {
             let reference = if status.reference_included {
-                "Settings and reference image saved"
+                "Settings and reference image saved in the admin config"
             } else {
-                "Settings saved without a reference image"
+                "Admin config saved without a reference image"
             };
             icon_text(
                 ui,
@@ -3084,52 +3174,60 @@ fn admin_dialog_content(
                 ui,
                 &mut auto_restore,
                 "Auto-restore on launch",
-                "Replace session changes with this baseline whenever StageSwap starts.",
+                "Replace session changes with this admin config whenever StageSwap starts.",
             );
             if auto_restore != status.auto_restore_on_launch {
                 return Some(DialogAction::SetAdminAutoRestore(auto_restore));
             }
             ui.add_space(18.0);
             let mut action = None;
-            let button_width =
-                dialog_action_width(ui.available_width(), ui.spacing().item_spacing.x, 3);
-            ui.horizontal(|ui| {
-                if dialog_button(
-                    ui,
-                    UiIcon::Error,
-                    "Remove…",
-                    DialogButtonTone::Danger,
-                    button_width,
-                )
-                .clicked()
-                {
-                    action = Some(DialogAction::RemoveAdminBaseline);
-                }
-                let close = dialog_button(
-                    ui,
-                    UiIcon::Back,
-                    "Close",
-                    DialogButtonTone::Secondary,
-                    button_width,
-                );
-                if focus_safe_action {
-                    close.request_focus();
-                }
-                if close.clicked() {
-                    action = Some(DialogAction::Dismiss);
-                }
-                if dialog_button(
-                    ui,
-                    UiIcon::Refresh,
-                    "Replace…",
-                    DialogButtonTone::Primary,
-                    button_width,
-                )
-                .clicked()
-                {
-                    action = Some(DialogAction::ReplaceAdminBaseline);
-                }
-            });
+            let button_width = ui.available_width();
+            if dialog_button(
+                ui,
+                UiIcon::Check,
+                "Save current configuration",
+                DialogButtonTone::Primary,
+                button_width,
+            )
+            .clicked()
+            {
+                action = Some(DialogAction::ReplaceAdminBaseline);
+            }
+            if dialog_button(
+                ui,
+                UiIcon::Refresh,
+                "Load saved configuration",
+                DialogButtonTone::Primary,
+                button_width,
+            )
+            .clicked()
+            {
+                action = Some(DialogAction::LoadAdminConfig);
+            }
+            if dialog_button(
+                ui,
+                UiIcon::Error,
+                "Delete saved configuration",
+                DialogButtonTone::Danger,
+                button_width,
+            )
+            .clicked()
+            {
+                action = Some(DialogAction::RemoveAdminBaseline);
+            }
+            let back = dialog_button(
+                ui,
+                UiIcon::Back,
+                "Back",
+                DialogButtonTone::Secondary,
+                button_width,
+            );
+            if focus_safe_action {
+                back.request_focus();
+            }
+            if back.clicked() {
+                action = Some(DialogAction::Dismiss);
+            }
             action
         }
     }
@@ -3245,7 +3343,20 @@ impl eframe::App for SwitcherApp {
                 ));
             }
         }
-        self.sync_selected_monitor_preference(&snapshot);
+        if self
+            .awaiting_monitor_label
+            .as_ref()
+            .is_some_and(|expected| {
+                snapshot
+                    .selected_monitor
+                    .as_ref()
+                    .is_some_and(|monitor| monitor.label == *expected)
+            })
+        {
+            self.awaiting_monitor_label = None;
+        } else if self.awaiting_monitor_label.is_none() {
+            self.sync_selected_monitor_preference(&snapshot);
+        }
         if self.settings_save_due(Instant::now()) {
             self.flush_settings();
         }
@@ -6089,6 +6200,7 @@ mod tests {
                 "dialog-replace-baseline",
                 AppDialogKind::ReplaceAdminBaseline,
             ),
+            ("dialog-load-admin-config", AppDialogKind::LoadAdminConfig),
             ("dialog-remove-baseline", AppDialogKind::RemoveAdminBaseline),
         ] {
             let args = vec![
@@ -6556,6 +6668,7 @@ mod tests {
             AppDialogKind::ClearLogs,
             AppDialogKind::Admin,
             AppDialogKind::ReplaceAdminBaseline,
+            AppDialogKind::LoadAdminConfig,
             AppDialogKind::RemoveAdminBaseline,
         ] {
             for (viewport, dpi_scale) in [
@@ -6791,6 +6904,75 @@ mod tests {
         assert_eq!(
             AdminProfileStore::new(directory.path()).status().unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn manual_admin_load_updates_working_config_runtime_and_reference() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
+            .save(store.reference_path())
+            .unwrap();
+        let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store.clone());
+        app.view = AppView::Settings;
+        let admin = AppConfig {
+            selected_video_device_id: "admin-camera".into(),
+            selected_monitor_label: "Admin display".into(),
+            similarity_threshold: 0.91,
+            cursor_visible: true,
+            output_mode: OutputMode::ForceScreen,
+            reference_image_path: store.reference_path().display().to_string(),
+            ..AppConfig::default()
+        };
+        app.config = admin.clone();
+        app.save_admin_baseline();
+        assert!(!app.admin_profile_status.unwrap().auto_restore_on_launch);
+
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 255, 255]))
+            .save(store.reference_path())
+            .unwrap();
+        let user = AppConfig {
+            selected_video_device_id: "user-camera".into(),
+            reference_image_path: store.reference_path().display().to_string(),
+            ..AppConfig::default()
+        };
+        save_config(&store, &user).unwrap();
+        app.config = user;
+        app.settings_save_state = SettingsSaveState::Pending(Instant::now());
+        app.open_dialog(AppDialogKind::LoadAdminConfig);
+
+        app.load_admin_config();
+
+        assert_eq!(app.view, AppView::Settings);
+        assert!(app.dialog_is(AppDialogKind::Admin));
+        assert_eq!(app.config, admin);
+        assert_eq!(store.load().config, admin);
+        assert!(matches!(app.settings_save_state, SettingsSaveState::Saved));
+        assert!(!app.admin_profile_status.unwrap().auto_restore_on_launch);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let snapshot = loop {
+            let snapshot = app.runtime.snapshot();
+            if snapshot.selected_video_device_id == "admin-camera"
+                && snapshot.mode == OutputMode::ForceScreen
+                && snapshot.previews.reference.is_some()
+                && snapshot
+                    .recent_activity
+                    .iter()
+                    .any(|activity| activity == "Monitor rescan requested")
+            {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not apply the manually loaded admin config"
+            );
+            std::thread::yield_now();
+        };
+        assert_eq!(
+            &snapshot.previews.reference.unwrap().pixels()[..4],
+            &[0, 0, 255, 255]
         );
     }
 
