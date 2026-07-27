@@ -19,17 +19,20 @@ path = "src/lib.rs"
 stageswap-core = { path = "../core" }
 stageswap-windows = { path = "../windows" }
 eframe.workspace = true
+egui-phosphor = { version = "0.13", default-features = false, features = ["regular"] }
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+fontdue = "0.9.3"
 tray-icon.workspace = true
 
 [build-dependencies]
 winresource = "0.1.31"
 
 [dev-dependencies]
+fontdue = "0.9.3"
 tempfile = "3"
 
 [package.metadata.winresource]

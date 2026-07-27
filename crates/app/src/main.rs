@@ -49,7 +49,9 @@ mod deployment_payload;
 mod local_log;
 #[cfg(windows)]
 mod tray;
+mod ui_icon;
 use local_log::LocalLog;
+use ui_icon::UiIcon;
 
 fn main() -> eframe::Result {
     let _embedded_payload = deployment_payload::bytes();
@@ -182,6 +184,7 @@ fn main() -> eframe::Result {
         WINDOW_TITLE,
         options,
         Box::new(move |context| {
+            ui_icon::install_fonts(&context.egui_ctx);
             let mut visuals = egui::Visuals::dark();
             visuals.panel_fill = Color32::from_rgb(18, 20, 24);
             visuals.window_fill = Color32::from_rgb(23, 25, 30);
@@ -857,34 +860,6 @@ enum PreviewContour {
     Neutral,
     Active,
     Live,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum UiIcon {
-    Back,
-    Bell,
-    Broadcast,
-    Camera,
-    Capture,
-    Check,
-    Error,
-    Folder,
-    Image,
-    Info,
-    Layers,
-    Loader,
-    Monitor,
-    Play,
-    Question,
-    Refresh,
-    Robot,
-    Route,
-    Settings,
-    Stop,
-    Target,
-    Unavailable,
-    Window,
-    Wrench,
 }
 
 const SETTINGS_RECOVERY_TARGETS: [(UiIcon, &str, f32, RestartTarget); 4] = [
@@ -2348,7 +2323,7 @@ impl SwitcherApp {
                 icon: UiIcon::Target,
                 title: "Reference matching",
                 description:
-                    "Reference matches → Camera. Reference changes → Display. Without a usable reference, Automatic mode stays on Camera.",
+                    "Reference matches: Camera. Reference changes: Display. Without a usable reference, Automatic mode stays on Camera.",
             },
             SettingsPreview {
                 kind: PreviewKind::Reference,
@@ -2954,12 +2929,12 @@ impl AppDialogKind {
 
     const fn icon(self) -> UiIcon {
         match self {
-            Self::Exit => UiIcon::Stop,
-            Self::ClearLogs => UiIcon::Folder,
+            Self::Exit => UiIcon::SignOut,
+            Self::ClearLogs => UiIcon::Trash,
             Self::Admin => UiIcon::Wrench,
-            Self::ReplaceAdminBaseline => UiIcon::Refresh,
-            Self::LoadAdminConfig => UiIcon::Refresh,
-            Self::RemoveAdminBaseline => UiIcon::Error,
+            Self::ReplaceAdminBaseline => UiIcon::Save,
+            Self::LoadAdminConfig => UiIcon::Load,
+            Self::RemoveAdminBaseline => UiIcon::Trash,
         }
     }
 
@@ -3023,7 +2998,7 @@ fn dialog_content(
             AppDialogKind::Exit => (
                 UiIcon::Window,
                 "Stay open",
-                UiIcon::Stop,
+                UiIcon::SignOut,
                 "Exit StageSwap",
                 DialogAction::Exit,
                 DialogButtonTone::Danger,
@@ -3031,7 +3006,7 @@ fn dialog_content(
             AppDialogKind::ClearLogs => (
                 UiIcon::Folder,
                 "Keep logs",
-                UiIcon::Error,
+                UiIcon::Trash,
                 "Clear logs",
                 DialogAction::ClearLogs,
                 DialogButtonTone::Danger,
@@ -3039,7 +3014,7 @@ fn dialog_content(
             AppDialogKind::ReplaceAdminBaseline => (
                 UiIcon::Check,
                 "Keep saved configuration",
-                UiIcon::Refresh,
+                UiIcon::Save,
                 "Save current configuration",
                 DialogAction::SaveAdminBaseline,
                 DialogButtonTone::Primary,
@@ -3047,7 +3022,7 @@ fn dialog_content(
             AppDialogKind::LoadAdminConfig => (
                 UiIcon::Check,
                 "Keep current config",
-                UiIcon::Refresh,
+                UiIcon::Load,
                 "Load saved configuration",
                 DialogAction::LoadAdminConfig,
                 DialogButtonTone::Primary,
@@ -3055,7 +3030,7 @@ fn dialog_content(
             AppDialogKind::RemoveAdminBaseline => (
                 UiIcon::Check,
                 "Keep saved configuration",
-                UiIcon::Error,
+                UiIcon::Trash,
                 "Delete saved configuration",
                 DialogAction::RemoveAdminBaseline,
                 DialogButtonTone::Danger,
@@ -3094,7 +3069,7 @@ fn dialog_header(ui: &mut egui::Ui, kind: AppDialogKind) {
             18.0,
             Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38),
         );
-        draw_icon(ui.painter(), rect.shrink(9.0), kind.icon(), accent, 1.7);
+        ui_icon::paint(ui.painter(), rect.shrink(9.0), kind.icon(), accent);
         ui.add_space(4.0);
         ui.label(
             RichText::new(kind.title())
@@ -3131,7 +3106,7 @@ fn admin_dialog_content(
             let button_width = ui.available_width();
             if dialog_button(
                 ui,
-                UiIcon::Check,
+                UiIcon::Save,
                 "Save current configuration",
                 DialogButtonTone::Primary,
                 button_width,
@@ -3184,7 +3159,7 @@ fn admin_dialog_content(
             let button_width = ui.available_width();
             if dialog_button(
                 ui,
-                UiIcon::Check,
+                UiIcon::Save,
                 "Save current configuration",
                 DialogButtonTone::Primary,
                 button_width,
@@ -3195,7 +3170,7 @@ fn admin_dialog_content(
             }
             if dialog_button(
                 ui,
-                UiIcon::Refresh,
+                UiIcon::Load,
                 "Load saved configuration",
                 DialogButtonTone::Primary,
                 button_width,
@@ -3206,7 +3181,7 @@ fn admin_dialog_content(
             }
             if dialog_button(
                 ui,
-                UiIcon::Error,
+                UiIcon::Trash,
                 "Delete saved configuration",
                 DialogButtonTone::Danger,
                 button_width,
@@ -3280,7 +3255,7 @@ fn dialog_button(
         ),
         egui::vec2(icon_size, icon_size),
     );
-    draw_icon(ui.painter(), icon_rect, icon, text_color, 1.45);
+    ui_icon::paint(ui.painter(), icon_rect, icon, text_color);
     ui.painter().galley(
         Pos2::new(
             icon_rect.right() + gap,
@@ -3554,12 +3529,11 @@ fn animation_progress(started_at: Option<Instant>, duration: Duration) -> f32 {
 fn controls_section_heading(ui: &mut egui::Ui, icon: UiIcon, title: &str) -> Rect {
     let heading = ui.horizontal(|ui| {
         let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-        draw_icon(
+        ui_icon::paint(
             ui.painter(),
             icon_rect,
             icon,
             Color32::from_rgb(119, 164, 247),
-            1.4,
         );
         ui.label(
             RichText::new(title)
@@ -3597,7 +3571,7 @@ fn settings_back_button(ui: &mut egui::Ui) -> egui::Response {
         Pos2::new(rect.left() + 22.0, rect.center().y),
         egui::vec2(16.0, 16.0),
     );
-    draw_icon(ui.painter(), icon_rect, UiIcon::Back, foreground, 1.45);
+    ui_icon::paint(ui.painter(), icon_rect, UiIcon::Back, foreground);
     ui.painter().text(
         Pos2::new(rect.left() + 42.0, rect.center().y),
         Align2::LEFT_CENTER,
@@ -3649,7 +3623,7 @@ fn settings_nav_button(
         Pos2::new(rect.left() + 22.0, rect.center().y),
         egui::vec2(16.0, 16.0),
     );
-    draw_icon(ui.painter(), icon_rect, icon, foreground, 1.45);
+    ui_icon::paint(ui.painter(), icon_rect, icon, foreground);
     ui.painter().text(
         Pos2::new(rect.left() + 42.0, rect.center().y),
         Align2::LEFT_CENTER,
@@ -3669,13 +3643,7 @@ fn settings_section_heading(
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(17.0, 17.0), Sense::hover());
-            draw_icon(
-                ui.painter(),
-                rect,
-                icon,
-                Color32::from_rgb(119, 164, 247),
-                1.45,
-            );
+            ui_icon::paint(ui.painter(), rect, icon, Color32::from_rgb(119, 164, 247));
             ui.label(
                 RichText::new(title)
                     .size(14.0)
@@ -4370,7 +4338,7 @@ fn indicator_heading(
         Pos2::new(rect.left(), rect.center().y - 7.0),
         egui::vec2(14.0, 14.0),
     );
-    draw_icon(ui.painter(), icon_rect, icon, Color32::LIGHT_GRAY, 1.4);
+    ui_icon::paint(ui.painter(), icon_rect, icon, Color32::LIGHT_GRAY);
     ui.painter().text(
         Pos2::new(icon_rect.right() + 6.0, rect.center().y),
         Align2::LEFT_CENTER,
@@ -4425,7 +4393,7 @@ fn indicator_chip(
             ),
             egui::vec2(icon_size, icon_size),
         );
-        draw_icon(ui.painter(), icon_rect, choice.icon, icon_color, 1.5);
+        ui_icon::paint(ui.painter(), icon_rect, choice.icon, icon_color);
         ui.painter().galley(
             Pos2::new(
                 icon_rect.right() + gap,
@@ -4435,12 +4403,11 @@ fn indicator_chip(
             icon_color,
         );
     } else {
-        draw_icon(
+        ui_icon::paint(
             ui.painter(),
             Rect::from_center_size(rect.center(), egui::vec2(15.0, 15.0)),
             choice.icon,
             icon_color,
-            1.55,
         );
     }
     response.on_hover_text(choice.label);
@@ -4509,7 +4476,7 @@ fn preview_caption(ui: &mut egui::Ui, kind: PreviewKind) {
         Pos2::new(rect.left(), rect.center().y - icon_size / 2.0),
         egui::vec2(icon_size, icon_size),
     );
-    draw_icon(painter, icon_rect, kind.icon(), text_color, 1.35);
+    ui_icon::paint(painter, icon_rect, kind.icon(), text_color);
     let label_pos = Pos2::new(
         icon_rect.right() + 6.0,
         rect.center().y - label.size().y / 2.0,
@@ -4589,7 +4556,7 @@ fn icon_text(ui: &mut egui::Ui, icon: UiIcon, text: &str, color: Color32, strong
         Pos2::new(rect.left(), rect.center().y - icon_size / 2.0),
         egui::vec2(icon_size, icon_size),
     );
-    draw_icon(ui.painter(), icon_rect, icon, color, 1.4);
+    ui_icon::paint(ui.painter(), icon_rect, icon, color);
     ui.painter().galley(
         Pos2::new(
             icon_rect.right() + 6.0,
@@ -4684,7 +4651,7 @@ fn icon_button_impl(
         Pos2::new(left, rect.center().y - icon_size / 2.0),
         egui::vec2(icon_size, icon_size),
     );
-    draw_icon(ui.painter(), icon_rect, icon, color, 1.45);
+    ui_icon::paint(ui.painter(), icon_rect, icon, color);
     if !text.is_empty() {
         ui.painter().galley(
             Pos2::new(
@@ -4696,422 +4663,6 @@ fn icon_button_impl(
         );
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-fn draw_arc_arrow(
-    painter: &egui::Painter,
-    center: Pos2,
-    radius: f32,
-    start_angle: f32,
-    end_angle: f32,
-    stroke: Stroke,
-) {
-    const SEGMENTS: usize = 12;
-    let points = (0..=SEGMENTS)
-        .map(|step| {
-            let angle = egui::lerp(start_angle..=end_angle, step as f32 / SEGMENTS as f32);
-            center + egui::vec2(angle.cos(), angle.sin()) * radius
-        })
-        .collect();
-    painter.add(egui::Shape::line(points, stroke));
-
-    let tip = center + egui::vec2(end_angle.cos(), end_angle.sin()) * radius;
-    let direction = egui::vec2(-end_angle.sin(), end_angle.cos());
-    let back = -direction * radius * 0.48;
-    let wing = egui::vec2(-direction.y, direction.x) * radius * 0.24;
-    painter.line_segment([tip, tip + back + wing], stroke);
-    painter.line_segment([tip, tip + back - wing], stroke);
-}
-
-fn draw_icon(painter: &egui::Painter, rect: Rect, icon: UiIcon, color: Color32, width: f32) {
-    let stroke = Stroke::new(width, color);
-    let center = rect.center();
-    let x = |fraction: f32| egui::lerp(rect.left()..=rect.right(), fraction);
-    let y = |fraction: f32| egui::lerp(rect.top()..=rect.bottom(), fraction);
-    match icon {
-        UiIcon::Back => {
-            painter.line_segment(
-                [Pos2::new(x(0.62), y(0.14)), Pos2::new(x(0.28), y(0.5))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.28), y(0.5)), Pos2::new(x(0.62), y(0.86))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.3), y(0.5)), Pos2::new(x(0.9), y(0.5))],
-                stroke,
-            );
-        }
-        UiIcon::Camera => {
-            let body = Rect::from_min_max(Pos2::new(x(0.08), y(0.27)), Pos2::new(x(0.92), y(0.85)));
-            painter.rect_stroke(body, 2, stroke, StrokeKind::Inside);
-            painter.line_segment(
-                [Pos2::new(x(0.25), y(0.27)), Pos2::new(x(0.36), y(0.12))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.36), y(0.12)), Pos2::new(x(0.58), y(0.12))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.58), y(0.12)), Pos2::new(x(0.67), y(0.27))],
-                stroke,
-            );
-            painter.circle_stroke(
-                center + egui::vec2(0.0, rect.height() * 0.08),
-                rect.width() * 0.18,
-                stroke,
-            );
-        }
-        UiIcon::Monitor => {
-            painter.rect_stroke(
-                Rect::from_min_max(Pos2::new(x(0.06), y(0.12)), Pos2::new(x(0.94), y(0.72))),
-                2,
-                stroke,
-                StrokeKind::Inside,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.5), y(0.72)), Pos2::new(x(0.5), y(0.88))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.28), y(0.9)), Pos2::new(x(0.72), y(0.9))],
-                stroke,
-            );
-        }
-        UiIcon::Image => {
-            painter.rect_stroke(rect.shrink(1.0), 2, stroke, StrokeKind::Inside);
-            painter.circle_stroke(Pos2::new(x(0.7), y(0.3)), rect.width() * 0.08, stroke);
-            painter.line_segment(
-                [Pos2::new(x(0.12), y(0.78)), Pos2::new(x(0.38), y(0.48))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.38), y(0.48)), Pos2::new(x(0.56), y(0.67))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.56), y(0.67)), Pos2::new(x(0.72), y(0.53))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.72), y(0.53)), Pos2::new(x(0.9), y(0.78))],
-                stroke,
-            );
-        }
-        UiIcon::Broadcast => {
-            painter.circle_filled(center, rect.width() * 0.1, color);
-            painter.circle_stroke(center, rect.width() * 0.27, stroke);
-            painter.circle_stroke(center, rect.width() * 0.43, stroke);
-        }
-        UiIcon::Robot => {
-            painter.line_segment(
-                [Pos2::new(x(0.5), y(0.08)), Pos2::new(x(0.5), y(0.22))],
-                stroke,
-            );
-            painter.circle_filled(Pos2::new(x(0.5), y(0.07)), rect.width() * 0.055, color);
-            painter.rect_stroke(
-                Rect::from_min_max(Pos2::new(x(0.13), y(0.22)), Pos2::new(x(0.87), y(0.78))),
-                3,
-                stroke,
-                StrokeKind::Inside,
-            );
-            painter.circle_filled(Pos2::new(x(0.34), y(0.46)), rect.width() * 0.07, color);
-            painter.circle_filled(Pos2::new(x(0.66), y(0.46)), rect.width() * 0.07, color);
-            painter.line_segment(
-                [Pos2::new(x(0.32), y(0.65)), Pos2::new(x(0.68), y(0.65))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.26), y(0.78)), Pos2::new(x(0.26), y(0.92))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.74), y(0.78)), Pos2::new(x(0.74), y(0.92))],
-                stroke,
-            );
-        }
-        UiIcon::Route => {
-            painter.line_segment(
-                [Pos2::new(x(0.18), y(0.5)), Pos2::new(x(0.48), y(0.5))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.48), y(0.5)), Pos2::new(x(0.72), y(0.22))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.48), y(0.5)), Pos2::new(x(0.72), y(0.78))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.72), y(0.22)), Pos2::new(x(0.9), y(0.22))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.72), y(0.78)), Pos2::new(x(0.9), y(0.78))],
-                stroke,
-            );
-            painter.circle_filled(Pos2::new(x(0.14), y(0.5)), rect.width() * 0.08, color);
-            painter.circle_filled(Pos2::new(x(0.9), y(0.22)), rect.width() * 0.08, color);
-            painter.circle_filled(Pos2::new(x(0.9), y(0.78)), rect.width() * 0.08, color);
-        }
-        UiIcon::Loader => {
-            for index in 0..8 {
-                let angle = std::f32::consts::TAU * index as f32 / 8.0;
-                let direction = egui::vec2(angle.cos(), angle.sin());
-                let alpha = 70 + index * 23;
-                painter.circle_filled(
-                    center + direction * rect.width() * 0.34,
-                    rect.width() * 0.07,
-                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha as u8),
-                );
-            }
-        }
-        UiIcon::Settings => {
-            painter.circle_stroke(center, rect.width() * 0.18, stroke);
-            painter.circle_stroke(center, rect.width() * 0.36, stroke);
-            for direction in [
-                egui::vec2(1.0, 0.0),
-                egui::vec2(-1.0, 0.0),
-                egui::vec2(0.0, 1.0),
-                egui::vec2(0.0, -1.0),
-                egui::vec2(0.7, 0.7),
-                egui::vec2(-0.7, 0.7),
-                egui::vec2(0.7, -0.7),
-                egui::vec2(-0.7, -0.7),
-            ] {
-                painter.line_segment(
-                    [
-                        center + direction * rect.width() * 0.36,
-                        center + direction * rect.width() * 0.48,
-                    ],
-                    stroke,
-                );
-            }
-        }
-        UiIcon::Play => {
-            painter.line_segment(
-                [Pos2::new(x(0.28), y(0.16)), Pos2::new(x(0.28), y(0.84))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.28), y(0.16)), Pos2::new(x(0.78), y(0.5))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.78), y(0.5)), Pos2::new(x(0.28), y(0.84))],
-                stroke,
-            );
-        }
-        UiIcon::Stop => {
-            painter.rect_filled(rect.shrink(rect.width() * 0.22), 1, color);
-        }
-        UiIcon::Refresh => {
-            let radius = rect.width() * 0.34;
-            draw_arc_arrow(
-                painter,
-                center,
-                radius,
-                195.0_f32.to_radians(),
-                345.0_f32.to_radians(),
-                stroke,
-            );
-            draw_arc_arrow(
-                painter,
-                center,
-                radius,
-                15.0_f32.to_radians(),
-                165.0_f32.to_radians(),
-                stroke,
-            );
-        }
-        UiIcon::Bell => {
-            painter.line_segment(
-                [Pos2::new(x(0.22), y(0.72)), Pos2::new(x(0.78), y(0.72))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.22), y(0.72)), Pos2::new(x(0.31), y(0.57))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.31), y(0.57)), Pos2::new(x(0.31), y(0.4))],
-                stroke,
-            );
-            painter.circle_stroke(Pos2::new(x(0.5), y(0.4)), rect.width() * 0.19, stroke);
-            painter.line_segment(
-                [Pos2::new(x(0.69), y(0.4)), Pos2::new(x(0.69), y(0.57))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.69), y(0.57)), Pos2::new(x(0.78), y(0.72))],
-                stroke,
-            );
-            painter.circle_filled(Pos2::new(x(0.5), y(0.83)), rect.width() * 0.07, color);
-        }
-        UiIcon::Window => {
-            painter.rect_stroke(rect.shrink(1.0), 2, stroke, StrokeKind::Inside);
-            painter.line_segment(
-                [Pos2::new(x(0.08), y(0.3)), Pos2::new(x(0.92), y(0.3))],
-                stroke,
-            );
-            for dot in [0.2, 0.32, 0.44] {
-                painter.circle_filled(Pos2::new(x(dot), y(0.18)), rect.width() * 0.035, color);
-            }
-        }
-        UiIcon::Folder => {
-            painter.line_segment(
-                [Pos2::new(x(0.08), y(0.28)), Pos2::new(x(0.38), y(0.28))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.38), y(0.28)), Pos2::new(x(0.48), y(0.4))],
-                stroke,
-            );
-            painter.rect_stroke(
-                Rect::from_min_max(Pos2::new(x(0.08), y(0.28)), Pos2::new(x(0.92), y(0.84))),
-                2,
-                stroke,
-                StrokeKind::Inside,
-            );
-        }
-        UiIcon::Info => {
-            painter.circle_stroke(center, rect.width() * 0.42, stroke);
-            painter.circle_filled(Pos2::new(x(0.5), y(0.29)), rect.width() * 0.055, color);
-            painter.line_segment(
-                [Pos2::new(x(0.5), y(0.43)), Pos2::new(x(0.5), y(0.73))],
-                stroke,
-            );
-        }
-        UiIcon::Wrench => {
-            painter.line_segment(
-                [Pos2::new(x(0.22), y(0.8)), Pos2::new(x(0.7), y(0.32))],
-                Stroke::new(width * 2.2, color),
-            );
-            painter.circle_stroke(Pos2::new(x(0.2), y(0.82)), rect.width() * 0.11, stroke);
-            painter.line_segment(
-                [Pos2::new(x(0.65), y(0.18)), Pos2::new(x(0.82), y(0.35))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.82), y(0.35)), Pos2::new(x(0.9), y(0.18))],
-                stroke,
-            );
-        }
-        UiIcon::Capture => {
-            for (a, b) in [
-                ((0.08, 0.35), (0.08, 0.08)),
-                ((0.08, 0.08), (0.35, 0.08)),
-                ((0.65, 0.08), (0.92, 0.08)),
-                ((0.92, 0.08), (0.92, 0.35)),
-                ((0.08, 0.65), (0.08, 0.92)),
-                ((0.08, 0.92), (0.35, 0.92)),
-                ((0.65, 0.92), (0.92, 0.92)),
-                ((0.92, 0.92), (0.92, 0.65)),
-            ] {
-                painter.line_segment(
-                    [Pos2::new(x(a.0), y(a.1)), Pos2::new(x(b.0), y(b.1))],
-                    stroke,
-                );
-            }
-            painter.circle_stroke(center, rect.width() * 0.18, stroke);
-        }
-        UiIcon::Check => {
-            painter.line_segment(
-                [Pos2::new(x(0.12), y(0.52)), Pos2::new(x(0.4), y(0.78))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.4), y(0.78)), Pos2::new(x(0.9), y(0.2))],
-                stroke,
-            );
-        }
-        UiIcon::Error => {
-            painter.circle_stroke(center, rect.width() * 0.42, stroke);
-            painter.line_segment(
-                [Pos2::new(x(0.28), y(0.28)), Pos2::new(x(0.72), y(0.72))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.72), y(0.28)), Pos2::new(x(0.28), y(0.72))],
-                stroke,
-            );
-        }
-        UiIcon::Unavailable => {
-            painter.circle_stroke(center, rect.width() * 0.42, stroke);
-            painter.line_segment(
-                [Pos2::new(x(0.2), y(0.8)), Pos2::new(x(0.8), y(0.2))],
-                stroke,
-            );
-        }
-        UiIcon::Question => {
-            painter.line_segment(
-                [Pos2::new(x(0.28), y(0.28)), Pos2::new(x(0.42), y(0.14))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.42), y(0.14)), Pos2::new(x(0.68), y(0.22))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.68), y(0.22)), Pos2::new(x(0.68), y(0.42))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.68), y(0.42)), Pos2::new(x(0.5), y(0.58))],
-                stroke,
-            );
-            painter.circle_filled(Pos2::new(x(0.5), y(0.82)), rect.width() * 0.06, color);
-        }
-        UiIcon::Layers => {
-            painter.line_segment(
-                [Pos2::new(x(0.08), y(0.34)), Pos2::new(x(0.5), y(0.1))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.5), y(0.1)), Pos2::new(x(0.92), y(0.34))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.92), y(0.34)), Pos2::new(x(0.5), y(0.58))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.5), y(0.58)), Pos2::new(x(0.08), y(0.34))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.12), y(0.58)), Pos2::new(x(0.5), y(0.8))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.5), y(0.8)), Pos2::new(x(0.88), y(0.58))],
-                stroke,
-            );
-        }
-        UiIcon::Target => {
-            painter.circle_stroke(center, rect.width() * 0.4, stroke);
-            painter.circle_stroke(center, rect.width() * 0.16, stroke);
-            painter.line_segment(
-                [Pos2::new(x(0.5), y(0.0)), Pos2::new(x(0.5), y(0.24))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.5), y(0.76)), Pos2::new(x(0.5), y(1.0))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.0), y(0.5)), Pos2::new(x(0.24), y(0.5))],
-                stroke,
-            );
-            painter.line_segment(
-                [Pos2::new(x(0.76), y(0.5)), Pos2::new(x(1.0), y(0.5))],
-                stroke,
-            );
-        }
-    }
 }
 
 fn mix_color(from: Color32, to: Color32, amount: f32) -> Color32 {
@@ -6456,24 +6007,9 @@ mod tests {
 
     #[test]
     fn automatic_route_and_refresh_icons_are_distinct() {
-        assert_ne!(UiIcon::Robot, UiIcon::Route);
-        assert_ne!(UiIcon::Robot, UiIcon::Refresh);
-        assert_ne!(UiIcon::Route, UiIcon::Refresh);
-        let counts = [UiIcon::Robot, UiIcon::Route, UiIcon::Refresh].map(|icon| {
-            let context = egui::Context::default();
-            context
-                .run_ui(egui::RawInput::default(), |ui| {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::hover());
-                    draw_icon(ui.painter(), rect, icon, Color32::WHITE, 1.5);
-                })
-                .shapes
-                .len()
-        });
-        assert!(counts.into_iter().all(|count| count > 0));
-        assert_eq!(
-            counts[2], 6,
-            "refresh should draw two arcs and four arrowhead lines"
-        );
+        assert_ne!(UiIcon::Robot.glyph(), UiIcon::Route.glyph());
+        assert_ne!(UiIcon::Robot.glyph(), UiIcon::Refresh.glyph());
+        assert_ne!(UiIcon::Route.glyph(), UiIcon::Refresh.glyph());
     }
 
     #[test]
