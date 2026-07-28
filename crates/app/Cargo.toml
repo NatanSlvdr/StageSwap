@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 stageswap-core = { path = "../core" }
+stageswap-i18n = { path = "../i18n" }
 stageswap-windows = { path = "../windows" }
 eframe.workspace = true
 egui-phosphor = { version = "0.13", default-features = false, features = ["regular"] }

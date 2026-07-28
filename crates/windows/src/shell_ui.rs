@@ -1,3 +1,4 @@
+use stageswap_i18n::{Locale, text};
 use std::path::{Path, PathBuf};
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST,
@@ -7,22 +8,25 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows_core::{PCWSTR, PWSTR};
 
-pub fn pick_reference_image() -> Option<PathBuf> {
-    file_dialog(
-        false,
-        "Import reference image",
-        "Image files\0*.png;*.jpg;*.jpeg;*.bmp\0PNG files\0*.png\0JPEG files\0*.jpg;*.jpeg\0BMP files\0*.bmp\0All files\0*.*\0\0",
-        "png",
-    )
+pub fn pick_reference_image(locale: Locale) -> Option<PathBuf> {
+    let title = text(locale, "Import reference image");
+    let image_files = text(locale, "Image files");
+    let png_files = text(locale, "PNG files");
+    let jpeg_files = text(locale, "JPEG files");
+    let bmp_files = text(locale, "BMP files");
+    let all_files = text(locale, "All files");
+    let filter = format!(
+        "{image_files}\0*.png;*.jpg;*.jpeg;*.bmp\0{png_files}\0*.png\0{jpeg_files}\0*.jpg;*.jpeg\0{bmp_files}\0*.bmp\0{all_files}\0*.*\0\0"
+    );
+    file_dialog(false, title.as_ref(), &filter, "png")
 }
 
-pub fn pick_log_export_path() -> Option<PathBuf> {
-    file_dialog(
-        true,
-        "Export diagnostic logs",
-        "JSON Lines files\0*.jsonl\0All files\0*.*\0\0",
-        "jsonl",
-    )
+pub fn pick_log_export_path(locale: Locale) -> Option<PathBuf> {
+    let title = text(locale, "Export diagnostic logs");
+    let json_lines = text(locale, "JSON Lines files");
+    let all_files = text(locale, "All files");
+    let filter = format!("{json_lines}\0*.jsonl\0{all_files}\0*.*\0\0");
+    file_dialog(true, title.as_ref(), &filter, "jsonl")
 }
 
 fn file_dialog(save: bool, title: &str, filter: &str, extension: &str) -> Option<PathBuf> {

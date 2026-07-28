@@ -3280,6 +3280,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stageswap-core",
+ "stageswap-i18n",
  "stageswap-windows",
  "tempfile",
  "tray-icon",
@@ -3297,6 +3298,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "stageswap-i18n"
+version = "0.2.0"
+
+[[package]]
 name = "stageswap-media-source"
 version = "0.2.0"
 dependencies = [
@@ -3311,6 +3316,7 @@ version = "0.2.0"
 dependencies = [
  "notify-rust",
  "stageswap-core",
+ "stageswap-i18n",
  "windows 0.62.2",
  "windows-capture",
  "windows-core 0.62.2",

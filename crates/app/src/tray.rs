@@ -1,7 +1,8 @@
 use stageswap_core::{AppSnapshot, OutputMode, RunState};
+use stageswap_i18n::{Locale, text};
+use std::cell::Cell;
 use tray_icon::menu::{
-    CheckMenuItem, Icon as MenuIcon, IconMenuItem, Menu, MenuEvent, MenuId, PredefinedMenuItem,
-    Submenu,
+    CheckMenuItem, Icon as MenuIcon, IconMenuItem, Menu, MenuEvent, PredefinedMenuItem, Submenu,
 };
 use tray_icon::{Icon as TrayImage, TrayIcon, TrayIconBuilder};
 
@@ -12,15 +13,17 @@ use crate::{
 
 pub struct Tray {
     _icon: TrayIcon,
-    show: MenuId,
+    show: IconMenuItem,
     automation: IconMenuItem,
     start_icon: MenuIcon,
     stop_icon: MenuIcon,
     automatic: CheckMenuItem,
     camera: CheckMenuItem,
     screen: CheckMenuItem,
-    settings: MenuId,
-    exit: MenuId,
+    output_mode: Submenu,
+    settings: IconMenuItem,
+    exit: IconMenuItem,
+    locale: Cell<Locale>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,27 +36,40 @@ pub enum TrayAction {
 }
 
 impl Tray {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(locale: Locale) -> Result<Self, String> {
         let menu = Menu::new();
-        let show = IconMenuItem::new("Open StageSwap", true, Some(app_menu_icon()?), None);
+        let show = IconMenuItem::new(
+            text(locale, "Open StageSwap"),
+            true,
+            Some(app_menu_icon()?),
+            None,
+        );
         let start_icon = action_menu_icon(UiIcon::Play, [48, 174, 105, 255])?;
         let stop_icon = action_menu_icon(UiIcon::Stop, [220, 76, 76, 255])?;
-        let automation =
-            IconMenuItem::new("Start automation", true, Some(start_icon.clone()), None);
-        let automatic = CheckMenuItem::new("Automatic", true, true, None);
-        let camera = CheckMenuItem::new("Webcam only", true, false, None);
-        let screen = CheckMenuItem::new("Screen only", true, false, None);
-        let output_mode = Submenu::with_items("Output mode", true, &[&automatic, &camera, &screen])
-            .map_err(|error| format!("could not create tray output-mode menu: {error}"))?;
+        let automation = IconMenuItem::new(
+            text(locale, "Start automation"),
+            true,
+            Some(start_icon.clone()),
+            None,
+        );
+        let automatic = CheckMenuItem::new(text(locale, "Automatic"), true, true, None);
+        let camera = CheckMenuItem::new(text(locale, "Webcam only"), true, false, None);
+        let screen = CheckMenuItem::new(text(locale, "Screen only"), true, false, None);
+        let output_mode = Submenu::with_items(
+            text(locale, "Output mode"),
+            true,
+            &[&automatic, &camera, &screen],
+        )
+        .map_err(|error| format!("could not create tray output-mode menu: {error}"))?;
         output_mode.set_icon(Some(action_menu_icon(UiIcon::Route, [64, 118, 216, 255])?));
         let settings = IconMenuItem::new(
-            "Settings",
+            text(locale, "Settings"),
             true,
             Some(action_menu_icon(UiIcon::Settings, [64, 118, 216, 255])?),
             None,
         );
         let exit = IconMenuItem::new(
-            "Exit",
+            text(locale, "Exit"),
             true,
             Some(action_menu_icon(UiIcon::SignOut, [220, 76, 76, 255])?),
             None,
@@ -86,22 +102,34 @@ impl Tray {
             .map_err(|error| format!("could not create tray icon: {error}"))?;
         Ok(Self {
             _icon: icon,
-            show: show.id().clone(),
+            show,
             automation,
             start_icon,
             stop_icon,
             automatic,
             camera,
             screen,
-            settings: settings.id().clone(),
-            exit: exit.id().clone(),
+            output_mode,
+            settings,
+            exit,
+            locale: Cell::new(locale),
         })
     }
 
-    pub fn sync(&self, snapshot: &AppSnapshot) {
-        let (automation_text, automation_enabled) = automation_menu_state(snapshot.run_state);
+    pub fn sync(&self, snapshot: &AppSnapshot, locale: Locale) {
+        if self.locale.replace(locale) != locale {
+            self.show.set_text(text(locale, "Open StageSwap"));
+            self.automatic.set_text(text(locale, "Automatic"));
+            self.camera.set_text(text(locale, "Webcam only"));
+            self.screen.set_text(text(locale, "Screen only"));
+            self.output_mode.set_text(text(locale, "Output mode"));
+            self.settings.set_text(text(locale, "Settings"));
+            self.exit.set_text(text(locale, "Exit"));
+        }
+        let (automation_text, automation_enabled) =
+            automation_menu_state(snapshot.run_state, locale);
         if self.automation.text() != automation_text {
-            self.automation.set_text(automation_text);
+            self.automation.set_text(&automation_text);
             let icon = if matches!(
                 snapshot.run_state,
                 RunState::Running | RunState::Starting | RunState::Stopping
@@ -123,7 +151,7 @@ impl Tray {
     pub fn poll(&self) -> Option<TrayAction> {
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             let id = event.id();
-            if id == &self.show {
+            if id == self.show.id() {
                 return Some(TrayAction::Show);
             }
             if id == self.automation.id() {
@@ -138,10 +166,10 @@ impl Tray {
             if id == self.screen.id() {
                 return Some(TrayAction::SetMode(OutputMode::ForceScreen));
             }
-            if id == &self.settings {
+            if id == self.settings.id() {
                 return Some(TrayAction::OpenSettings);
             }
-            if id == &self.exit {
+            if id == self.exit.id() {
                 return Some(TrayAction::Exit);
             }
         }
@@ -162,12 +190,13 @@ fn action_menu_icon(icon: UiIcon, color: [u8; 4]) -> Result<MenuIcon, String> {
         .map_err(|error| format!("could not create tray menu action icon: {error}"))
 }
 
-fn automation_menu_state(run_state: RunState) -> (&'static str, bool) {
-    match run_state {
+fn automation_menu_state(run_state: RunState, locale: Locale) -> (String, bool) {
+    let (label, enabled) = match run_state {
         RunState::Running | RunState::Starting => ("Stop automation", true),
         RunState::Stopping => ("Stopping automation…", false),
         RunState::Stopped | RunState::Error => ("Start automation", true),
-    }
+    };
+    (text(locale, label).into_owned(), enabled)
 }
 
 fn set_checked(item: &CheckMenuItem, checked: bool) {
@@ -183,34 +212,34 @@ mod tests {
     #[test]
     fn automation_menu_tracks_run_state() {
         assert_eq!(
-            automation_menu_state(RunState::Starting),
-            ("Stop automation", true)
+            automation_menu_state(RunState::Starting, Locale::English),
+            ("Stop automation".into(), true)
         );
         assert_eq!(
-            automation_menu_state(RunState::Running),
-            ("Stop automation", true)
+            automation_menu_state(RunState::Running, Locale::English),
+            ("Stop automation".into(), true)
         );
         assert_eq!(
-            automation_menu_state(RunState::Stopping),
-            ("Stopping automation…", false)
+            automation_menu_state(RunState::Stopping, Locale::English),
+            ("Stopping automation…".into(), false)
         );
         assert_eq!(
-            automation_menu_state(RunState::Stopped),
-            ("Start automation", true)
+            automation_menu_state(RunState::Stopped, Locale::English),
+            ("Start automation".into(), true)
         );
         assert_eq!(
-            automation_menu_state(RunState::Error),
-            ("Start automation", true)
+            automation_menu_state(RunState::Error, Locale::English),
+            ("Start automation".into(), true)
         );
     }
 
     #[test]
     #[ignore = "requires an interactive Windows notification area"]
     fn tray_icon_and_all_retained_menu_actions_build() {
-        let tray = Tray::new().expect("tray should build");
-        assert_ne!(tray.show, *tray.automation.id());
+        let tray = Tray::new(Locale::English).expect("tray should build");
+        assert_ne!(tray.show.id(), tray.automation.id());
         assert_ne!(tray.automatic.id(), tray.camera.id());
         assert_ne!(tray.camera.id(), tray.screen.id());
-        assert_ne!(tray.settings, tray.exit);
+        assert_ne!(tray.settings.id(), tray.exit.id());
     }
 }

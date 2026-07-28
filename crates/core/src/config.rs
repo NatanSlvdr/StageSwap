@@ -156,11 +156,23 @@ impl AppConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConfigLoad {
     pub config: AppConfig,
     pub used_backup: bool,
+    pub used_defaults: bool,
     pub warnings: Vec<String>,
+}
+
+impl Default for ConfigLoad {
+    fn default() -> Self {
+        Self {
+            config: AppConfig::default(),
+            used_backup: false,
+            used_defaults: true,
+            warnings: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -204,6 +216,7 @@ impl ConfigStore {
         match fs::read_to_string(self.config_path()).and_then(|json| Self::parse(&json)) {
             Ok(config) => ConfigLoad {
                 config,
+                used_defaults: false,
                 ..ConfigLoad::default()
             },
             Err(primary_error) => {
@@ -218,6 +231,7 @@ impl ConfigStore {
                         ConfigLoad {
                             config,
                             used_backup: true,
+                            used_defaults: false,
                             warnings,
                         }
                     }
@@ -707,9 +721,20 @@ mod tests {
         fs::write(store.config_path(), "bad").unwrap();
         let loaded = store.load();
         assert!(loaded.used_backup);
+        assert!(!loaded.used_defaults);
         assert_eq!(loaded.config.selected_video_device_id, "saved");
         fs::write(store.backup_path(), "bad too").unwrap();
-        assert_eq!(store.load().config, AppConfig::default());
+        let defaults = store.load();
+        assert!(defaults.used_defaults);
+        assert_eq!(defaults.config, AppConfig::default());
+    }
+
+    #[test]
+    fn missing_configuration_reports_default_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let loaded = ConfigStore::new(directory.path()).load();
+        assert!(loaded.used_defaults);
+        assert!(!loaded.used_backup);
     }
 
     #[test]

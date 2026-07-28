@@ -74,6 +74,12 @@ Tutorial previews are `tutorial-1` through `tutorial-7`. Each name opens one det
 
 Dialog previews are `dialog-exit`, `dialog-clear-logs`, `dialog-admin`, `dialog-replace-baseline`, `dialog-load-admin-config`, and `dialog-remove-baseline`.
 
+Append `--ui-language en-US`, `--ui-language fr-FR`, or `--ui-language es` to render any preview in a supported language:
+
+```bash
+cargo run -p stageswap --bin StageSwap -- --ui-preview matching --ui-language fr-FR
+```
+
 Preview mode uses a temporary configuration directory and does not save changes to the normal StageSwap configuration. It is intended for checking layout, wrapping, conditional explanations, and interactions. Windows tray behavior, native file dialogs, hardware capture, and exact Windows font rendering still require native Windows acceptance testing.
 
 ## Fast x64 packaging from macOS

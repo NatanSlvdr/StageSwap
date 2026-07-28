@@ -10,6 +10,7 @@ use stageswap_core::{
     ConfigLoad, ConfigStore, DetectionState, DeviceState, Frame, OutputMode, RestartTarget,
     RunState, Source,
 };
+use stageswap_i18n::{Locale, format_text, text as localized_text};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
@@ -36,7 +37,7 @@ const DIALOG_ENTRANCE_DURATION: Duration = Duration::from_millis(150);
 const TUTORIAL_ENTRANCE_DURATION: Duration = Duration::from_millis(180);
 const TUTORIAL_STEP_DURATION: Duration = Duration::from_millis(140);
 const DISCO_GESTURE_WINDOW: Duration = Duration::from_secs(3);
-const SETTINGS_SIDEBAR_WIDTH: f32 = 196.0;
+const SETTINGS_SIDEBAR_WIDTH: f32 = 228.0;
 const SETTINGS_CONTENT_WIDTH: f32 = 960.0;
 const SETTINGS_PREVIEW_WIDTH: f32 = 480.0;
 const SETTINGS_PREVIEW_HEIGHT: f32 = 270.0;
@@ -62,26 +63,33 @@ use ui_icon::UiIcon;
 
 fn main() -> eframe::Result {
     let _embedded_payload = deployment_payload::bytes();
+    #[cfg(windows)]
+    let startup_locale = stageswap_windows::preferred_interface_locale();
     #[cfg(not(windows))]
     let ui_preview_request = match parse_ui_preview_request(&std::env::args().collect::<Vec<_>>()) {
         Ok(request) => request,
         Err(error) => {
             eprintln!("StageSwap UI preview: {error}");
             eprintln!(
-                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|tutorial-1..7|dialog-*]"
+                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|tutorial-1..7|dialog-*] [--ui-language en-US|fr-FR|es]"
             );
             return Ok(());
         }
     };
     #[cfg(windows)]
-    let launch_context = match stageswap_windows::portable_bootstrap(_embedded_payload) {
-        Ok(stageswap_windows::BootstrapResult::Continue(context)) => context,
-        Ok(stageswap_windows::BootstrapResult::Exit) => return Ok(()),
-        Err(error) => {
-            stageswap_windows::show_error_dialog("StageSwap installation failed", &error);
-            return Ok(());
-        }
-    };
+    let launch_context =
+        match stageswap_windows::portable_bootstrap(_embedded_payload, startup_locale) {
+            Ok(stageswap_windows::BootstrapResult::Continue(context)) => context,
+            Ok(stageswap_windows::BootstrapResult::Exit) => return Ok(()),
+            Err(error) => {
+                stageswap_windows::show_error_dialog(
+                    startup_locale,
+                    "StageSwap installation failed",
+                    &error,
+                );
+                return Ok(());
+            }
+        };
     #[cfg(windows)]
     let deployment_command = matches!(
         std::env::args().nth(1).as_deref(),
@@ -92,7 +100,7 @@ fn main() -> eframe::Result {
         match stageswap_windows::deployment_startup(_embedded_payload) {
             Ok(true) => return Ok(()),
             Ok(false) => {}
-            Err(error) => deployment_failure(&error),
+            Err(error) => deployment_failure(startup_locale, &error),
         }
     }
     #[cfg(windows)]
@@ -105,6 +113,7 @@ fn main() -> eframe::Result {
                 )
             {
                 stageswap_windows::show_error_dialog(
+                    startup_locale,
                     "StageSwap is already running",
                     &format!(
                         "Its window could not be opened. Exit the legacy tray instance and try again.\n\n{error}"
@@ -114,7 +123,11 @@ fn main() -> eframe::Result {
             return Ok(());
         }
         Err(error) => {
-            stageswap_windows::show_error_dialog("StageSwap could not start", &error);
+            stageswap_windows::show_error_dialog(
+                startup_locale,
+                "StageSwap could not start",
+                &error,
+            );
             return Ok(());
         }
     };
@@ -123,7 +136,7 @@ fn main() -> eframe::Result {
         match stageswap_windows::deployment_startup(_embedded_payload) {
             Ok(false) => {}
             Ok(true) => return Ok(()),
-            Err(error) => deployment_failure(&error),
+            Err(error) => deployment_failure(startup_locale, &error),
         }
     }
     #[cfg(windows)]
@@ -133,6 +146,7 @@ fn main() -> eframe::Result {
         Ok(control) => control,
         Err(error) => {
             stageswap_windows::show_error_dialog(
+                startup_locale,
                 "StageSwap could not start its local control service",
                 &error,
             );
@@ -165,6 +179,7 @@ fn main() -> eframe::Result {
     let loaded = if ui_preview_request.is_some() {
         ConfigLoad {
             config: ui_preview_config(),
+            used_defaults: false,
             ..ConfigLoad::default()
         }
     } else {
@@ -172,6 +187,15 @@ fn main() -> eframe::Result {
     };
     #[cfg(windows)]
     let mut loaded = loaded;
+    #[cfg(windows)]
+    if loaded.used_defaults {
+        loaded.config.interface_language = startup_locale.tag().into();
+        if let Err(error) = stageswap_windows::save_config_atomic(&store, &loaded.config) {
+            loaded.warnings.push(format!(
+                "Could not save the initial interface language: {error}"
+            ));
+        }
+    }
     #[cfg(windows)]
     if launch_context.mode == stageswap_windows::PortableMode::RunOnce
         && loaded.config.start_with_windows
@@ -244,8 +268,8 @@ fn main() -> eframe::Result {
 }
 
 #[cfg(windows)]
-fn deployment_failure(error: &str) -> ! {
-    stageswap_windows::show_error_dialog("StageSwap deployment failed", error);
+fn deployment_failure(locale: Locale, error: &str) -> ! {
+    stageswap_windows::show_error_dialog(locale, "StageSwap deployment failed", error);
     eprintln!("StageSwap deployment failed: {error}");
     std::process::exit(1);
 }
@@ -330,36 +354,43 @@ impl SettingsTab {
         Self::Diagnostics,
     ];
 
-    const PRIMARY: [(Self, UiIcon, &'static str); 4] = [
-        (Self::General, UiIcon::Settings, "General"),
-        (Self::Webcam, UiIcon::Camera, "Webcam"),
-        (Self::Screen, UiIcon::Monitor, "Screen"),
-        (Self::Matching, UiIcon::Target, "Matching"),
+    const PRIMARY: [(Self, UiIcon); 4] = [
+        (Self::General, UiIcon::Settings),
+        (Self::Webcam, UiIcon::Camera),
+        (Self::Screen, UiIcon::Monitor),
+        (Self::Matching, UiIcon::Target),
     ];
 
-    const DIAGNOSTICS: (Self, UiIcon, &'static str) =
-        (Self::Diagnostics, UiIcon::Layers, "Diagnostics");
+    const DIAGNOSTICS: (Self, UiIcon) = (Self::Diagnostics, UiIcon::Layers);
 
-    const fn title(self) -> &'static str {
-        match self {
-            Self::General => "General",
-            Self::Webcam => "Webcam",
-            Self::Screen => "Screen",
-            Self::Matching => "Matching",
-            Self::Diagnostics => "Diagnostics",
-        }
+    fn title(self, locale: Locale) -> std::borrow::Cow<'static, str> {
+        localized_text(
+            locale,
+            match self {
+                Self::General => "General",
+                Self::Webcam => "Webcam",
+                Self::Screen => "Screen",
+                Self::Matching => "Matching",
+                Self::Diagnostics => "Diagnostics",
+            },
+        )
     }
 
-    const fn description(self) -> &'static str {
-        match self {
-            Self::General => "Choose how the app launches, stays available, and reports problems.",
-            Self::Webcam => "Select, verify, and recover the camera used for webcam output.",
-            Self::Screen => "Choose the display Automatic mode watches and how it is captured.",
-            Self::Matching => "Teach Automatic mode when the screen should show the webcam.",
-            Self::Diagnostics => {
-                "Inspect component health, technical details, logs, and recovery tools."
-            }
-        }
+    fn description(self, locale: Locale) -> std::borrow::Cow<'static, str> {
+        localized_text(
+            locale,
+            match self {
+                Self::General => {
+                    "Choose how the app launches, stays available, and reports problems."
+                }
+                Self::Webcam => "Select, verify, and recover the camera used for webcam output.",
+                Self::Screen => "Choose the display Automatic mode watches and how it is captured.",
+                Self::Matching => "Teach Automatic mode when the screen should show the webcam.",
+                Self::Diagnostics => {
+                    "Inspect component health, technical details, logs, and recovery tools."
+                }
+            },
+        )
     }
 }
 
@@ -407,6 +438,7 @@ fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>,
     let Some(preview_index) = args.iter().position(|argument| argument == "--ui-preview") else {
         return Ok(None);
     };
+    ui_preview_locale(args)?;
     let target = match args.get(preview_index + 1).map(String::as_str) {
         Some("dialog-exit") => UiPreviewTarget::Dialog(AppDialogKind::Exit),
         Some("dialog-clear-logs") => UiPreviewTarget::Dialog(AppDialogKind::ClearLogs),
@@ -439,6 +471,18 @@ fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>,
         _ => UiPreviewTarget::Settings(SettingsTab::General),
     };
     Ok(Some(UiPreviewRequest { target }))
+}
+
+#[cfg(not(windows))]
+fn ui_preview_locale(args: &[String]) -> Result<Locale, String> {
+    let Some(index) = args.iter().position(|argument| argument == "--ui-language") else {
+        return Ok(Locale::English);
+    };
+    let value = args
+        .get(index + 1)
+        .ok_or_else(|| "--ui-language requires en-US, fr-FR, or es".to_string())?;
+    Locale::from_tag(value)
+        .ok_or_else(|| format!("unknown UI language '{value}'; expected en-US, fr-FR, or es"))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -700,11 +744,13 @@ impl PreviewKind {
 
 #[cfg(not(windows))]
 fn ui_preview_config() -> AppConfig {
+    let locale = ui_preview_locale(&std::env::args().collect::<Vec<_>>()).unwrap_or_default();
     AppConfig {
         selected_video_device_id: "preview-camera".into(),
         selected_monitor_label: "Stage display".into(),
         start_with_windows: true,
         start_minimized: true,
+        interface_language: locale.tag().into(),
         start_automatically: true,
         output_mode: OutputMode::Automatic,
         ..AppConfig::default()
@@ -920,22 +966,22 @@ const SETTINGS_RECOVERY_TARGETS: [(UiIcon, &str, f32, RestartTarget); 4] = [
     (
         UiIcon::Camera,
         "Restart webcam",
-        148.0,
+        176.0,
         RestartTarget::Webcam,
     ),
     (
         UiIcon::Monitor,
         "Restart screen capture",
-        184.0,
+        218.0,
         RestartTarget::ScreenCapture,
     ),
     (
         UiIcon::Broadcast,
         "Restart virtual camera",
-        188.0,
+        226.0,
         RestartTarget::VirtualCamera,
     ),
-    (UiIcon::Layers, "Restart all", 126.0, RestartTarget::All),
+    (UiIcon::Layers, "Restart all", 154.0, RestartTarget::All),
 ];
 
 #[cfg(not(windows))]
@@ -985,6 +1031,12 @@ struct SwitcherApp {
 
 impl SwitcherApp {
     fn new(mut config: AppConfig, mut load_warnings: Vec<String>, store: ConfigStore) -> Self {
+        config.interface_language = Locale::from_tag(&config.interface_language)
+            .unwrap_or_default()
+            .tag()
+            .into();
+        #[cfg(windows)]
+        let locale = Locale::from_tag(&config.interface_language).unwrap_or_default();
         if config.reference_image_path.is_empty() {
             config.reference_image_path = store.reference_path().display().to_string();
         }
@@ -1029,7 +1081,7 @@ impl SwitcherApp {
             #[cfg(windows)]
             last_notified_warning: None,
             #[cfg(windows)]
-            tray: tray::Tray::new().ok(),
+            tray: tray::Tray::new(locale).ok(),
             #[cfg(windows)]
             portable_mode: stageswap_windows::PortableMode::Managed,
             #[cfg(windows)]
@@ -1044,6 +1096,10 @@ impl SwitcherApp {
             disco_ui_activated_at: None,
             ui_animation_started_at: Instant::now(),
         }
+    }
+
+    fn locale(&self) -> Locale {
+        Locale::from_tag(&self.config.interface_language).unwrap_or_default()
     }
 
     fn with_tutorial_startup(mut self, startup: TutorialStartup) -> Self {
@@ -1429,7 +1485,7 @@ impl SwitcherApp {
 
     fn import_reference_dialog(&mut self) {
         #[cfg(windows)]
-        if let Some(path) = stageswap_windows::pick_reference_image() {
+        if let Some(path) = stageswap_windows::pick_reference_image(self.locale()) {
             self.send(Command::ImportReference(path));
         }
         #[cfg(not(windows))]
@@ -1449,7 +1505,7 @@ impl SwitcherApp {
 
     fn export_logs(&mut self) {
         #[cfg(windows)]
-        if let Some(path) = stageswap_windows::pick_log_export_path()
+        if let Some(path) = stageswap_windows::pick_log_export_path(self.locale())
             && let Err(error) = self.log.export_to(&path)
         {
             self.load_warnings
@@ -1631,10 +1687,13 @@ impl SwitcherApp {
                         let content_top = ui.cursor().top();
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new(format!(
-                                    "STEP {} OF {}",
-                                    step.number(),
-                                    TutorialStep::ALL.len()
+                                RichText::new(format_text(
+                                    self.locale(),
+                                    "STEP {0} OF {1}",
+                                    &[
+                                        &step.number().to_string(),
+                                        &TutorialStep::ALL.len().to_string(),
+                                    ],
                                 ))
                                 .size(10.0)
                                 .strong()
@@ -1645,7 +1704,7 @@ impl SwitcherApp {
                                 |ui| {
                                     if ui
                                         .link(
-                                            RichText::new("Skip tutorial")
+                                            RichText::new(tr(ui, "Skip tutorial"))
                                                 .size(11.5)
                                                 .color(Color32::from_rgb(172, 180, 194)),
                                         )
@@ -1687,7 +1746,7 @@ impl SwitcherApp {
                                     );
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(step.title())
+                                            RichText::new(tr(ui, step.title()))
                                                 .size(21.0)
                                                 .strong()
                                                 .color(Color32::WHITE),
@@ -1701,7 +1760,7 @@ impl SwitcherApp {
                                         tutorial_accent_palette(paragraph.accent());
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(paragraph.heading)
+                                            RichText::new(tr(ui, paragraph.heading))
                                                 .size(12.25)
                                                 .strong()
                                                 .color(heading_color),
@@ -1711,7 +1770,7 @@ impl SwitcherApp {
                                     ui.add_space(3.0);
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(paragraph.explanation)
+                                            RichText::new(tr(ui, paragraph.explanation))
                                                 .size(11.75)
                                                 .color(Color32::from_rgb(184, 191, 203)),
                                         )
@@ -1740,7 +1799,7 @@ impl SwitcherApp {
                                 if ui
                                     .add_enabled(
                                         step.previous().is_some(),
-                                        egui::Button::new("Back")
+                                        egui::Button::new(tr(ui, "Back").as_ref())
                                             .min_size(egui::vec2(76.0, FOOTER_HEIGHT)),
                                     )
                                     .clicked()
@@ -1754,7 +1813,7 @@ impl SwitcherApp {
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    RichText::new(label)
+                                                    RichText::new(tr(ui, label))
                                                         .strong()
                                                         .color(Color32::WHITE),
                                                 )
@@ -2058,7 +2117,7 @@ impl SwitcherApp {
                         snapshot.mode == OutputMode::ForceCamera,
                         false,
                     )
-                    .on_hover_text("Webcam")
+                    .on_hover_text(localized_text(self.locale(), "Webcam"))
                     .clicked()
                     {
                         self.set_mode(OutputMode::ForceCamera);
@@ -2071,7 +2130,7 @@ impl SwitcherApp {
                         snapshot.mode == OutputMode::ForceScreen,
                         false,
                     )
-                    .on_hover_text("Screen")
+                    .on_hover_text(localized_text(self.locale(), "Screen"))
                     .clicked()
                     {
                         self.set_mode(OutputMode::ForceScreen);
@@ -2261,19 +2320,20 @@ impl SwitcherApp {
                 }
                 ui.add_space(10.0);
                 ui.label(
-                    RichText::new("PREFERENCES")
+                    RichText::new(tr(ui, "PREFERENCES"))
                         .size(10.0)
                         .strong()
                         .color(Color32::from_rgb(112, 120, 134)),
                 );
                 ui.add_space(8.0);
                 let mut primary_navigation = Vec::with_capacity(SettingsTab::PRIMARY.len());
-                for (index, (tab, icon, label)) in SettingsTab::PRIMARY.into_iter().enumerate() {
+                for (index, (tab, icon)) in SettingsTab::PRIMARY.into_iter().enumerate() {
+                    let label = tab.title(self.locale());
                     let response = settings_nav_button(
                         ui,
                         tab,
                         icon,
-                        label,
+                        label.as_ref(),
                         self.settings_tab,
                         disco_enabled.then(|| disco_ui_color(disco_elapsed, index as f32 * 0.13)),
                     );
@@ -2295,12 +2355,13 @@ impl SwitcherApp {
                     .with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                         let save_status = self.settings_save_indicator(ui);
                         ui.add_space(10.0);
-                        let (tab, icon, label) = SettingsTab::DIAGNOSTICS;
+                        let (tab, icon) = SettingsTab::DIAGNOSTICS;
+                        let label = tab.title(self.locale());
                         let response = settings_nav_button(
                             ui,
                             tab,
                             icon,
-                            label,
+                            label.as_ref(),
                             self.settings_tab,
                             disco_enabled.then(|| disco_ui_color(disco_elapsed, 0.76)),
                         );
@@ -2343,7 +2404,7 @@ impl SwitcherApp {
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 ui.label(
-                    RichText::new("AUTOSAVE")
+                    RichText::new(tr(ui, "AUTOSAVE"))
                         .size(9.5)
                         .strong()
                         .color(Color32::from_rgb(103, 110, 122)),
@@ -2404,14 +2465,14 @@ impl SwitcherApp {
                                 ui.set_opacity(0.62 + section_progress * 0.38);
                                 ui.add_space(18.0 + (1.0 - section_progress) * 5.0);
                                 ui.label(
-                                    RichText::new(self.settings_tab.title())
+                                    RichText::new(self.settings_tab.title(self.locale()))
                                         .size(23.0)
                                         .strong()
                                         .color(Color32::WHITE),
                                 );
                                 ui.add_space(4.0);
                                 ui.label(
-                                    RichText::new(self.settings_tab.description())
+                                    RichText::new(self.settings_tab.description(self.locale()))
                                         .size(13.0)
                                         .color(Color32::from_rgb(154, 161, 174)),
                                 );
@@ -2438,19 +2499,18 @@ impl SwitcherApp {
     }
 
     fn general_settings(&mut self, ui: &mut egui::Ui) {
-        settings_section_heading(
+        settings_info_card(
             ui,
-            UiIcon::Route,
-            "How StageSwap works",
             "StageSwap watches your selected screen. While it matches your saved reference image, your video calls see your webcam. When the screen changes, StageSwap automatically switches to the screen. When the reference returns, it switches back to your webcam.",
         );
+        ui.add_space(12.0);
         let mut open_tutorial = false;
         if settings_single_button_row(
             ui,
             "Dashboard tutorial",
             "Review the previews, status information, and everyday controls.",
             "Open tutorial",
-            116.0,
+            152.0,
         )
         .clicked()
         {
@@ -2459,6 +2519,28 @@ impl SwitcherApp {
         if open_tutorial {
             self.start_tutorial(TutorialReturnView::Settings);
             return;
+        }
+
+        let current_locale = self.locale();
+        let mut selected_locale = current_locale;
+        settings_control_row(
+            ui,
+            "Interface language",
+            "Changes apply immediately.",
+            |ui| {
+                egui::ComboBox::from_id_salt("interface-language")
+                    .width(152.0)
+                    .selected_text(selected_locale.native_name())
+                    .show_ui(ui, |ui| {
+                        for locale in Locale::ALL {
+                            ui.selectable_value(&mut selected_locale, locale, locale.native_name());
+                        }
+                    });
+            },
+        );
+        if selected_locale != current_locale {
+            self.config.interface_language = selected_locale.tag().into();
+            set_ui_locale(ui.ctx(), selected_locale);
         }
 
         settings_section_gap(ui);
@@ -2479,7 +2561,7 @@ impl SwitcherApp {
                     "Install StageSwap to use a stable Windows startup path.",
                 );
             });
-            if ui.button("Install StageSwap to enable startup").clicked()
+            if translated_button(ui, "Install StageSwap to enable startup").clicked()
                 && let Err(error) = stageswap_windows::request_install()
             {
                 self.load_warnings
@@ -2509,6 +2591,7 @@ impl SwitcherApp {
             "Open in the system tray.",
         );
         let automatic_result = start_automatically_result(
+            self.locale(),
             self.config.start_automatically,
             self.config.start_minimized,
             self.config.output_mode,
@@ -2570,9 +2653,9 @@ impl SwitcherApp {
             .map(|device| device.name.clone())
             .unwrap_or_else(|| {
                 if self.config.selected_video_device_id.is_empty() {
-                    "No camera selected".into()
+                    localized_text(self.locale(), "No camera selected").into_owned()
                 } else {
-                    "Saved camera is unavailable".into()
+                    localized_text(self.locale(), "Saved camera is unavailable").into_owned()
                 }
             });
         self.settings_preview_control_row(
@@ -2593,7 +2676,7 @@ impl SwitcherApp {
                 settings_device_status(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state);
                 ui.add_space(12.0);
                 ui.label(
-                    RichText::new("Camera")
+                    RichText::new(tr(ui, "Camera"))
                         .size(12.0)
                         .color(Color32::from_rgb(224, 228, 235)),
                 );
@@ -2610,7 +2693,7 @@ impl SwitcherApp {
                             ui.selectable_value(
                                 &mut app.config.selected_video_device_id,
                                 String::new(),
-                                "No camera selected",
+                                tr(ui, "No camera selected").as_ref(),
                             );
                             for device in snapshot.video_devices.iter() {
                                 ui.selectable_value(
@@ -2626,7 +2709,7 @@ impl SwitcherApp {
                         "Refresh camera devices",
                         egui::vec2(geometry.action_width, 32.0),
                     )
-                    .on_hover_text("Refresh camera devices")
+                    .on_hover_text(tr(ui, "Refresh camera devices"))
                     .clicked()
                     {
                         app.send(Command::RefreshVideoDevices);
@@ -2645,10 +2728,10 @@ impl SwitcherApp {
 
     fn screen_settings(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.snapshot();
-        let selected_monitor = snapshot
-            .selected_monitor
-            .as_ref()
-            .map_or("No display selected", |monitor| monitor.label.as_str());
+        let selected_monitor = snapshot.selected_monitor.as_ref().map_or_else(
+            || localized_text(self.locale(), "No display selected").into_owned(),
+            |monitor| monitor.label.clone(),
+        );
         self.settings_preview_control_row(
             ui,
             SettingsSection {
@@ -2667,14 +2750,14 @@ impl SwitcherApp {
                 settings_device_status(ui, UiIcon::Monitor, "Capture", snapshot.screen_state);
                 ui.add_space(12.0);
                 ui.label(
-                    RichText::new("Display")
+                    RichText::new(tr(ui, "Display"))
                         .size(12.0)
                         .color(Color32::from_rgb(224, 228, 235)),
                 );
                 ui.add_space(4.0);
                 egui::ComboBox::from_id_salt("monitor-selector")
                     .width(ui.available_width())
-                    .selected_text(selected_monitor)
+                    .selected_text(&selected_monitor)
                     .show_ui(ui, |ui| {
                         for monitor in snapshot.monitors.iter() {
                             let label =
@@ -2748,7 +2831,10 @@ impl SwitcherApp {
                 ui.add_space(7.0);
                 ui.add(
                     egui::Label::new(
-                        RichText::new("Checks 4×/s · 5 matches or 3 mismatches · 0.5s fade")
+                        RichText::new(tr(
+                            ui,
+                            "Checks 4×/s · 5 matches or 3 mismatches · 0.5s fade",
+                        ))
                         .size(10.0)
                         .color(Color32::from_rgb(126, 134, 148)),
                     )
@@ -2789,12 +2875,12 @@ impl SwitcherApp {
                 let strictness = format!("{:.0}%", app.config.similarity_threshold * 100.0);
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new("Match strictness")
+                        RichText::new(tr(ui, "Match strictness"))
                             .size(12.0)
                             .color(Color32::from_rgb(224, 228, 235)),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("Reset 98%").clicked() {
+                        if translated_small_button(ui, "Reset 98%").clicked() {
                             app.config.similarity_threshold = 0.98;
                         }
                         ui.label(RichText::new(strictness).monospace());
@@ -2812,9 +2898,11 @@ impl SwitcherApp {
                 let explanation =
                     match_strictness_explanation(app.config.similarity_threshold);
                 ui.add_space(3.0);
+                let level = localized_text(app.locale(), explanation.level);
+                let effect = localized_text(app.locale(), explanation.effect);
                 settings_result_text(
                     ui,
-                    &format!("{} — {}", explanation.level, explanation.effect),
+                    &format_text(app.locale(), "{0} — {1}", &[level.as_ref(), effect.as_ref()]),
                 );
             },
         );
@@ -2860,7 +2948,7 @@ impl SwitcherApp {
                 ui,
                 UiIcon::Refresh,
                 "Rescan displays",
-                egui::vec2(142.0, 34.0),
+                egui::vec2(170.0, 34.0),
                 false,
                 false,
             )
@@ -2950,13 +3038,13 @@ impl SwitcherApp {
             "Logs are retained for 14 days.",
             |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("Open folder").clicked() {
+                    if translated_button(ui, "Open folder").clicked() {
                         self.open_log_directory();
                     }
-                    if ui.button("Export…").clicked() {
+                    if translated_button(ui, "Export…").clicked() {
                         self.export_logs();
                     }
-                    if ui.button("Clear…").clicked() {
+                    if translated_button(ui, "Clear…").clicked() {
                         self.request_log_clear();
                     }
                 });
@@ -3289,14 +3377,14 @@ impl SwitcherApp {
                             );
                         } else {
                             ui.label(
-                                RichText::new("Preparing preview…")
+                                RichText::new(tr(ui, "Preparing preview…"))
                                     .size(12.0)
                                     .color(Color32::from_rgb(112, 120, 134)),
                             );
                         }
                     } else {
                         ui.label(
-                            RichText::new(options.empty_message)
+                            RichText::new(tr(ui, options.empty_message))
                                 .size(12.0)
                                 .color(Color32::from_rgb(112, 120, 134)),
                         );
@@ -3314,12 +3402,9 @@ impl SwitcherApp {
 impl AppDialogKind {
     const fn preferred_width(self) -> f32 {
         match self {
-            Self::Admin => 440.0,
-            Self::Exit
-            | Self::ClearLogs
-            | Self::ReplaceAdminBaseline
-            | Self::LoadAdminConfig
-            | Self::RemoveAdminBaseline => 400.0,
+            Self::Admin => 500.0,
+            Self::Exit | Self::ClearLogs => 440.0,
+            Self::ReplaceAdminBaseline | Self::LoadAdminConfig | Self::RemoveAdminBaseline => 560.0,
         }
     }
 
@@ -3393,7 +3478,7 @@ fn dialog_content(
         AppDialogKind::Admin => unreachable!(),
     };
     ui.label(
-        RichText::new(body)
+        RichText::new(tr(ui, body))
             .size(14.0)
             .line_height(Some(21.0))
             .color(Color32::from_rgb(184, 191, 203)),
@@ -3479,7 +3564,7 @@ fn dialog_header(ui: &mut egui::Ui, kind: AppDialogKind) {
         ui_icon::paint(ui.painter(), rect.shrink(9.0), kind.icon(), accent);
         ui.add_space(4.0);
         ui.label(
-            RichText::new(kind.title())
+            RichText::new(tr(ui, kind.title()))
                 .size(19.0)
                 .strong()
                 .color(Color32::from_rgb(235, 238, 244)),
@@ -3493,9 +3578,10 @@ fn admin_dialog_content(
     focus_safe_action: bool,
 ) -> Option<DialogAction> {
     ui.label(
-        RichText::new(
+        RichText::new(tr(
+            ui,
             "Keep a protected local copy of the current settings and reference image for managed setups.",
-        )
+        ))
         .size(14.0)
         .line_height(Some(21.0))
         .color(Color32::from_rgb(184, 191, 203)),
@@ -3504,7 +3590,7 @@ fn admin_dialog_content(
     match status {
         None => {
             ui.label(
-                RichText::new("No admin config is saved.")
+                RichText::new(tr(ui, "No admin config is saved."))
                     .size(13.0)
                     .color(Color32::from_rgb(137, 146, 160)),
             );
@@ -3622,6 +3708,7 @@ fn dialog_button(
     tone: DialogButtonTone,
     width: f32,
 ) -> egui::Response {
+    let label = tr(ui, label);
     let (base_fill, base_stroke, text_color) = match tone {
         DialogButtonTone::Secondary => (
             Color32::from_rgb(40, 44, 53),
@@ -3651,7 +3738,7 @@ fn dialog_button(
 
     let galley =
         ui.painter()
-            .layout_no_wrap(label.to_owned(), FontId::proportional(14.0), text_color);
+            .layout_no_wrap(label.to_string(), FontId::proportional(14.0), text_color);
     let icon_size = 15.0;
     let gap = 7.0;
     let content_width = icon_size + gap + galley.size().x;
@@ -3672,7 +3759,7 @@ fn dialog_button(
         text_color,
     );
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label.as_ref())
     });
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -3764,7 +3851,7 @@ impl eframe::App for SwitcherApp {
             && let Some(warning) = snapshot.warning.as_ref()
             && self.last_notified_warning.as_ref() != Some(warning)
         {
-            if let Err(error) = stageswap_windows::notify_warning(warning) {
+            if let Err(error) = stageswap_windows::notify_warning(self.locale(), warning) {
                 self.log.write(
                     "warning",
                     "notification",
@@ -3780,7 +3867,7 @@ impl eframe::App for SwitcherApp {
         }
         #[cfg(windows)]
         if let Some(tray) = self.tray.as_ref() {
-            tray.sync(&snapshot);
+            tray.sync(&snapshot, self.locale());
         }
         #[cfg(windows)]
         if let Some(action) = self.tray.as_ref().and_then(tray::Tray::poll) {
@@ -3854,9 +3941,37 @@ impl eframe::App for SwitcherApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        set_ui_locale(ui.ctx(), self.locale());
         self.root_ui(ui);
         ui.ctx().request_repaint_after(repaint_interval(true));
     }
+}
+
+const UI_LOCALE_ID: &str = "stageswap-ui-locale";
+
+fn set_ui_locale(context: &egui::Context, locale: Locale) {
+    context.data_mut(|data| data.insert_temp(egui::Id::new(UI_LOCALE_ID), locale));
+}
+
+fn ui_locale(ui: &egui::Ui) -> Locale {
+    ui.data(|data| {
+        data.get_temp::<Locale>(egui::Id::new(UI_LOCALE_ID))
+            .unwrap_or_default()
+    })
+}
+
+fn tr<'a>(ui: &egui::Ui, source: &'a str) -> std::borrow::Cow<'a, str> {
+    localized_text(ui_locale(ui), source)
+}
+
+fn translated_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let label = tr(ui, label);
+    ui.button(label.as_ref())
+}
+
+fn translated_small_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let label = tr(ui, label);
+    ui.small_button(label.as_ref())
 }
 
 fn repaint_interval(ui_rendered: bool) -> Duration {
@@ -4041,7 +4156,7 @@ fn tutorial_detail(ui: &mut egui::Ui, detail: &tutorial::TutorialDetail) {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.add(
                 egui::Label::new(
-                    RichText::new(detail.title)
+                    RichText::new(tr(ui, detail.title))
                         .size(11.75)
                         .strong()
                         .color(accent),
@@ -4050,7 +4165,7 @@ fn tutorial_detail(ui: &mut egui::Ui, detail: &tutorial::TutorialDetail) {
             );
             ui.add(
                 egui::Label::new(
-                    RichText::new(detail.explanation)
+                    RichText::new(tr(ui, detail.explanation))
                         .size(10.75)
                         .color(Color32::from_rgb(157, 165, 179)),
                 )
@@ -4073,6 +4188,7 @@ fn tutorial_accent_palette(accent: tutorial::TutorialAccent) -> (Color32, Color3
 }
 
 fn controls_section_heading(ui: &mut egui::Ui, icon: UiIcon, title: &str) -> Rect {
+    let title = tr(ui, title);
     let heading = ui.horizontal(|ui| {
         let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
         ui_icon::paint(
@@ -4082,7 +4198,7 @@ fn controls_section_heading(ui: &mut egui::Ui, icon: UiIcon, title: &str) -> Rec
             Color32::from_rgb(119, 164, 247),
         );
         ui.label(
-            RichText::new(title)
+            RichText::new(title.as_ref())
                 .size(11.0)
                 .strong()
                 .color(Color32::from_rgb(151, 158, 171)),
@@ -4100,6 +4216,7 @@ fn controls_section_divider(ui: &mut egui::Ui) -> Rect {
 }
 
 fn settings_back_button(ui: &mut egui::Ui) -> egui::Response {
+    let label = tr(ui, "Back to dashboard");
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), Sense::click());
     let fill = if response.hovered() {
@@ -4121,12 +4238,12 @@ fn settings_back_button(ui: &mut egui::Ui) -> egui::Response {
     ui.painter().text(
         Pos2::new(rect.left() + 42.0, rect.center().y),
         Align2::LEFT_CENTER,
-        "Back to dashboard",
+        label.as_ref(),
         FontId::proportional(13.0),
         foreground,
     );
     response
-        .on_hover_text("Back to dashboard")
+        .on_hover_text(label)
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -4186,12 +4303,14 @@ fn settings_section_heading(
     title: &str,
     description: &str,
 ) -> Rect {
+    let title = tr(ui, title);
+    let description = tr(ui, description);
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(17.0, 17.0), Sense::hover());
             ui_icon::paint(ui.painter(), rect, icon, Color32::from_rgb(119, 164, 247));
             ui.label(
-                RichText::new(title)
+                RichText::new(title.as_ref())
                     .size(14.0)
                     .strong()
                     .color(Color32::from_rgb(228, 231, 237)),
@@ -4200,7 +4319,7 @@ fn settings_section_heading(
         ui.add_space(2.0);
         ui.add(
             egui::Label::new(
-                RichText::new(description)
+                RichText::new(description.as_ref())
                     .size(11.0)
                     .color(Color32::from_rgb(128, 136, 150)),
             )
@@ -4211,13 +4330,45 @@ fn settings_section_heading(
     .rect
 }
 
+fn settings_info_card(ui: &mut egui::Ui, text: &str) -> Rect {
+    let text = tr(ui, text);
+    egui::Frame::new()
+        .fill(Color32::from_rgb(27, 31, 39))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(52, 61, 76)))
+        .corner_radius(9)
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(17.0, 17.0), Sense::hover());
+                ui_icon::paint(
+                    ui.painter(),
+                    icon_rect,
+                    UiIcon::Info,
+                    Color32::from_rgb(119, 164, 247),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(text.as_ref())
+                            .size(11.5)
+                            .line_height(Some(17.0))
+                            .color(Color32::from_rgb(174, 182, 196)),
+                    )
+                    .wrap(),
+                );
+            });
+        })
+        .response
+        .rect
+}
+
 fn settings_section_gap(ui: &mut egui::Ui) {
     ui.add_space(24.0);
 }
 
 fn settings_group_label(ui: &mut egui::Ui, label: &str) {
+    let label = tr(ui, label);
     ui.label(
-        RichText::new(label)
+        RichText::new(label.as_ref())
             .size(11.5)
             .strong()
             .color(Color32::from_rgb(190, 196, 207)),
@@ -4226,9 +4377,10 @@ fn settings_group_label(ui: &mut egui::Ui, label: &str) {
 }
 
 fn settings_result_text(ui: &mut egui::Ui, text: &str) -> Rect {
+    let text = tr(ui, text);
     ui.add(
         egui::Label::new(
-            RichText::new(text)
+            RichText::new(text.as_ref())
                 .size(10.0)
                 .color(Color32::from_rgb(145, 165, 199)),
         )
@@ -4237,31 +4389,44 @@ fn settings_result_text(ui: &mut egui::Ui, text: &str) -> Rect {
     .rect
 }
 
-const fn output_mode_name(mode: OutputMode) -> &'static str {
-    match mode {
-        OutputMode::Automatic => "Automatic",
-        OutputMode::ForceCamera => "Camera",
-        OutputMode::ForceScreen => "Display",
-    }
+fn output_mode_name(locale: Locale, mode: OutputMode) -> std::borrow::Cow<'static, str> {
+    localized_text(
+        locale,
+        match mode {
+            OutputMode::Automatic => "Automatic",
+            OutputMode::ForceCamera => "Camera",
+            OutputMode::ForceScreen => "Display",
+        },
+    )
 }
 
 fn start_automatically_result(
+    locale: Locale,
     enabled: bool,
     start_minimized: bool,
     output_mode: OutputMode,
 ) -> String {
     if enabled {
-        format!(
-            "On — Starts in {} mode{}.",
-            output_mode_name(output_mode),
+        let mode = output_mode_name(locale, output_mode);
+        let destination = localized_text(
+            locale,
             if start_minimized {
-                " in the tray"
+                "in the tray"
             } else {
-                " after the dashboard opens"
-            }
+                "after the dashboard opens"
+            },
+        );
+        format_text(
+            locale,
+            "On — Starts in {0} mode {1}.",
+            &[mode.as_ref(), destination.as_ref()],
         )
     } else {
-        "Off — Shows the StageSwap off screen until automation starts.".into()
+        localized_text(
+            locale,
+            "Off — Shows the StageSwap off screen until automation starts.",
+        )
+        .into_owned()
     }
 }
 
@@ -4397,6 +4562,10 @@ fn settings_toggle_row_with_result(
     const VERTICAL_PADDING: f32 = 7.0;
     const TEXT_GAP: f32 = 3.0;
     const RESULT_GAP: f32 = 4.0;
+    let stable_title = title.to_owned();
+    let title = tr(ui, title);
+    let description = description.map(|value| tr(ui, value));
+    let result = result.map(|value| tr(ui, value));
     let width = ui.available_width();
     let text_width = (width - CONTROL_WIDTH - TEXT_CONTROL_GAP).max(80.0);
     let title_color = Color32::from_rgb(224, 228, 235);
@@ -4404,18 +4573,18 @@ fn settings_toggle_row_with_result(
     let result_color = Color32::from_rgb(145, 165, 199);
     let title_galley =
         ui.painter()
-            .layout_no_wrap(title.to_owned(), FontId::proportional(12.5), title_color);
-    let description_galley = description.map(|description| {
+            .layout_no_wrap(title.to_string(), FontId::proportional(12.5), title_color);
+    let description_galley = description.as_ref().map(|description| {
         ui.painter().layout(
-            description.to_owned(),
+            description.to_string(),
             FontId::proportional(10.0),
             description_color,
             text_width,
         )
     });
-    let result_galley = result.map(|result| {
+    let result_galley = result.as_ref().map(|result| {
         ui.painter().layout(
-            result.to_owned(),
+            result.to_string(),
             FontId::proportional(10.0),
             result_color,
             text_width,
@@ -4439,7 +4608,7 @@ fn settings_toggle_row_with_result(
         *value = !*value;
     }
     let amount = ui.ctx().animate_bool_with_time(
-        ui.make_persistent_id(("settings-switch", title)),
+        ui.make_persistent_id(("settings-switch", stable_title)),
         *value,
         0.12,
     );
@@ -4496,7 +4665,7 @@ fn settings_toggle_row_with_result(
     ui.painter().text(
         geometry.state.center(),
         Align2::CENTER_CENTER,
-        if *value { "On" } else { "Off" },
+        tr(ui, if *value { "On" } else { "Off" }).as_ref(),
         FontId::proportional(11.0),
         if *value {
             Color32::from_rgb(119, 164, 247)
@@ -4505,7 +4674,12 @@ fn settings_toggle_row_with_result(
         },
     );
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, title)
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Checkbox,
+            ui.is_enabled(),
+            *value,
+            title.as_ref(),
+        )
     });
     response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if separator {
@@ -4593,6 +4767,8 @@ fn settings_control_row(
     description: &str,
     add_control: impl FnOnce(&mut egui::Ui),
 ) {
+    let title = tr(ui, title);
+    let description = tr(ui, description);
     let width = ui.available_width();
     let control_width = 300.0_f32.min((width * 0.46).max(120.0));
     let label_width = (width - control_width - 12.0).max(100.0);
@@ -4606,12 +4782,12 @@ fn settings_control_row(
                 |ui| {
                     ui.add_space(4.0);
                     ui.label(
-                        RichText::new(title)
+                        RichText::new(title.as_ref())
                             .size(13.0)
                             .color(Color32::from_rgb(224, 228, 235)),
                     );
                     ui.label(
-                        RichText::new(description)
+                        RichText::new(description.as_ref())
                             .size(10.5)
                             .color(Color32::from_rgb(126, 134, 148)),
                     );
@@ -4643,6 +4819,10 @@ fn settings_single_button_row(
     button_label: &str,
     button_width: f32,
 ) -> egui::Response {
+    let stable_title = title.to_owned();
+    let title = tr(ui, title);
+    let description = tr(ui, description);
+    let button_label = tr(ui, button_label);
     let width = ui.available_width();
     let (row, _) = ui.allocate_exact_size(egui::vec2(width, 54.0), Sense::hover());
     let button_size = egui::vec2(button_width.min(width).max(1.0), 32.0);
@@ -4656,35 +4836,36 @@ fn settings_single_button_row(
     );
     let mut label_ui = ui.new_child(
         egui::UiBuilder::new()
-            .id_salt(("settings-single-button-label", title))
+            .id_salt(("settings-single-button-label", stable_title))
             .max_rect(label_rect)
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
     label_ui.add_space(4.0);
     label_ui.label(
-        RichText::new(title)
+        RichText::new(title.as_ref())
             .size(13.0)
             .color(Color32::from_rgb(224, 228, 235)),
     );
     label_ui.add(
         egui::Label::new(
-            RichText::new(description)
+            RichText::new(description.as_ref())
                 .size(10.5)
                 .color(Color32::from_rgb(126, 134, 148)),
         )
         .wrap(),
     );
 
-    let response = ui.put(button_rect, egui::Button::new(button_label));
+    let response = ui.put(button_rect, egui::Button::new(button_label.as_ref()));
     ui.separator();
     response
 }
 
 fn settings_info_row(ui: &mut egui::Ui, title: &str, value: &str) {
     settings_control_row(ui, title, "", |ui| {
+        let value = tr(ui, value);
         ui.add(
             egui::Label::new(
-                RichText::new(value)
+                RichText::new(value.as_ref())
                     .monospace()
                     .size(10.5)
                     .color(Color32::from_rgb(161, 168, 181)),
@@ -4923,6 +5104,7 @@ fn indicator_heading(
     width: f32,
     height: f32,
 ) {
+    let localized_label = tr(ui, label);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
     let icon_rect = Rect::from_min_size(
         Pos2::new(rect.left(), rect.center().y - 7.0),
@@ -4932,7 +5114,7 @@ fn indicator_heading(
     ui.painter().text(
         Pos2::new(icon_rect.right() + 6.0, rect.center().y),
         Align2::LEFT_CENTER,
-        label,
+        localized_label.as_ref(),
         FontId::proportional(14.0),
         Color32::LIGHT_GRAY,
     );
@@ -5000,7 +5182,7 @@ fn indicator_chip(
             icon_color,
         );
     }
-    response.on_hover_text(choice.label);
+    response.on_hover_text(tr(ui, choice.label));
 }
 
 fn indicator_palette(tone: IndicatorTone, active_amount: f32) -> (Color32, Color32, Color32) {
@@ -5048,13 +5230,14 @@ fn friendly_device_state(state: DeviceState) -> &'static str {
 fn preview_caption(ui: &mut egui::Ui, kind: PreviewKind) {
     let font = FontId::proportional(11.0);
     let text_color = Color32::LIGHT_GRAY;
+    let localized_label = tr(ui, kind.label());
     let label = ui
         .painter()
-        .layout_no_wrap(kind.label().to_owned(), font.clone(), text_color);
+        .layout_no_wrap(localized_label.into_owned(), font.clone(), text_color);
     let label_width = label.size().x;
     let live = (kind == PreviewKind::Output).then(|| {
         ui.painter()
-            .layout_no_wrap("LIVE".to_owned(), font.clone(), LIVE_RED)
+            .layout_no_wrap(tr(ui, "LIVE").into_owned(), font.clone(), LIVE_RED)
     });
     let icon_size = 13.0;
     let live_width = live.as_ref().map_or(0.0, |galley| 12.0 + galley.size().x);
@@ -5134,8 +5317,9 @@ fn app_title(ui: &mut egui::Ui, texture: egui::TextureId) {
 }
 
 fn icon_text(ui: &mut egui::Ui, icon: UiIcon, text: &str, color: Color32, strong: bool) {
+    let text = tr(ui, text);
     let font = FontId::proportional(if strong { 14.0 } else { 11.0 });
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    let galley = ui.painter().layout_no_wrap(text.into_owned(), font, color);
     let icon_size = if strong { 15.0 } else { 13.0 };
     let size = egui::vec2(
         icon_size + 6.0 + galley.size().x,
@@ -5174,9 +5358,14 @@ fn icon_only_button(
     accessible_label: &str,
     desired_size: Vec2,
 ) -> egui::Response {
+    let accessible_label = tr(ui, accessible_label);
     let response = icon_button_impl(ui, icon, "", desired_size, false, false, None);
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), accessible_label)
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            accessible_label.as_ref(),
+        )
     });
     response
 }
@@ -5200,6 +5389,7 @@ fn icon_button_impl(
     emphasized: bool,
     accent: Option<Color32>,
 ) -> egui::Response {
+    let text = tr(ui, text);
     let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
     let visuals = ui.style().interact(&response);
     let fill = if selected {
@@ -5232,7 +5422,7 @@ fn icon_button_impl(
         visuals.fg_stroke.color
     };
     let font = FontId::proportional(if emphasized { 14.0 } else { 12.0 });
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, color);
     let icon_size = if emphasized { 16.0 } else { 14.0 };
     let text_gap = if text.is_empty() { 0.0 } else { 7.0 };
     let content_width = icon_size + text_gap + galley.size().x;
@@ -6362,6 +6552,21 @@ mod tests {
                 target: UiPreviewTarget::Settings(SettingsTab::General),
             })
         );
+        let localized = vec![
+            "StageSwap".to_owned(),
+            "--ui-preview".to_owned(),
+            "general".to_owned(),
+            "--ui-language".to_owned(),
+            "fr-CA".to_owned(),
+        ];
+        assert_eq!(ui_preview_locale(&localized).unwrap(), Locale::French);
+        let unsupported = vec![
+            "StageSwap".to_owned(),
+            "--ui-preview".to_owned(),
+            "--ui-language".to_owned(),
+            "de-DE".to_owned(),
+        ];
+        assert!(parse_ui_preview_request(&unsupported).is_err());
         for (name, kind) in [
             ("dialog-exit", AppDialogKind::Exit),
             ("dialog-clear-logs", AppDialogKind::ClearLogs),
@@ -6449,10 +6654,18 @@ mod tests {
 
     #[test]
     fn screen_and_matching_are_separate_settings_pages() {
-        assert_eq!(SettingsTab::Screen.title(), "Screen");
-        assert_eq!(SettingsTab::Matching.title(), "Matching");
-        assert!(SettingsTab::Screen.description().contains("display"));
-        assert!(SettingsTab::Matching.description().contains("webcam"));
+        assert_eq!(SettingsTab::Screen.title(Locale::English), "Screen");
+        assert_eq!(SettingsTab::Matching.title(Locale::English), "Matching");
+        assert!(
+            SettingsTab::Screen
+                .description(Locale::English)
+                .contains("display")
+        );
+        assert!(
+            SettingsTab::Matching
+                .description(Locale::English)
+                .contains("webcam")
+        );
         assert_ne!(SettingsTab::Screen, SettingsTab::Matching);
     }
 
@@ -6537,10 +6750,12 @@ mod tests {
 
     #[test]
     fn conditional_settings_copy_reflects_values_and_dependencies() {
-        let automatic = start_automatically_result(true, true, OutputMode::ForceScreen);
+        let automatic =
+            start_automatically_result(Locale::English, true, true, OutputMode::ForceScreen);
         assert!(automatic.starts_with("On —"));
         assert!(automatic.contains("Display mode in the tray"));
-        let stopped = start_automatically_result(false, false, OutputMode::Automatic);
+        let stopped =
+            start_automatically_result(Locale::English, false, false, OutputMode::Automatic);
         assert!(stopped.starts_with("Off —"));
         assert!(stopped.contains("off screen"));
 
@@ -7500,58 +7715,65 @@ mod tests {
             ConfigStore::new(directory.path()),
         );
         let context = egui::Context::default();
-        for viewport in [
-            egui::vec2(820.0, 600.0),
-            egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
-            egui::vec2(1280.0, 720.0),
-        ] {
-            for dpi_scale in [1.0, 1.5] {
-                app.view = AppView::Dashboard;
-                let mut dashboard_input = egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, viewport)),
-                    ..egui::RawInput::default()
-                };
-                dashboard_input
-                    .viewports
-                    .get_mut(&egui::ViewportId::ROOT)
-                    .unwrap()
-                    .native_pixels_per_point = Some(dpi_scale);
-                let dashboard_output = context.run_ui(dashboard_input, |ui| {
-                    app.root_ui(ui);
-                });
-                assert!(!dashboard_output.shapes.is_empty());
-
-                for tab in SettingsTab::ALL {
-                    app.settings_tab = tab;
-                    app.view = AppView::Settings;
-                    app.settings_opened_at = None;
-                    app.settings_section_changed_at = None;
-                    let mut input = egui::RawInput {
+        for locale in Locale::ALL {
+            app.config.interface_language = locale.tag().into();
+            set_ui_locale(&context, locale);
+            for viewport in [
+                egui::vec2(820.0, 600.0),
+                egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
+                egui::vec2(1280.0, 720.0),
+            ] {
+                for dpi_scale in [1.0, 1.5] {
+                    app.view = AppView::Dashboard;
+                    let mut dashboard_input = egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, viewport)),
                         ..egui::RawInput::default()
                     };
-                    input
+                    dashboard_input
                         .viewports
                         .get_mut(&egui::ViewportId::ROOT)
                         .unwrap()
                         .native_pixels_per_point = Some(dpi_scale);
-                    let output = context.run_ui(input, |ui| {
-                        assert_eq!(ui.ctx().native_pixels_per_point(), Some(dpi_scale));
-                        let content_rect = app.root_ui(ui);
-                        assert!(
-                            content_rect.min.x >= 8.0 && content_rect.min.y >= 8.0,
-                            "settings starts outside the root panel margin: {content_rect:?}"
-                        );
-                        assert!(
-                            content_rect.max.x <= viewport.x - 8.0
-                                && content_rect.max.y <= viewport.y - 8.0,
-                            "settings ends outside the root panel margin: {content_rect:?}"
-                        );
+                    let dashboard_output = context.run_ui(dashboard_input, |ui| {
+                        app.root_ui(ui);
                     });
-                    assert!(
-                        !output.shapes.is_empty(),
-                        "{tab:?} at {viewport:?} and {dpi_scale}× produced no UI shapes"
-                    );
+                    assert!(!dashboard_output.shapes.is_empty());
+
+                    for tab in SettingsTab::ALL {
+                        app.settings_tab = tab;
+                        app.view = AppView::Settings;
+                        app.settings_opened_at = None;
+                        app.settings_section_changed_at = None;
+                        let mut input = egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                viewport,
+                            )),
+                            ..egui::RawInput::default()
+                        };
+                        input
+                            .viewports
+                            .get_mut(&egui::ViewportId::ROOT)
+                            .unwrap()
+                            .native_pixels_per_point = Some(dpi_scale);
+                        let output = context.run_ui(input, |ui| {
+                            assert_eq!(ui.ctx().native_pixels_per_point(), Some(dpi_scale));
+                            let content_rect = app.root_ui(ui);
+                            assert!(
+                                content_rect.min.x >= 8.0 && content_rect.min.y >= 8.0,
+                                "settings starts outside the root panel margin: {content_rect:?}"
+                            );
+                            assert!(
+                                content_rect.max.x <= viewport.x - 8.0
+                                    && content_rect.max.y <= viewport.y - 8.0,
+                                "settings ends outside the root panel margin: {content_rect:?}"
+                            );
+                        });
+                        assert!(
+                            !output.shapes.is_empty(),
+                            "{tab:?} at {viewport:?} and {dpi_scale}× produced no UI shapes"
+                        );
+                    }
                 }
             }
         }

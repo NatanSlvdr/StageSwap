@@ -1,20 +1,22 @@
 use crate::dialog::{TaskDialogIcon, TaskDialogSpec, show_task_dialog};
 use notify_rust::Notification;
+use stageswap_i18n::{Locale, text};
 use windows::Win32::UI::Controls::TDCBF_OK_BUTTON;
 
-pub fn notify_warning(message: &str) -> Result<(), String> {
+pub fn notify_warning(locale: Locale, message: &str) -> Result<(), String> {
     Notification::new()
         .appname("StageSwap")
-        .summary("StageSwap needs attention")
+        .summary(text(locale, "StageSwap needs attention").as_ref())
         .body(message)
         .show()
         .map(|_| ())
         .map_err(|error| format!("could not show Windows notification: {error}"))
 }
 
-pub fn show_error_dialog(instruction: &str, details: &str) {
+pub fn show_error_dialog(locale: Locale, instruction: &str, details: &str) {
+    let instruction = text(locale, instruction);
     let _ = show_task_dialog(TaskDialogSpec {
-        instruction,
+        instruction: instruction.as_ref(),
         content: details,
         icon: TaskDialogIcon::Error,
         choices: &[],

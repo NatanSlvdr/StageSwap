@@ -29,6 +29,10 @@ mod notification;
 #[cfg(windows)]
 pub use notification::{notify_warning, show_error_dialog};
 #[cfg(windows)]
+mod system_locale;
+#[cfg(windows)]
+pub use system_locale::{preferred_interface_locale, user_interface_locale};
+#[cfg(windows)]
 mod dialog;
 #[cfg(windows)]
 mod shell_ui;

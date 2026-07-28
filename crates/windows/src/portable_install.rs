@@ -3,6 +3,7 @@ use crate::{
     InstanceCommand, InstanceStatus, SingleInstance, configure_startup, instance_status,
     send_instance_command,
 };
+use stageswap_i18n::{Locale, format_text, text};
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -59,7 +60,7 @@ pub enum BootstrapResult {
     Exit,
 }
 
-pub fn bootstrap(payload: &[u8]) -> Result<BootstrapResult, String> {
+pub fn bootstrap(payload: &[u8], locale: Locale) -> Result<BootstrapResult, String> {
     let argument = env::args().nth(1);
     if matches!(
         argument.as_deref(),
@@ -106,11 +107,14 @@ pub fn bootstrap(payload: &[u8]) -> Result<BootstrapResult, String> {
         }
         let installed_version = product_version(&managed).unwrap_or_else(|| "unknown".into());
         let candidate_version = product_version(&current).unwrap_or_else(|| "unknown".into());
-        let relation = version_relation(&candidate_version, &installed_version);
-        let content = format!(
-            "Installed version: {installed_version}\nCandidate version: {candidate_version}\n\n{relation}"
+        let relation = version_relation(&candidate_version, &installed_version, locale);
+        let content = format_text(
+            locale,
+            "Installed version: {0}\nCandidate version: {1}\n\n{2}",
+            &[&installed_version, &candidate_version, relation.as_ref()],
         );
         match task_dialog(
+            locale,
             "Replace the installed StageSwap?",
             &content,
             &[
@@ -127,6 +131,7 @@ pub fn bootstrap(payload: &[u8]) -> Result<BootstrapResult, String> {
     }
 
     match task_dialog(
+        locale,
         "Install StageSwap for this user?",
         "Installation keeps the app at a stable per-user path and creates Start Menu and Desktop shortcuts. The virtual-camera component still requires administrator approval.",
         &[
@@ -472,8 +477,12 @@ fn paths_match(left: &Path, right: &Path) -> bool {
     normalize(left) == normalize(right)
 }
 
-fn version_relation(candidate: &str, installed: &str) -> &'static str {
-    match (parse_version(candidate), parse_version(installed)) {
+fn version_relation(
+    candidate: &str,
+    installed: &str,
+    locale: Locale,
+) -> std::borrow::Cow<'static, str> {
+    let message = match (parse_version(candidate), parse_version(installed)) {
         (Some(candidate), Some(installed)) if candidate < installed => {
             "This replaces the installed app with an older version."
         }
@@ -481,7 +490,8 @@ fn version_relation(candidate: &str, installed: &str) -> &'static str {
             "This replaces it with a different build of the same version."
         }
         _ => "The running app will close gracefully before replacement.",
-    }
+    };
+    text(locale, message)
 }
 
 fn parse_version(value: &str) -> Option<Vec<u32>> {
@@ -528,16 +538,27 @@ fn product_version(path: &Path) -> Option<String> {
 }
 
 fn task_dialog(
+    locale: Locale,
     instruction: &str,
     content: &str,
     choices: &[(i32, &str)],
     default: i32,
 ) -> Result<i32, String> {
+    let instruction = text(locale, instruction);
+    let content = text(locale, content);
+    let localized_choices: Vec<(i32, std::borrow::Cow<'_, str>)> = choices
+        .iter()
+        .map(|(id, label)| (*id, text(locale, label)))
+        .collect();
+    let choice_refs: Vec<(i32, &str)> = localized_choices
+        .iter()
+        .map(|(id, label)| (*id, label.as_ref()))
+        .collect();
     show_task_dialog(TaskDialogSpec {
-        instruction,
-        content,
+        instruction: instruction.as_ref(),
+        content: content.as_ref(),
         icon: TaskDialogIcon::Information,
-        choices,
+        choices: &choice_refs,
         default_button: default,
         common_buttons: TDCBF_CANCEL_BUTTON,
         command_links: true,
@@ -625,9 +646,9 @@ mod tests {
 
     #[test]
     fn version_relation_calls_out_downgrades_and_rebuilds() {
-        assert!(version_relation("1.0.0", "2.0.0").contains("older"));
-        assert!(version_relation("2.0.0", "2.0.0").contains("different build"));
-        assert!(version_relation("3.0.0", "2.0.0").contains("close gracefully"));
+        assert!(version_relation("1.0.0", "2.0.0", Locale::English).contains("older"));
+        assert!(version_relation("2.0.0", "2.0.0", Locale::English).contains("different build"));
+        assert!(version_relation("3.0.0", "2.0.0", Locale::English).contains("close gracefully"));
     }
 
     #[test]
