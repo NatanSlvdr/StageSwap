@@ -138,9 +138,6 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         // General settings.
         "How StageSwap works" => ("Fonctionnement de StageSwap", "Cómo funciona StageSwap"),
         "StageSwap watches your selected screen. While it matches your saved reference image, your video calls see your webcam. When the screen changes, StageSwap automatically switches to the screen. When the reference returns, it switches back to your webcam." => ("StageSwap surveille l’écran sélectionné. Tant qu’il correspond à l’image de référence enregistrée, vos appels vidéo voient votre webcam. Lorsque l’écran change, StageSwap bascule automatiquement vers l’écran. Lorsque la référence réapparaît, il revient à votre webcam.", "StageSwap vigila la pantalla seleccionada. Mientras coincida con la imagen de referencia guardada, las videollamadas verán tu cámara web. Cuando cambie la pantalla, StageSwap cambiará automáticamente a ella. Cuando vuelva la referencia, regresará a la cámara web."),
-        "Dashboard tutorial" => ("Tutoriel du tableau de bord", "Tutorial del panel"),
-        "Review the previews, status information, and everyday controls." => ("Découvrez les aperçus, les informations d’état et les commandes courantes.", "Repasa las vistas previas, la información de estado y los controles habituales."),
-        "Open tutorial" => ("Ouvrir le tutoriel", "Abrir tutorial"),
         "Startup" => ("Démarrage", "Inicio"),
         "Applied the next time StageSwap starts." => ("Appliqué au prochain démarrage de StageSwap.", "Se aplica la próxima vez que se inicie StageSwap."),
         "Start with Windows" => ("Démarrer avec Windows", "Iniciar con Windows"),
@@ -287,87 +284,45 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Auto-restore on launch" => ("Restaurer automatiquement au démarrage", "Restaurar automáticamente al iniciar"),
         "Replace session changes with this admin config whenever StageSwap starts." => ("Remplacer les modifications de la session par cette configuration administrateur à chaque démarrage de StageSwap.", "Sustituir los cambios de la sesión por esta configuración de administrador cada vez que se inicie StageSwap."),
 
-        // First-run and dashboard tutorial.
-        "STEP {0} OF {1}" => ("ÉTAPE {0} SUR {1}", "PASO {0} DE {1}"),
-        "Skip tutorial" => ("Ignorer le tutoriel", "Omitir tutorial"),
-        "Finish" => ("Terminer", "Finalizar"),
-        "Next" => ("Suivant", "Siguiente"),
-        "Welcome to StageSwap" => ("Bienvenue dans StageSwap", "Te damos la bienvenida a StageSwap"),
-        "Automatic chooses for you" => ("Le mode Automatique choisit pour vous", "Automático elige por ti"),
-        "Know the four previews" => ("Découvrez les quatre aperçus", "Conoce las cuatro vistas previas"),
-        "Check what is ready" => ("Vérifiez ce qui est prêt", "Comprueba qué está listo"),
-        "Control what people see" => ("Contrôlez ce que les autres voient", "Controla lo que ven los demás"),
-        "Prepare the screen" => ("Préparez l’écran", "Prepara la pantalla"),
-        "Ready to use StageSwap" => ("Prêt à utiliser StageSwap", "Todo listo para usar StageSwap"),
-        "Choose StageSwap in Zoom" => ("Choisissez StageSwap dans Zoom", "Elige StageSwap en Zoom"),
-        "StageSwap creates a virtual camera for Zoom. Open Zoom’s camera list and select StageSwap instead of your physical webcam." => ("StageSwap crée une caméra virtuelle pour Zoom. Ouvrez la liste des caméras de Zoom et sélectionnez StageSwap à la place de votre webcam physique.", "StageSwap crea una cámara virtual para Zoom. Abre la lista de cámaras de Zoom y selecciona StageSwap en lugar de la cámara web física."),
-        "One camera, two possible views" => ("Une caméra, deux vues possibles", "Una cámara, dos vistas posibles"),
-        "That single camera can show either your physical webcam or one selected display. StageSwap changes between them without starting Zoom’s screen-sharing mode." => ("Cette caméra unique peut afficher votre webcam physique ou un écran sélectionné. StageSwap passe de l’un à l’autre sans démarrer le partage d’écran de Zoom.", "Esa única cámara puede mostrar la cámara web física o una pantalla seleccionada. StageSwap cambia entre ambas sin iniciar el modo de compartir pantalla de Zoom."),
-        "Private and silent" => ("Privé et silencieux", "Privado y silencioso"),
-        "Camera and screen frames stay on this computer. StageSwap does not record them, upload them, or send audio." => ("Les images de la caméra et de l’écran restent sur cet ordinateur. StageSwap ne les enregistre pas, ne les téléverse pas et n’envoie aucun son.", "Las imágenes de la cámara y la pantalla permanecen en este equipo. StageSwap no las graba, no las sube ni envía audio."),
-        "First, save a reference" => ("Commencez par enregistrer une référence", "Primero, guarda una referencia"),
-        "The reference is a picture of the display when you want people in Zoom to see your webcam. It is usually an idle slide, holding image, or desktop background." => ("La référence est une image de l’écran lorsque vous souhaitez que les participants à Zoom voient votre webcam. Il s’agit généralement d’une diapositive d’attente, d’une image fixe ou de l’arrière-plan du bureau.", "La referencia es una imagen de la pantalla cuando quieres que las personas de Zoom vean tu cámara web. Suele ser una diapositiva de espera, una imagen fija o el fondo del escritorio."),
-        "StageSwap watches the picture" => ("StageSwap surveille l’image", "StageSwap vigila la imagen"),
-        "It compares the live display with the reference four times per second. It looks only at visual similarity; it does not read slide titles, app names, or text." => ("Il compare l’écran en direct à la référence quatre fois par seconde. Il examine uniquement la ressemblance visuelle ; il ne lit ni les titres des diapositives, ni les noms des applications, ni le texte.", "Compara la pantalla en directo con la referencia cuatro veces por segundo. Solo analiza la similitud visual; no lee títulos de diapositivas, nombres de aplicaciones ni texto."),
-        "The match chooses the view" => ("La correspondance choisit la vue", "La coincidencia elige la vista"),
-        "A matching display selects the webcam. A changed display selects the screen. When the reference returns, StageSwap switches back to the webcam." => ("Un écran correspondant sélectionne la webcam. Un écran modifié sélectionne l’écran. Lorsque la référence réapparaît, StageSwap revient à la webcam.", "Una pantalla que coincide selecciona la cámara web. Una pantalla que cambia selecciona la pantalla. Cuando vuelve la referencia, StageSwap regresa a la cámara web."),
-        "Follow the full video path" => ("Suivez le parcours vidéo complet", "Sigue todo el recorrido del vídeo"),
-        "The four previews update live before and during a Zoom call. They let you confirm both selected inputs, the saved reference, and the final result." => ("Les quatre aperçus se mettent à jour en direct avant et pendant un appel Zoom. Ils permettent de vérifier les deux entrées sélectionnées, la référence enregistrée et le résultat final.", "Las cuatro vistas previas se actualizan en directo antes y durante una llamada de Zoom. Permiten comprobar las dos entradas seleccionadas, la referencia guardada y el resultado final."),
-        "Green outline: active input" => ("Contour vert : entrée active", "Contorno verde: entrada activa"),
-        "The green outline marks the webcam or screen currently feeding the result." => ("Le contour vert indique la webcam ou l’écran qui alimente actuellement le résultat.", "El contorno verde marca la cámara web o la pantalla que alimenta el resultado en ese momento."),
-        "Red outline: Zoom output" => ("Contour rouge : sortie Zoom", "Contorno rojo: salida de Zoom"),
-        "The red Output outline marks the feed sent to Zoom. FPS shows the live frame rate." => ("Le contour rouge de Sortie indique le flux envoyé à Zoom. FPS affiche la fréquence d’images en direct.", "El contorno rojo de Salida marca la señal enviada a Zoom. FPS muestra la frecuencia de fotogramas en directo."),
-        "Check the three components" => ("Vérifiez les trois composants", "Comprueba los tres componentes"),
-        "Webcam, Screen, and Output show whether each part is ready. Check this area first if a preview is missing or Zoom shows no picture." => ("Webcam, Écran et Sortie indiquent si chaque élément est prêt. Vérifiez d’abord cette zone si un aperçu manque ou si Zoom n’affiche aucune image.", "Cámara web, Pantalla y Salida indican si cada parte está lista. Comprueba primero esta zona si falta una vista previa o Zoom no muestra imagen."),
-        "Check the current decision" => ("Vérifiez la décision actuelle", "Comprueba la decisión actual"),
-        "Detection reports whether the live screen matches the reference. Screen mix shows Webcam only, Screen only, or Crossfading while StageSwap moves between them." => ("Détection indique si l’écran en direct correspond à la référence. Mixage écran affiche Webcam uniquement, Écran uniquement ou Fondu enchaîné pendant le passage de l’un à l’autre.", "Detección indica si la pantalla en directo coincide con la referencia. Mezcla de pantalla muestra Solo cámara web, Solo pantalla o Fundido cruzado mientras StageSwap cambia entre ellas."),
-        "Start or stop the output" => ("Démarrez ou arrêtez la sortie", "Inicia o detén la salida"),
-        "Start automation makes the selected mode live in Zoom. Stop automation keeps the StageSwap camera available but replaces its picture with the black StageSwap off screen." => ("Démarrer l’automatisation diffuse le mode sélectionné dans Zoom. Arrêter l’automatisation laisse la caméra StageSwap disponible, mais remplace son image par l’écran noir d’arrêt de StageSwap.", "Iniciar automatización activa el modo seleccionado en Zoom. Detener automatización mantiene disponible la cámara StageSwap, pero sustituye su imagen por la pantalla negra de StageSwap desactivado."),
-        "Choose how StageSwap decides" => ("Choisissez comment StageSwap décide", "Elige cómo decide StageSwap"),
-        "Automatic, Webcam, and Screen are output modes. A manual Webcam or Screen choice stays selected until you choose another mode." => ("Automatique, Webcam et Écran sont des modes de sortie. Un choix manuel de Webcam ou Écran reste sélectionné jusqu’à ce que vous choisissiez un autre mode.", "Automático, Cámara web y Pantalla son modos de salida. Una selección manual de Cámara web o Pantalla permanece activa hasta que elijas otro modo."),
-        "Capture the idle view" => ("Capturez la vue d’attente", "Captura la vista de espera"),
-        "Show the normal idle view on your selected display, then choose Capture reference. StageSwap saves that exact view as the picture Automatic mode should recognize." => ("Affichez la vue d’attente habituelle sur l’écran sélectionné, puis choisissez Capturer la référence. StageSwap enregistre cette vue exacte comme image à reconnaître par le mode Automatique.", "Muestra la vista de espera habitual en la pantalla seleccionada y elige Capturar referencia. StageSwap guarda esa vista exacta como la imagen que debe reconocer el modo Automático."),
-        "Find the correct display" => ("Trouvez le bon écran", "Encuentra la pantalla correcta"),
-        "Rescan screens searches connected displays for the saved reference. It helps StageSwap find the right display; it does not restart screen capture." => ("Rechercher les écrans cherche la référence enregistrée sur les écrans connectés. Cette action aide StageSwap à trouver le bon écran ; elle ne redémarre pas la capture.", "Buscar pantallas busca la referencia guardada en las pantallas conectadas. Ayuda a StageSwap a encontrar la pantalla correcta; no reinicia la captura."),
-        "Adjust the setup in Settings" => ("Ajustez la configuration dans Paramètres", "Ajusta la configuración en Ajustes"),
-        "Use Settings to choose the webcam and display, adjust matching, control startup behavior, or open recovery tools." => ("Utilisez Paramètres pour choisir la webcam et l’écran, ajuster la correspondance, contrôler le démarrage ou ouvrir les outils de récupération.", "Usa Ajustes para elegir la cámara web y la pantalla, ajustar la coincidencia, controlar el inicio o abrir las herramientas de recuperación."),
-        "Complete the four checks below" => ("Effectuez les quatre vérifications ci-dessous", "Completa las cuatro comprobaciones"),
-        "StageSwap is ready once its two inputs are selected, a reference is saved, and StageSwap is chosen as the camera in Zoom." => ("StageSwap est prêt lorsque ses deux entrées sont sélectionnées, qu’une référence est enregistrée et que StageSwap est choisi comme caméra dans Zoom.", "StageSwap está listo cuando se han seleccionado las dos entradas, se ha guardado una referencia y se ha elegido StageSwap como cámara en Zoom."),
-        "Return whenever you need help" => ("Revenez quand vous avez besoin d’aide", "Vuelve cuando necesites ayuda"),
-        "You can reopen this tutorial from General Settings at any time. The tutorial never changes your devices, reference, mode, or automation state." => ("Vous pouvez rouvrir ce tutoriel depuis les Paramètres généraux à tout moment. Le tutoriel ne modifie jamais vos appareils, votre référence, votre mode ni l’état de l’automatisation.", "Puedes volver a abrir este tutorial desde Ajustes generales en cualquier momento. El tutorial nunca cambia tus dispositivos, la referencia, el modo ni el estado de la automatización."),
-        "One camera in Zoom" => ("Une caméra dans Zoom", "Una cámara en Zoom"),
-        "Choose StageSwap from Zoom’s camera list." => ("Choisissez StageSwap dans la liste des caméras de Zoom.", "Elige StageSwap en la lista de cámaras de Zoom."),
-        "Two possible sources" => ("Deux sources possibles", "Dos fuentes posibles"),
-        "StageSwap supplies the webcam or selected display." => ("StageSwap fournit la webcam ou l’écran sélectionné.", "StageSwap proporciona la cámara web o la pantalla seleccionada."),
-        "The saved display image that means “show my webcam.”" => ("L’image d’écran enregistrée qui signifie « afficher ma webcam ».", "La imagen de pantalla guardada que significa «mostrar mi cámara web»."),
-        "Reference matches" => ("La référence correspond", "La referencia coincide"),
-        "People in Zoom see the webcam." => ("Les participants à Zoom voient la webcam.", "Las personas de Zoom ven la cámara web."),
-        "Display changes" => ("L’écran change", "La pantalla cambia"),
-        "People in Zoom see the selected screen." => ("Les participants à Zoom voient l’écran sélectionné.", "Las personas de Zoom ven la pantalla seleccionada."),
-        "The picture from the selected physical camera." => ("L’image de la caméra physique sélectionnée.", "La imagen de la cámara física seleccionada."),
-        "The live picture from the selected display." => ("L’image en direct de l’écran sélectionné.", "La imagen en directo de la pantalla seleccionada."),
-        "The saved picture used by Automatic mode." => ("L’image enregistrée utilisée par le mode Automatique.", "La imagen guardada que utiliza el modo Automático."),
-        "Exactly what people in Zoom receive." => ("Exactement ce que reçoivent les participants à Zoom.", "Exactamente lo que reciben las personas de Zoom."),
-        "Green" => ("Vert", "Verde"),
-        "Ready, matching, or currently selected." => ("Prêt, correspondant ou actuellement sélectionné.", "Listo, coincidente o seleccionado actualmente."),
-        "Amber" => ("Orange", "Ámbar"),
-        "Starting, waiting, not matching, or changing." => ("En cours de démarrage, en attente, sans correspondance ou en transition.", "Iniciando, esperando, sin coincidencia o cambiando."),
-        "Red" => ("Rouge", "Rojo"),
-        "Unavailable, failed, or missing a reference." => ("Indisponible, en échec ou référence manquante.", "No disponible, con error o sin referencia."),
-        "Uses the reference to choose webcam or screen." => ("Utilise la référence pour choisir la webcam ou l’écran.", "Utiliza la referencia para elegir la cámara web o la pantalla."),
-        "Keeps the webcam visible." => ("Maintient la webcam visible.", "Mantiene visible la cámara web."),
-        "Keeps the selected display visible." => ("Maintient l’écran sélectionné visible.", "Mantiene visible la pantalla seleccionada."),
-        "Save the display’s current view." => ("Enregistre la vue actuelle de l’écran.", "Guarda la vista actual de la pantalla."),
-        "Find the display containing the reference." => ("Trouve l’écran contenant la référence.", "Encuentra la pantalla que contiene la referencia."),
-        "Choose devices, matching, behavior, and recovery." => ("Choisissez les appareils, la correspondance, le comportement et la récupération.", "Elige dispositivos, coincidencia, comportamiento y recuperación."),
-        "Choose inputs" => ("Choisissez les entrées", "Elige las entradas"),
-        "Select the webcam and display in Settings." => ("Sélectionnez la webcam et l’écran dans Paramètres.", "Selecciona la cámara web y la pantalla en Ajustes."),
-        "Save the idle view" => ("Enregistrez la vue d’attente", "Guarda la vista de espera"),
-        "Show it on the display and capture the reference." => ("Affichez-la sur l’écran et capturez la référence.", "Muéstrala en la pantalla y captura la referencia."),
-        "Choose StageSwap" => ("Choisissez StageSwap", "Elige StageSwap"),
-        "Select it as the camera in Zoom." => ("Sélectionnez-le comme caméra dans Zoom.", "Selecciónalo como cámara en Zoom."),
-        "Go live" => ("Passez en direct", "Empieza la emisión"),
-        "Return to the dashboard and start automation." => ("Revenez au tableau de bord et démarrez l’automatisation.", "Vuelve al panel e inicia la automatización."),
+        // Full-page setup guide.
+        "Step {0} of {1}" => ("Étape {0} sur {1}", "Paso {0} de {1}"),
+        "Set up later" => ("Configurer plus tard", "Configurar más tarde"),
+        "Start StageSwap" => ("Démarrer StageSwap", "Iniciar StageSwap"),
+        "StageSwap compares your screen with a reference image." => ("StageSwap compare votre écran à une image de référence.", "StageSwap compara tu pantalla con una imagen de referencia."),
+        "Screen matches the reference → Zoom sees your webcam" => ("L’écran correspond à la référence → Zoom affiche votre webcam", "La pantalla coincide con la referencia → Zoom muestra tu cámara web"),
+        "Screen does not match the reference → Zoom sees your screen" => ("L’écran ne correspond pas à la référence → Zoom affiche votre écran", "La pantalla no coincide con la referencia → Zoom muestra tu pantalla"),
+        "Choose StageSwap as your camera in Zoom." => ("Choisissez StageSwap comme caméra dans Zoom.", "Elige StageSwap como cámara en Zoom."),
+        "Choose your webcam" => ("Choisissez votre webcam", "Elige tu cámara web"),
+        "Choose the webcam you want people in Zoom to see." => ("Choisissez la webcam que vous souhaitez montrer aux participants dans Zoom.", "Elige la cámara web que quieres que vean las personas en Zoom."),
+        "Webcam preview" => ("Aperçu de la webcam", "Vista previa de la cámara web"),
+        "No webcam found. Connect a webcam, then refresh the list." => ("Aucune webcam détectée. Connectez une webcam, puis actualisez la liste.", "No se encontró ninguna cámara web. Conecta una y actualiza la lista."),
+        "This webcam is unavailable. Choose another one or refresh the list." => ("Cette webcam est indisponible. Choisissez-en une autre ou actualisez la liste.", "Esta cámara web no está disponible. Elige otra o actualiza la lista."),
+        "Refresh webcams" => ("Actualiser les webcams", "Actualizar cámaras web"),
+        "Choose your screen" => ("Choisissez votre écran", "Elige tu pantalla"),
+        "Choose the screen you want StageSwap to show in Zoom." => ("Choisissez l’écran que StageSwap doit afficher dans Zoom.", "Elige la pantalla que quieres que StageSwap muestre en Zoom."),
+        "Screen preview" => ("Aperçu de l’écran", "Vista previa de la pantalla"),
+        "No screen found. Connect a screen, then rescan." => ("Aucun écran détecté. Connectez un écran, puis relancez la recherche.", "No se encontró ninguna pantalla. Conecta una y vuelve a buscar."),
+        "This screen is unavailable. Choose another one or rescan." => ("Cet écran est indisponible. Choisissez-en un autre ou relancez la recherche.", "Esta pantalla no está disponible. Elige otra o vuelve a buscar."),
+        "Set up automatic switching" => ("Configurez le basculement automatique", "Configura el cambio automático"),
+        "Show your normal holding or idle picture on the screen you selected. Then capture it as the reference." => ("Affichez votre image d’attente habituelle sur l’écran sélectionné. Capturez-la ensuite comme référence.", "Muestra en la pantalla seleccionada tu imagen habitual de espera o inactividad. Después, captúrala como referencia."),
+        "When the screen matches the reference, StageSwap shows your webcam. When the screen changes, StageSwap shows the screen." => ("Lorsque l’écran correspond à la référence, StageSwap affiche votre webcam. Lorsque l’écran change, StageSwap affiche l’écran.", "Cuando la pantalla coincide con la referencia, StageSwap muestra tu cámara web. Cuando la pantalla cambia, StageSwap muestra la pantalla."),
+        "Reference preview" => ("Aperçu de la référence", "Vista previa de la referencia"),
+        "No reference captured yet." => ("Aucune référence capturée pour le moment.", "Aún no se ha capturado ninguna referencia."),
+        "Reference captured" => ("Référence capturée", "Referencia capturada"),
+        "Capture again" => ("Capturer à nouveau", "Capturar de nuevo"),
+        "StageSwap couldn’t capture the screen. Check the screen preview and try again." => ("StageSwap n’a pas pu capturer l’écran. Vérifiez l’aperçu de l’écran et réessayez.", "StageSwap no pudo capturar la pantalla. Comprueba la vista previa de la pantalla e inténtalo de nuevo."),
+        "You’re ready" => ("Tout est prêt", "Todo listo"),
+        "Before your Zoom call, choose StageSwap as your camera in Zoom." => ("Avant votre appel Zoom, choisissez StageSwap comme caméra dans Zoom.", "Antes de tu llamada de Zoom, elige StageSwap como cámara en Zoom."),
+        "Webcam ready" => ("Webcam prête", "Cámara web lista"),
+        "Webcam not selected" => ("Webcam non sélectionnée", "Cámara web no seleccionada"),
+        "Screen ready" => ("Écran prêt", "Pantalla lista"),
+        "Screen not selected" => ("Écran non sélectionné", "Pantalla no seleccionada"),
+        "Reference ready" => ("Référence prête", "Referencia lista"),
+        "Reference not captured" => ("Référence non capturée", "Referencia no capturada"),
+        "Some setup is missing. StageSwap will start, but Automatic mode may not work as expected. You can finish setup later in Settings." => ("Certains éléments ne sont pas configurés. StageSwap va démarrer, mais le mode Automatique risque de ne pas fonctionner comme prévu. Vous pourrez terminer la configuration plus tard dans Paramètres.", "Faltan algunos elementos de la configuración. StageSwap se iniciará, pero es posible que el modo Automático no funcione como esperas. Puedes terminar la configuración más tarde en Ajustes."),
+        "Setup guide" => ("Guide de configuration", "Guía de configuración"),
+        "Learn how StageSwap works and choose your webcam, screen, and reference." => ("Découvrez le fonctionnement de StageSwap et choisissez votre webcam, votre écran et votre référence.", "Aprende cómo funciona StageSwap y elige la cámara web, la pantalla y la referencia."),
+        "Open setup guide" => ("Ouvrir le guide de configuration", "Abrir guía de configuración"),
 
         // Tray and Windows notifications.
         "Open StageSwap" => ("Ouvrir StageSwap", "Abrir StageSwap"),
@@ -454,6 +409,31 @@ mod tests {
         assert_eq!(
             format_text(Locale::French, "{0} — {1}", &["98 %", "Équilibrée"]),
             "98 % — Équilibrée"
+        );
+    }
+
+    #[test]
+    fn setup_guide_copy_uses_the_approved_localizations() {
+        assert_eq!(
+            text(Locale::French, "Set up automatic switching"),
+            "Configurez le basculement automatique"
+        );
+        assert_eq!(
+            text(Locale::Spanish, "Set up automatic switching"),
+            "Configura el cambio automático"
+        );
+        assert_eq!(
+            text(Locale::French, "Open setup guide"),
+            "Ouvrir le guide de configuration"
+        );
+        assert_eq!(text(Locale::Spanish, "You’re ready"), "Todo listo");
+        assert_eq!(
+            format_text(Locale::French, "Step {0} of {1}", &["4", "5"]),
+            "Étape 4 sur 5"
+        );
+        assert_eq!(
+            format_text(Locale::Spanish, "Step {0} of {1}", &["4", "5"]),
+            "Paso 4 de 5"
         );
     }
 }

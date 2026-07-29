@@ -34,8 +34,18 @@ const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const SETTINGS_ENTRANCE_DURATION: Duration = Duration::from_millis(160);
 const SETTINGS_SECTION_DURATION: Duration = Duration::from_millis(120);
 const DIALOG_ENTRANCE_DURATION: Duration = Duration::from_millis(150);
-const TUTORIAL_ENTRANCE_DURATION: Duration = Duration::from_millis(180);
-const TUTORIAL_STEP_DURATION: Duration = Duration::from_millis(140);
+const SETUP_GUIDE_ENTRANCE_DURATION: Duration = Duration::from_millis(180);
+const SETUP_GUIDE_STEP_DURATION: Duration = Duration::from_millis(150);
+const SETUP_GUIDE_CONTENT_WIDTH: f32 = 920.0;
+const SETUP_GUIDE_FOOTER_HEIGHT: f32 = 72.0;
+const SETUP_DEMO_LOOP_DURATION: f32 = 7.8;
+const SETUP_DEMO_HOLD_DURATION: f32 = 3.5;
+const SETUP_DEMO_FADE_DURATION: f32 = 0.4;
+const SETUP_HARDWARE_PREVIEW_WIDTH: f32 = 420.0;
+const SETUP_BOOTH_BLACK: Color32 = Color32::from_rgb(16, 18, 23);
+const SETUP_SIGNAL_DECK: Color32 = Color32::from_rgb(26, 29, 36);
+const SETUP_SIGNAL_WHITE: Color32 = Color32::from_rgb(245, 247, 250);
+const REFERENCE_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
 const DISCO_GESTURE_WINDOW: Duration = Duration::from_secs(3);
 const SETTINGS_SIDEBAR_WIDTH: f32 = 228.0;
 const SETTINGS_CONTENT_WIDTH: f32 = 960.0;
@@ -50,14 +60,13 @@ const SETTINGS_NAV_INDICATOR: Color32 = Color32::from_rgb(151, 157, 168);
 mod app_icon;
 mod deployment_payload;
 mod local_log;
+mod setup_guide;
 #[cfg(windows)]
 mod tray;
-mod tutorial;
 mod ui_icon;
 use local_log::LocalLog;
-use tutorial::{
-    TutorialReturnView, TutorialSession, TutorialStartup, TutorialStateStore, TutorialStep,
-    has_existing_user_data,
+use setup_guide::{
+    SetupReturnView, SetupSession, SetupStartup, SetupStateStore, SetupStep, has_existing_user_data,
 };
 use ui_icon::UiIcon;
 
@@ -66,13 +75,31 @@ fn main() -> eframe::Result {
     #[cfg(windows)]
     let startup_locale = stageswap_windows::preferred_interface_locale();
     #[cfg(not(windows))]
-    let ui_preview_request = match parse_ui_preview_request(&std::env::args().collect::<Vec<_>>()) {
+    let ui_arguments = std::env::args().collect::<Vec<_>>();
+    #[cfg(not(windows))]
+    let ui_preview_request = match parse_ui_preview_request(&ui_arguments) {
         Ok(request) => request,
         Err(error) => {
             eprintln!("StageSwap UI preview: {error}");
             eprintln!(
-                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|tutorial-1..7|dialog-*] [--ui-language en-US|fr-FR|es]"
+                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|setup-1..5|dialog-*] [--ui-language en-US|fr-FR|es]"
             );
+            return Ok(());
+        }
+    };
+    #[cfg(not(windows))]
+    let ui_screenshot_path = match parse_ui_screenshot_path(&ui_arguments) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("StageSwap UI preview: {error}");
+            return Ok(());
+        }
+    };
+    #[cfg(not(windows))]
+    let setup_demo_preview_state = match parse_setup_demo_preview_state(&ui_arguments) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("StageSwap UI preview: {error}");
             return Ok(());
         }
     };
@@ -165,14 +192,14 @@ fn main() -> eframe::Result {
     });
     let existing_install = has_existing_user_data(store.directory());
     #[cfg(windows)]
-    let tutorial_startup = TutorialStateStore::new(store.directory()).initialize(existing_install);
+    let setup_startup = SetupStateStore::new(store.directory()).initialize(existing_install);
     #[cfg(not(windows))]
-    let tutorial_startup = if ui_preview_request.is_some() {
-        TutorialStartup::suppressed()
+    let setup_startup = if ui_preview_request.is_some() {
+        SetupStartup::suppressed()
     } else {
-        TutorialStateStore::new(store.directory()).initialize(existing_install)
+        SetupStateStore::new(store.directory()).initialize(existing_install)
     };
-    let show_first_run_tutorial = tutorial_startup.show_tutorial;
+    let show_first_run_setup = setup_startup.show_setup_guide;
     #[cfg(windows)]
     let loaded = load_config_with_admin_restore(&store);
     #[cfg(not(windows))]
@@ -205,12 +232,21 @@ fn main() -> eframe::Result {
     }
     #[cfg(windows)]
     let start_visible =
-        show_first_run_tutorial || launch_context.force_visible || !loaded.config.start_minimized;
+        show_first_run_setup || launch_context.force_visible || !loaded.config.start_minimized;
     #[cfg(not(windows))]
     let start_visible =
-        show_first_run_tutorial || ui_preview_request.is_some() || !loaded.config.start_minimized;
+        show_first_run_setup || ui_preview_request.is_some() || !loaded.config.start_minimized;
     let app_icon = app_icon::load(None).expect("embedded app icon should decode");
+    #[cfg(windows)]
+    let renderer = eframe::Renderer::Wgpu;
+    #[cfg(not(windows))]
+    let renderer = if ui_screenshot_path.is_some() {
+        eframe::Renderer::Glow
+    } else {
+        eframe::Renderer::Wgpu
+    };
     let options = eframe::NativeOptions {
+        renderer,
         viewport: egui::ViewportBuilder::default()
             .with_title(WINDOW_TITLE)
             .with_inner_size([1280.0, 720.0])
@@ -243,13 +279,21 @@ fn main() -> eframe::Result {
                 style.spacing.button_padding = egui::vec2(14.0, 8.0);
             });
             let app = SwitcherApp::new(loaded.config, loaded.warnings, store)
-                .with_tutorial_startup(tutorial_startup);
+                .with_setup_startup(setup_startup);
             #[cfg(not(windows))]
             let app = if let Some(request) = ui_preview_request {
                 app.with_ui_preview(request)
             } else {
                 app
             };
+            #[cfg(not(windows))]
+            let app = if let Some(path) = ui_screenshot_path.clone() {
+                app.with_ui_screenshot(path)
+            } else {
+                app
+            };
+            #[cfg(not(windows))]
+            let app = app.with_setup_demo_preview_state(setup_demo_preview_state);
             #[cfg(windows)]
             let app =
                 app.with_launch_context(launch_context.mode, instance_receiver, instance_readiness);
@@ -404,8 +448,15 @@ struct UiPreviewRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UiPreviewTarget {
     Settings(SettingsTab),
-    Tutorial(TutorialStep),
+    Setup(SetupStep),
     Dialog(AppDialogKind),
+}
+
+#[cfg(not(windows))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SetupDemoPreviewState {
+    Matching,
+    Changed,
 }
 
 #[cfg(not(windows))]
@@ -450,16 +501,14 @@ fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>,
         Some("dialog-remove-baseline") => {
             UiPreviewTarget::Dialog(AppDialogKind::RemoveAdminBaseline)
         }
-        Some(value) if value.starts_with("tutorial-") => {
+        Some(value) if value.starts_with("setup-") => {
             let number = value
-                .strip_prefix("tutorial-")
+                .strip_prefix("setup-")
                 .and_then(|value| value.parse::<usize>().ok());
-            let step = number.and_then(TutorialStep::from_number).ok_or_else(|| {
-                format!(
-                    "unknown tutorial preview '{value}'; expected tutorial-1 through tutorial-7"
-                )
+            let step = number.and_then(SetupStep::from_number).ok_or_else(|| {
+                format!("unknown setup preview '{value}'; expected setup-1 through setup-5")
             })?;
-            UiPreviewTarget::Tutorial(step)
+            UiPreviewTarget::Setup(step)
         }
         Some(value) if !value.starts_with("--") => SettingsTab::from_preview_name(value)
             .map(UiPreviewTarget::Settings)
@@ -471,6 +520,45 @@ fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>,
         _ => UiPreviewTarget::Settings(SettingsTab::General),
     };
     Ok(Some(UiPreviewRequest { target }))
+}
+
+#[cfg(not(windows))]
+fn parse_ui_screenshot_path(args: &[String]) -> Result<Option<PathBuf>, String> {
+    let Some(index) = args
+        .iter()
+        .position(|argument| argument == "--ui-screenshot")
+    else {
+        return Ok(None);
+    };
+    let value = args
+        .get(index + 1)
+        .filter(|value| !value.starts_with("--"))
+        .ok_or_else(|| "--ui-screenshot requires an absolute PNG path".to_string())?;
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err("--ui-screenshot requires an absolute PNG path".to_string());
+    }
+    if path.extension().and_then(|extension| extension.to_str()) != Some("png") {
+        return Err("--ui-screenshot path must end in .png".to_string());
+    }
+    Ok(Some(path))
+}
+
+#[cfg(not(windows))]
+fn parse_setup_demo_preview_state(
+    args: &[String],
+) -> Result<Option<SetupDemoPreviewState>, String> {
+    let Some(index) = args
+        .iter()
+        .position(|argument| argument == "--ui-setup-demo-state")
+    else {
+        return Ok(None);
+    };
+    match args.get(index + 1).map(String::as_str) {
+        Some("matching") => Ok(Some(SetupDemoPreviewState::Matching)),
+        Some("changed" | "non-matching") => Ok(Some(SetupDemoPreviewState::Changed)),
+        _ => Err("--ui-setup-demo-state requires either matching or non-matching".to_string()),
+    }
 }
 
 #[cfg(not(windows))]
@@ -490,6 +578,7 @@ enum AppView {
     #[default]
     Dashboard,
     Settings,
+    SetupGuide,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -901,24 +990,32 @@ struct ControlsWorkspaceLayout {
 
 #[derive(Clone, Copy, Debug)]
 struct PreviewGridLayout {
-    cells: [Rect; 4],
     grid: Rect,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct DashboardTutorialTargets {
-    reference_preview: Rect,
-    preview_grid: Rect,
-    health: Rect,
-    controls: Rect,
-    prepare: Rect,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TutorialAction {
+enum SetupAction {
     Previous,
     Next,
     Close,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SetupReferenceCaptureState {
+    Idle,
+    Pending {
+        started_at: Instant,
+        previous_sequence: Option<u64>,
+    },
+    Success,
+    Failed,
+}
+
+#[derive(Clone)]
+struct SetupExampleTextures {
+    reference: TextureHandle,
+    webcam: TextureHandle,
+    screen: TextureHandle,
 }
 
 #[derive(Clone, Copy)]
@@ -989,12 +1086,20 @@ struct UiPreviewSession {
     snapshot: AppSnapshot,
 }
 
+#[cfg(not(windows))]
+struct UiScreenshotCapture {
+    path: PathBuf,
+    frames_until_request: u8,
+    requested: bool,
+}
+
 struct SwitcherApp {
     config: AppConfig,
     runtime: RuntimeHandle,
     store: ConfigStore,
-    tutorial_store: TutorialStateStore,
-    tutorial_session: Option<TutorialSession>,
+    setup_store: SetupStateStore,
+    setup_session: Option<SetupSession>,
+    setup_reference_capture: SetupReferenceCaptureState,
     load_warnings: Vec<String>,
     view: AppView,
     settings_tab: SettingsTab,
@@ -1006,6 +1111,7 @@ struct SwitcherApp {
     settings_opened_at: Option<Instant>,
     settings_section_changed_at: Option<Instant>,
     app_icon_texture: Option<TextureHandle>,
+    setup_example_textures: Option<SetupExampleTextures>,
     textures: HashMap<&'static str, PreviewTexture>,
     preview_converters: HashMap<PreviewKind, PreviewConverter>,
     log: LocalLog,
@@ -1022,6 +1128,11 @@ struct SwitcherApp {
     instance_readiness: Option<stageswap_windows::InstanceReadiness>,
     #[cfg(not(windows))]
     ui_preview: Option<UiPreviewSession>,
+    #[cfg(not(windows))]
+    ui_screenshot: Option<UiScreenshotCapture>,
+    #[cfg(not(windows))]
+    setup_demo_preview_state: Option<SetupDemoPreviewState>,
+    setup_animations_enabled: bool,
     exit_requested: bool,
     last_window_size: Option<Vec2>,
     disco_diagnostics_gesture: DiscoDiagnosticsGesture,
@@ -1060,9 +1171,10 @@ impl SwitcherApp {
         Self {
             runtime: RuntimeHandle::spawn(config.clone()),
             config,
-            tutorial_store: TutorialStateStore::new(store.directory()),
+            setup_store: SetupStateStore::new(store.directory()),
             store,
-            tutorial_session: None,
+            setup_session: None,
+            setup_reference_capture: SetupReferenceCaptureState::Idle,
             load_warnings,
             view: AppView::Dashboard,
             settings_tab: SettingsTab::General,
@@ -1074,6 +1186,7 @@ impl SwitcherApp {
             settings_opened_at: None,
             settings_section_changed_at: None,
             app_icon_texture: None,
+            setup_example_textures: None,
             textures: HashMap::new(),
             preview_converters: HashMap::new(),
             log,
@@ -1090,6 +1203,14 @@ impl SwitcherApp {
             instance_readiness: None,
             #[cfg(not(windows))]
             ui_preview: None,
+            #[cfg(not(windows))]
+            ui_screenshot: None,
+            #[cfg(not(windows))]
+            setup_demo_preview_state: None,
+            #[cfg(windows)]
+            setup_animations_enabled: stageswap_windows::client_area_animations_enabled(),
+            #[cfg(not(windows))]
+            setup_animations_enabled: true,
             exit_requested: false,
             last_window_size: None,
             disco_diagnostics_gesture: DiscoDiagnosticsGesture::default(),
@@ -1102,14 +1223,15 @@ impl SwitcherApp {
         Locale::from_tag(&self.config.interface_language).unwrap_or_default()
     }
 
-    fn with_tutorial_startup(mut self, startup: TutorialStartup) -> Self {
+    fn with_setup_startup(mut self, startup: SetupStartup) -> Self {
         for warning in startup.warnings {
             self.log
-                .write("warning", "tutorial", "TUTORIAL_STATE_WARNING", &warning);
+                .write("warning", "setup", "SETUP_STATE_WARNING", &warning);
             self.load_warnings.push(warning);
         }
-        if startup.show_tutorial {
-            self.tutorial_session = Some(TutorialSession::live(TutorialReturnView::Dashboard));
+        if startup.show_setup_guide {
+            self.view = AppView::SetupGuide;
+            self.setup_session = Some(SetupSession::live(SetupReturnView::Dashboard));
         }
         self
     }
@@ -1134,9 +1256,9 @@ impl SwitcherApp {
                 self.view = AppView::Settings;
                 self.settings_tab = tab;
             }
-            UiPreviewTarget::Tutorial(step) => {
-                self.view = AppView::Dashboard;
-                self.tutorial_session = Some(TutorialSession::preview(step));
+            UiPreviewTarget::Setup(step) => {
+                self.view = AppView::SetupGuide;
+                self.setup_session = Some(SetupSession::preview(step));
             }
             UiPreviewTarget::Dialog(kind) => {
                 self.view = AppView::Settings;
@@ -1166,6 +1288,36 @@ impl SwitcherApp {
             snapshot: ui_preview_snapshot(),
         });
         self
+    }
+
+    #[cfg(not(windows))]
+    fn with_ui_screenshot(mut self, path: PathBuf) -> Self {
+        self.ui_screenshot = Some(UiScreenshotCapture {
+            path,
+            frames_until_request: 2,
+            requested: false,
+        });
+        self
+    }
+
+    #[cfg(not(windows))]
+    fn with_setup_demo_preview_state(mut self, state: Option<SetupDemoPreviewState>) -> Self {
+        self.setup_demo_preview_state = state;
+        self
+    }
+
+    fn setup_demo_preview_alpha(&self) -> Option<f32> {
+        #[cfg(not(windows))]
+        {
+            self.setup_demo_preview_state.map(|state| match state {
+                SetupDemoPreviewState::Matching => 0.0,
+                SetupDemoPreviewState::Changed => 1.0,
+            })
+        }
+        #[cfg(windows)]
+        {
+            None
+        }
     }
 
     fn snapshot(&self) -> AppSnapshot {
@@ -1260,55 +1412,71 @@ impl SwitcherApp {
         }
     }
 
-    fn start_tutorial(&mut self, return_view: TutorialReturnView) {
+    fn start_setup_guide(&mut self, return_view: SetupReturnView) {
         self.flush_settings();
         self.dismiss_dialog();
-        self.view = AppView::Dashboard;
-        self.tutorial_session = Some(TutorialSession::live(return_view));
+        self.view = AppView::SetupGuide;
+        self.setup_session = Some(SetupSession::live(return_view));
+        self.setup_reference_capture = SetupReferenceCaptureState::Idle;
+        self.send(Command::RefreshVideoDevices);
+        if self.config.automatic_monitor_rescans {
+            self.send(Command::Rescan);
+        }
     }
 
-    fn apply_tutorial_action(&mut self, action: TutorialAction) {
-        let Some(mut session) = self.tutorial_session else {
+    fn apply_setup_action(&mut self, action: SetupAction) {
+        let Some(mut session) = self.setup_session else {
             return;
         };
         match action {
-            TutorialAction::Previous => {
+            SetupAction::Previous => {
                 if let Some(step) = session.step.previous() {
-                    session.go_to(step);
-                    self.tutorial_session = Some(session);
+                    session.transition_to(step, self.setup_animations_enabled);
+                    self.setup_session = Some(session);
                 }
             }
-            TutorialAction::Next => {
+            SetupAction::Next => {
                 if let Some(step) = session.step.next() {
-                    session.go_to(step);
-                    self.tutorial_session = Some(session);
+                    session.transition_to(step, self.setup_animations_enabled);
+                    self.setup_session = Some(session);
                 } else {
-                    self.finish_tutorial(session.return_view);
+                    self.finish_setup_guide();
                 }
             }
-            TutorialAction::Close => self.finish_tutorial(session.return_view),
+            SetupAction::Close => self.dismiss_setup_guide(session.return_view),
         }
     }
 
-    fn finish_tutorial(&mut self, return_view: TutorialReturnView) {
-        if let Err(error) = self.tutorial_store.mark_completed() {
+    fn mark_setup_guide_completed(&mut self) {
+        if let Err(error) = self.setup_store.mark_completed() {
             let warning = format!(
-                "Could not remember tutorial completion; you can still reopen it in Settings: {error}"
+                "Could not remember setup guide completion; you can still reopen it in Settings: {error}"
             );
-            self.log.write(
-                "warning",
-                "tutorial",
-                "TUTORIAL_COMPLETION_SAVE_FAILED",
-                &warning,
-            );
+            self.log
+                .write("warning", "setup", "SETUP_COMPLETION_SAVE_FAILED", &warning);
             self.load_warnings.push(warning);
         }
-        self.tutorial_session = None;
+    }
+
+    fn finish_setup_guide(&mut self) {
+        self.mark_setup_guide_completed();
+        self.set_mode(OutputMode::Automatic);
+        self.flush_settings();
+        self.send(Command::Start);
+        self.setup_session = None;
+        self.setup_reference_capture = SetupReferenceCaptureState::Idle;
+        self.view = AppView::Dashboard;
+    }
+
+    fn dismiss_setup_guide(&mut self, return_view: SetupReturnView) {
+        self.mark_setup_guide_completed();
+        self.setup_session = None;
+        self.setup_reference_capture = SetupReferenceCaptureState::Idle;
         match return_view {
-            TutorialReturnView::Dashboard => {
+            SetupReturnView::Dashboard => {
                 self.view = AppView::Dashboard;
             }
-            TutorialReturnView::Settings => {
+            SetupReturnView::Settings => {
                 self.view = AppView::Settings;
                 self.settings_tab = SettingsTab::General;
                 self.settings_opened_at = Some(Instant::now());
@@ -1541,7 +1709,7 @@ impl SwitcherApp {
     fn root_ui(&mut self, ui: &mut egui::Ui) -> Rect {
         let context = ui.ctx().clone();
         let disco_enabled = self.snapshot().disco_enabled;
-        let (content_rect, tutorial_targets) = ui
+        let content_rect = ui
             .scope(|ui| {
                 if disco_enabled {
                     let accent = disco_ui_color(
@@ -1559,23 +1727,18 @@ impl SwitcherApp {
                 egui::CentralPanel::default()
                     .show(ui, |ui| {
                         let content_rect = ui.max_rect();
-                        let tutorial_targets = match self.view {
-                            AppView::Dashboard => Some(self.dashboard(ui)),
-                            AppView::Settings => {
-                                self.settings_view(&context, ui);
-                                None
-                            }
-                        };
-                        (content_rect, tutorial_targets)
+                        match self.view {
+                            AppView::Dashboard => self.dashboard(ui),
+                            AppView::Settings => self.settings_view(&context, ui),
+                            AppView::SetupGuide => self.setup_guide_view(&context, ui),
+                        }
+                        content_rect
                     })
                     .inner
             })
             .inner;
         self.dialog(&context);
         self.paint_disco_interface(&context, content_rect, disco_enabled);
-        if let Some(targets) = tutorial_targets {
-            self.tutorial_overlay(&context, content_rect, targets);
-        }
         content_rect
     }
 
@@ -1603,241 +1766,736 @@ impl SwitcherApp {
         );
     }
 
-    fn tutorial_overlay(
-        &mut self,
-        context: &egui::Context,
-        content_rect: Rect,
-        targets: DashboardTutorialTargets,
-    ) {
-        let Some(session) = self.tutorial_session else {
+    fn setup_guide_view(&mut self, context: &egui::Context, ui: &mut egui::Ui) {
+        if self.setup_session.is_none() {
+            self.view = AppView::Dashboard;
             return;
+        }
+        let now = Instant::now();
+        let (step, entrance, page_opacity, transition_active) = {
+            let session = self.setup_session.as_mut().expect("checked above");
+            let entrance = if self.setup_animations_enabled {
+                animation_progress(session.opened_at, SETUP_GUIDE_ENTRANCE_DURATION)
+            } else {
+                1.0
+            };
+            let page_opacity = if self.setup_animations_enabled {
+                session.transition_opacity(now, SETUP_GUIDE_STEP_DURATION)
+            } else {
+                1.0
+            };
+            (
+                session.step,
+                entrance,
+                page_opacity,
+                session.pending_step.is_some(),
+            )
         };
-        let step = session.step;
-        let entrance = animation_progress(session.opened_at, TUTORIAL_ENTRANCE_DURATION);
-        let step_progress = animation_progress(session.step_changed_at, TUTORIAL_STEP_DURATION);
-        if entrance < 1.0 || step_progress < 1.0 {
+        if entrance < 1.0 || transition_active {
             context.request_repaint();
         }
 
-        let target = match step {
-            TutorialStep::Welcome | TutorialStep::Ready => None,
-            TutorialStep::Automatic => Some(targets.reference_preview),
-            TutorialStep::Previews => Some(targets.preview_grid),
-            TutorialStep::Health => Some(targets.health),
-            TutorialStep::Controls => Some(targets.controls),
-            TutorialStep::Prepare => Some(targets.prepare),
-        }
-        .map(|rect| {
-            let expanded = rect.expand(8.0).intersect(content_rect.shrink(4.0));
-            animate_tutorial_rect(context, expanded)
-        });
+        let snapshot = self.snapshot();
+        self.update_setup_reference_capture(&snapshot);
+        let textures = self.setup_example_textures(context);
+        let mut action = if transition_active {
+            None
+        } else {
+            setup_guide_keyboard_action(context, step)
+        };
 
-        let paint_layer = egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("tutorial-spotlight-paint"),
+        let full_rect = ui.max_rect();
+        let background = ui.visuals().panel_fill;
+        ui.painter().rect_filled(full_rect, 0, background);
+        let content_width = (full_rect.width() - 64.0).clamp(360.0, SETUP_GUIDE_CONTENT_WIDTH);
+        let footer_rect = Rect::from_min_max(
+            Pos2::new(
+                full_rect.left(),
+                full_rect.bottom() - SETUP_GUIDE_FOOTER_HEIGHT,
+            ),
+            full_rect.max,
         );
-        let painter = context.layer_painter(paint_layer);
-        paint_tutorial_backdrop(&painter, content_rect, target, entrance);
+        let body_rect = Rect::from_min_max(
+            full_rect.min,
+            Pos2::new(full_rect.right(), footer_rect.top()),
+        );
 
-        egui::Area::new(egui::Id::new("tutorial-input-blocker"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(content_rect.min)
-            .default_size(content_rect.size())
+        egui::Area::new(egui::Id::new(("setup-guide-content", step.number())))
+            .fixed_pos(body_rect.center())
+            .pivot(Align2::CENTER_CENTER)
             .movable(false)
-            .sense(Sense::click_and_drag())
-            .fade_in(false)
-            .show(context, |ui| {
-                ui.set_min_size(content_rect.size());
-                ui.allocate_rect(
-                    Rect::from_min_size(ui.min_rect().min, content_rect.size()),
-                    Sense::click_and_drag(),
-                );
-            });
-
-        let desired_width = tutorial_callout_width(content_rect, target.is_some());
-        let desired_size = egui::vec2(desired_width, step.callout_height());
-        let callout_rect = tutorial::callout_rect(content_rect, target, desired_size);
-        let callout_offset = egui::vec2(0.0, 7.0 * (1.0 - step_progress));
-        let mut action = tutorial_keyboard_action(context, step);
-        egui::Area::new(egui::Id::new("tutorial-callout"))
-            .order(egui::Order::Tooltip)
-            .fixed_pos(callout_rect.min + callout_offset)
-            .default_size(callout_rect.size())
-            .movable(false)
-            .fade_in(false)
-            .show(context, |ui| {
-                ui.set_opacity((0.72 + step_progress * 0.28) * entrance);
-                ui.set_width(callout_rect.width());
-                ui.set_height(callout_rect.height());
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(24, 27, 33))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(65, 72, 86)))
-                    .corner_radius(12)
-                    .inner_margin(24)
-                    .shadow(egui::Shadow {
-                        offset: [0, 10],
-                        blur: 30,
-                        spread: 2,
-                        color: Color32::from_black_alpha(165),
-                    })
-                    .show(ui, |ui| {
-                        let inner_height = (callout_rect.height() - 48.0).max(1.0);
-                        ui.set_width((callout_rect.width() - 48.0).max(1.0));
-                        ui.set_height(inner_height);
-                        let content_top = ui.cursor().top();
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format_text(
-                                    self.locale(),
-                                    "STEP {0} OF {1}",
-                                    &[
-                                        &step.number().to_string(),
-                                        &TutorialStep::ALL.len().to_string(),
-                                    ],
-                                ))
-                                .size(10.0)
+            .constrain_to(body_rect.shrink(12.0))
+            .show(context, |body_ui| {
+                body_ui.set_width(content_width);
+                body_ui.set_max_height((body_rect.height() - 24.0).max(200.0));
+                body_ui.set_opacity(entrance * page_opacity);
+                body_ui.with_layout(egui::Layout::top_down(egui::Align::Center), |body_ui| {
+                    body_ui.add(
+                        egui::Label::new(
+                            RichText::new(tr(body_ui, step.title()))
+                                .size(30.0)
                                 .strong()
-                                .color(Color32::from_rgb(123, 164, 240)),
+                                .color(SETUP_SIGNAL_WHITE),
+                        )
+                        .wrap()
+                        .halign(egui::Align::Center),
+                    );
+                    body_ui.add_space(5.0);
+                    body_ui.allocate_ui_with_layout(
+                        egui::vec2(content_width.min(700.0), 1.0),
+                        egui::Layout::top_down(egui::Align::Center),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(tr(ui, step.explanation()))
+                                        .size(14.0)
+                                        .line_height(Some(20.0))
+                                        .color(mix_color(background, SETUP_SIGNAL_WHITE, 0.66)),
+                                )
+                                .wrap()
+                                .halign(egui::Align::Center),
                             );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .link(
-                                            RichText::new(tr(ui, "Skip tutorial"))
-                                                .size(11.5)
-                                                .color(Color32::from_rgb(172, 180, 194)),
-                                        )
-                                        .clicked()
-                                    {
-                                        action = Some(TutorialAction::Close);
-                                    }
-                                },
-                            );
-                        });
-                        ui.add_space(13.0);
-                        const FOOTER_HEIGHT: f32 = 32.0;
-                        const FOOTER_GAP: f32 = 12.0;
-                        let header_height = ui.cursor().top() - content_top;
-                        let body_height =
-                            (inner_height - header_height - FOOTER_GAP - FOOTER_HEIGHT).max(64.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt(("tutorial-body", step.number()))
-                            .auto_shrink([false, false])
-                            .max_height(body_height)
-                            .min_scrolled_height(body_height)
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal_top(|ui| {
-                                    let (icon_rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(28.0, 28.0),
-                                        Sense::hover(),
-                                    );
-                                    ui.painter().rect_filled(
-                                        icon_rect,
-                                        7,
-                                        Color32::from_rgb(39, 63, 104),
-                                    );
-                                    ui_icon::paint(
-                                        ui.painter(),
-                                        icon_rect.shrink(5.0),
-                                        step.icon(),
-                                        Color32::from_rgb(151, 188, 252),
-                                    );
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(tr(ui, step.title()))
-                                                .size(21.0)
-                                                .strong()
-                                                .color(Color32::WHITE),
-                                        )
-                                        .wrap(),
-                                    );
-                                });
-                                ui.add_space(10.0);
-                                for (index, paragraph) in step.paragraphs().iter().enumerate() {
-                                    let (_, heading_color) =
-                                        tutorial_accent_palette(paragraph.accent());
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(tr(ui, paragraph.heading))
-                                                .size(12.25)
-                                                .strong()
-                                                .color(heading_color),
-                                        )
-                                        .wrap(),
-                                    );
-                                    ui.add_space(3.0);
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(tr(ui, paragraph.explanation))
-                                                .size(11.75)
-                                                .color(Color32::from_rgb(184, 191, 203)),
-                                        )
-                                        .wrap(),
-                                    );
-                                    if index + 1 < step.paragraphs().len() {
-                                        ui.add_space(9.0);
-                                    }
-                                }
-                                if !step.details().is_empty() {
-                                    ui.add_space(14.0);
-                                    for (index, detail) in step.details().iter().enumerate() {
-                                        tutorial_detail(ui, detail);
-                                        if index + 1 < step.details().len() {
-                                            ui.add_space(7.0);
-                                        }
-                                    }
-                                }
-                            });
-
-                        ui.add_space(FOOTER_GAP);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), FOOTER_HEIGHT),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                if ui
-                                    .add_enabled(
-                                        step.previous().is_some(),
-                                        egui::Button::new(tr(ui, "Back").as_ref())
-                                            .min_size(egui::vec2(76.0, FOOTER_HEIGHT)),
-                                    )
-                                    .clicked()
-                                {
-                                    action = Some(TutorialAction::Previous);
-                                }
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let label = if step.is_last() { "Finish" } else { "Next" };
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    RichText::new(tr(ui, label))
-                                                        .strong()
-                                                        .color(Color32::WHITE),
-                                                )
-                                                .fill(SETTINGS_BLUE)
-                                                .stroke(Stroke::NONE)
-                                                .min_size(egui::vec2(92.0, FOOTER_HEIGHT)),
-                                            )
-                                            .clicked()
-                                        {
-                                            action = Some(TutorialAction::Next);
-                                        }
-                                    },
-                                );
-                            },
-                        );
+                        },
+                    );
+                    body_ui.add_space(if body_rect.height() < 520.0 {
+                        8.0
+                    } else {
+                        14.0
                     });
+                    if step == SetupStep::HowItWorks {
+                        self.setup_how_it_works(
+                            body_ui,
+                            &textures,
+                            session_elapsed(self.setup_session, now),
+                            self.setup_animations_enabled,
+                            background,
+                        );
+                    } else {
+                        let max_scroll_height = body_ui.available_height().max(160.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt(("setup-guide-body", step.number()))
+                            .auto_shrink([false, true])
+                            .max_height(max_scroll_height)
+                            .show(body_ui, |ui| {
+                                ui.set_width(content_width);
+                                self.setup_step_content(ui, step, &snapshot, &textures);
+                            });
+                    }
+                });
             });
+
+        ui.painter().line_segment(
+            [
+                Pos2::new(footer_rect.left(), footer_rect.top()),
+                Pos2::new(footer_rect.right(), footer_rect.top()),
+            ],
+            Stroke::new(1.0, mix_color(background, SETUP_SIGNAL_WHITE, 0.09)),
+        );
+        let footer_content_rect = Rect::from_center_size(
+            footer_rect.center(),
+            egui::vec2(content_width, footer_rect.height()),
+        );
+        let left_rect = Rect::from_center_size(
+            Pos2::new(
+                footer_content_rect.left() + 70.0,
+                footer_content_rect.center().y,
+            ),
+            egui::vec2(140.0, 40.0),
+        );
+        let mut later_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("setup-guide-later")
+                .max_rect(left_rect)
+                .layout(egui::Layout::centered_and_justified(
+                    egui::Direction::TopDown,
+                )),
+        );
+        later_ui.set_opacity(entrance);
+        if setup_footer_button(
+            &mut later_ui,
+            "Set up later",
+            egui::vec2(140.0, 40.0),
+            false,
+            true,
+            SETTINGS_BLUE,
+        )
+        .clicked()
+        {
+            action = Some(SetupAction::Close);
+        }
+
+        let progress_rect =
+            Rect::from_center_size(footer_content_rect.center(), egui::vec2(220.0, 48.0));
+        let mut progress_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("setup-guide-progress")
+                .max_rect(progress_rect)
+                .layout(egui::Layout::top_down(egui::Align::Center)),
+        );
+        progress_ui.set_opacity(entrance);
+        setup_footer_progress(&mut progress_ui, step);
+
+        let next_width = if step.is_last() { 180.0 } else { 146.0 };
+        let actions_width = 112.0 + 10.0 + next_width;
+        let actions_rect = Rect::from_center_size(
+            Pos2::new(
+                footer_content_rect.right() - actions_width / 2.0,
+                footer_content_rect.center().y,
+            ),
+            egui::vec2(actions_width, 40.0),
+        );
+        let mut actions_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("setup-guide-actions")
+                .max_rect(actions_rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        actions_ui.set_opacity(entrance);
+        if setup_footer_button(
+            &mut actions_ui,
+            "Back",
+            egui::vec2(112.0, 40.0),
+            false,
+            step.previous().is_some(),
+            SETTINGS_BLUE,
+        )
+        .clicked()
+        {
+            action = Some(SetupAction::Previous);
+        }
+        actions_ui.add_space(10.0);
+        let label = if step.is_last() {
+            "Start StageSwap"
+        } else {
+            "Continue"
+        };
+        if setup_footer_button(
+            &mut actions_ui,
+            label,
+            egui::vec2(next_width, 40.0),
+            true,
+            true,
+            SETTINGS_BLUE,
+        )
+        .clicked()
+        {
+            action = Some(SetupAction::Next);
+        }
 
         if let Some(action) = action {
-            self.apply_tutorial_action(action);
+            self.apply_setup_action(action);
         }
     }
 
-    fn dashboard(&mut self, ui: &mut egui::Ui) -> DashboardTutorialTargets {
+    fn setup_step_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        step: SetupStep,
+        snapshot: &AppSnapshot,
+        textures: &SetupExampleTextures,
+    ) {
+        match step {
+            SetupStep::HowItWorks => self.setup_how_it_works(
+                ui,
+                textures,
+                None,
+                self.setup_animations_enabled,
+                ui.visuals().panel_fill,
+            ),
+            SetupStep::Webcam => self.setup_webcam_step(ui, snapshot),
+            SetupStep::Screen => self.setup_screen_step(ui, snapshot),
+            SetupStep::Reference => self.setup_reference_step(ui, snapshot, textures),
+            SetupStep::Ready => self.setup_ready_step(ui, snapshot),
+        }
+    }
+
+    fn setup_how_it_works(
+        &mut self,
+        ui: &mut egui::Ui,
+        textures: &SetupExampleTextures,
+        elapsed: Option<Duration>,
+        animations_enabled: bool,
+        background: Color32,
+    ) {
+        if !animations_enabled {
+            setup_static_switching_demo(ui, textures, background);
+            return;
+        }
+
+        let preview_alpha = self.setup_demo_preview_alpha();
+        let changed_alpha =
+            preview_alpha.unwrap_or_else(|| elapsed.map_or(0.0, setup_demo_changed_alpha));
+        if elapsed.is_some() && preview_alpha.is_none() {
+            ui.ctx().request_repaint();
+        }
+        setup_animated_switching_demo(ui, textures, changed_alpha, background);
+    }
+
+    fn setup_webcam_step(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
+        let selected_available = snapshot
+            .video_devices
+            .iter()
+            .any(|device| device.id == self.config.selected_video_device_id);
+        let empty_message =
+            if !self.config.selected_video_device_id.is_empty() && !selected_available {
+                "This webcam is unavailable. Choose another one or refresh the list."
+            } else {
+                "No webcam found. Connect a webcam, then refresh the list."
+            };
+        let selected_name = snapshot
+            .video_devices
+            .iter()
+            .find(|device| device.id == self.config.selected_video_device_id)
+            .map(|device| device.name.clone())
+            .unwrap_or_else(|| tr(ui, "No camera selected").into_owned());
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 1.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.set_width(SETUP_HARDWARE_PREVIEW_WIDTH);
+                self.settings_preview_panel(
+                    ui,
+                    SettingsPreview {
+                        kind: PreviewKind::Webcam,
+                        frame: snapshot.previews.webcam.as_ref(),
+                        label: "Webcam preview",
+                        empty_message,
+                        actual_output: snapshot.actual_output,
+                    },
+                    SETUP_HARDWARE_PREVIEW_WIDTH,
+                );
+                ui.add_space(13.0);
+                setup_control_label(ui, UiIcon::Camera, "Webcam", SETTINGS_BLUE);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let geometry = selector_utility_geometry(
+                        SETUP_HARDWARE_PREVIEW_WIDTH,
+                        ui.spacing().item_spacing.x,
+                    );
+                    let previous = self.config.selected_video_device_id.clone();
+                    egui::ComboBox::from_id_salt("setup-webcam-selector")
+                        .width(geometry.selector_width)
+                        .selected_text(selected_name)
+                        .show_ui(ui, |ui| {
+                            for device in snapshot.video_devices.iter() {
+                                ui.selectable_value(
+                                    &mut self.config.selected_video_device_id,
+                                    device.id.clone(),
+                                    &device.name,
+                                );
+                            }
+                        });
+                    if self.config.selected_video_device_id != previous {
+                        self.awaiting_video_device_id =
+                            Some(self.config.selected_video_device_id.clone());
+                        self.queue_settings_save();
+                    }
+                    if icon_only_button(
+                        ui,
+                        UiIcon::Refresh,
+                        "Refresh webcams",
+                        egui::vec2(geometry.action_width, 32.0),
+                    )
+                    .on_hover_text(tr(ui, "Refresh webcams"))
+                    .clicked()
+                    {
+                        self.send(Command::RefreshVideoDevices);
+                    }
+                });
+                if snapshot.previews.webcam.is_some() && !selected_available {
+                    ui.add_space(10.0);
+                    setup_message(ui, empty_message, LIVE_RED);
+                }
+            },
+        );
+    }
+
+    fn setup_screen_step(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
+        let saved_available = snapshot
+            .monitors
+            .iter()
+            .any(|monitor| monitor.label == self.config.selected_monitor_label);
+        let empty_message = if !self.config.selected_monitor_label.is_empty() && !saved_available {
+            "This screen is unavailable. Choose another one or rescan."
+        } else {
+            "No screen found. Connect a screen, then rescan."
+        };
+        let selected_name = snapshot
+            .selected_monitor
+            .as_ref()
+            .map(|monitor| monitor.label.clone())
+            .unwrap_or_else(|| tr(ui, "No display selected").into_owned());
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 1.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.set_width(SETUP_HARDWARE_PREVIEW_WIDTH);
+                self.settings_preview_panel(
+                    ui,
+                    SettingsPreview {
+                        kind: PreviewKind::Screen,
+                        frame: snapshot.previews.screen.as_ref(),
+                        label: "Screen preview",
+                        empty_message,
+                        actual_output: snapshot.actual_output,
+                    },
+                    SETUP_HARDWARE_PREVIEW_WIDTH,
+                );
+                ui.add_space(13.0);
+                setup_control_label(ui, UiIcon::Monitor, "Screen", SETTINGS_BLUE);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let geometry = selector_utility_geometry(
+                        SETUP_HARDWARE_PREVIEW_WIDTH,
+                        ui.spacing().item_spacing.x,
+                    );
+                    egui::ComboBox::from_id_salt("setup-screen-selector")
+                        .width(geometry.selector_width)
+                        .selected_text(selected_name)
+                        .show_ui(ui, |ui| {
+                            for monitor in snapshot.monitors.iter() {
+                                let label = format!(
+                                    "{} — {}×{}",
+                                    monitor.label, monitor.width, monitor.height
+                                );
+                                if ui
+                                    .selectable_label(
+                                        snapshot.selected_monitor.as_ref() == Some(monitor),
+                                        label,
+                                    )
+                                    .clicked()
+                                {
+                                    self.awaiting_monitor_label = Some(monitor.label.clone());
+                                    self.send(Command::SelectMonitor(monitor.clone()));
+                                }
+                            }
+                        });
+                    if icon_only_button(
+                        ui,
+                        UiIcon::Refresh,
+                        "Rescan screens",
+                        egui::vec2(geometry.action_width, 32.0),
+                    )
+                    .on_hover_text(tr(ui, "Rescan screens"))
+                    .clicked()
+                    {
+                        self.send(Command::Rescan);
+                    }
+                });
+                if snapshot.previews.screen.is_some()
+                    && (!saved_available || snapshot.selected_monitor.is_none())
+                {
+                    ui.add_space(10.0);
+                    setup_message(ui, empty_message, LIVE_RED);
+                }
+            },
+        );
+    }
+
+    fn setup_reference_step(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        textures: &SetupExampleTextures,
+    ) {
+        let gap = 18.0;
+        let wide = ui.available_width() >= 590.0;
+        let panel_width = if wide {
+            ((ui.available_width() - gap) / 2.0).clamp(220.0, 360.0)
+        } else {
+            ui.available_width().min(480.0)
+        };
+        if wide {
+            let group_width = panel_width * 2.0 + gap;
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.horizontal_top(|ui| {
+                    ui.add_space(((ui.available_width() - group_width - gap) / 2.0).max(0.0));
+                    setup_example_image(
+                        ui,
+                        textures.reference.id(),
+                        panel_width,
+                        UiIcon::Image,
+                        "Reference",
+                        SETTINGS_BLUE,
+                    );
+                    self.setup_live_preview_panel(
+                        ui,
+                        SettingsPreview {
+                            kind: PreviewKind::Reference,
+                            frame: snapshot.previews.reference.as_ref(),
+                            label: "Reference preview",
+                            empty_message: "No reference captured yet.",
+                            actual_output: snapshot.actual_output,
+                        },
+                        panel_width,
+                        SETTINGS_BLUE,
+                    );
+                });
+            });
+        } else {
+            setup_example_image(
+                ui,
+                textures.reference.id(),
+                panel_width,
+                UiIcon::Image,
+                "Reference",
+                SETTINGS_BLUE,
+            );
+            ui.add_space(16.0);
+            self.setup_live_preview_panel(
+                ui,
+                SettingsPreview {
+                    kind: PreviewKind::Reference,
+                    frame: snapshot.previews.reference.as_ref(),
+                    label: "Reference preview",
+                    empty_message: "No reference captured yet.",
+                    actual_output: snapshot.actual_output,
+                },
+                panel_width,
+                SETTINGS_BLUE,
+            );
+        }
+        ui.add_space(18.0);
+        let details_width = ui.available_width().min(738.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 1.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.set_width(details_width);
+                setup_rule_label(
+                    ui,
+                    "When the screen matches the reference, StageSwap shows your webcam. When the screen changes, StageSwap shows the screen.",
+                    SETTINGS_BLUE,
+                );
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+            let available = snapshot.previews.reference.is_some();
+            let label = if available {
+                "Capture again"
+            } else {
+                "Capture reference"
+            };
+            let pending = matches!(
+                self.setup_reference_capture,
+                SetupReferenceCaptureState::Pending { .. }
+            );
+            if ui
+                .add_enabled_ui(!pending, |ui| {
+                    accent_icon_button(
+                        ui,
+                        UiIcon::Capture,
+                        label,
+                        egui::vec2(178.0, 40.0),
+                        SETTINGS_BLUE,
+                    )
+                })
+                .inner
+                .clicked()
+            {
+                if snapshot.previews.screen.is_none() {
+                    self.setup_reference_capture = SetupReferenceCaptureState::Failed;
+                } else {
+                    self.setup_reference_capture = SetupReferenceCaptureState::Pending {
+                        started_at: Instant::now(),
+                        previous_sequence: snapshot
+                            .previews
+                            .reference
+                            .as_ref()
+                            .map(|frame| frame.sequence),
+                    };
+                    self.send(Command::CaptureReference);
+                }
+            }
+            if matches!(
+                self.setup_reference_capture,
+                SetupReferenceCaptureState::Success
+            ) || available
+            {
+                setup_status_pill(ui, UiIcon::Check, "Reference captured", ACTIVE_GREEN);
+            }
+                });
+            },
+        );
+        if matches!(
+            self.setup_reference_capture,
+            SetupReferenceCaptureState::Failed
+        ) {
+            ui.add_space(7.0);
+            setup_message(
+                ui,
+                "StageSwap couldn’t capture the screen. Check the screen preview and try again.",
+                LIVE_RED,
+            );
+        }
+    }
+
+    fn setup_ready_step(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
+        let webcam_ready = snapshot.webcam_state == DeviceState::Ready
+            && snapshot.previews.webcam.is_some()
+            && !snapshot.selected_video_device_id.is_empty();
+        let screen_ready = snapshot.screen_state == DeviceState::Ready
+            && snapshot.previews.screen.is_some()
+            && snapshot.selected_monitor.is_some();
+        let reference_ready = snapshot.previews.reference.is_some();
+        let rows = [
+            (
+                UiIcon::Camera,
+                webcam_ready,
+                "Webcam ready",
+                "Webcam not selected",
+            ),
+            (
+                UiIcon::Monitor,
+                screen_ready,
+                "Screen ready",
+                "Screen not selected",
+            ),
+            (
+                UiIcon::Image,
+                reference_ready,
+                "Reference ready",
+                "Reference not captured",
+            ),
+        ];
+        let width = ui.available_width().min(620.0);
+        let row_count = rows.len();
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 1.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                egui::Frame::new()
+                    .fill(SETUP_SIGNAL_DECK)
+                    .stroke(Stroke::new(
+                        1.0,
+                        mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.12),
+                    ))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::symmetric(16, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(width - 32.0);
+                        for (index, (icon, ready, ready_text, missing_text)) in
+                            rows.into_iter().enumerate()
+                        {
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(ui.available_width(), 48.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    let (icon_rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(20.0, 20.0),
+                                        Sense::hover(),
+                                    );
+                                    ui_icon::paint(
+                                        ui.painter(),
+                                        icon_rect,
+                                        if ready { UiIcon::Check } else { icon },
+                                        if ready {
+                                            ACTIVE_GREEN
+                                        } else {
+                                            TRANSITION_AMBER
+                                        },
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new(tr(
+                                            ui,
+                                            if ready { ready_text } else { missing_text },
+                                        ))
+                                        .size(13.0)
+                                        .color(SETUP_SIGNAL_WHITE),
+                                    );
+                                },
+                            );
+                            if index + 1 < row_count {
+                                ui.separator();
+                            }
+                        }
+                    });
+            },
+        );
+        if !(webcam_ready && screen_ready && reference_ready) {
+            ui.add_space(18.0);
+            setup_message(
+                ui,
+                "Some setup is missing. StageSwap will start, but Automatic mode may not work as expected. You can finish setup later in Settings.",
+                TRANSITION_AMBER,
+            );
+        }
+    }
+
+    fn setup_live_preview_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        preview: SettingsPreview<'_>,
+        width: f32,
+        accent: Color32,
+    ) -> Rect {
+        let width = width.min(ui.available_width()).max(1.0);
+        let height = (width / WINDOW_ASPECT_RATIO).min(SETTINGS_PREVIEW_HEIGHT + 86.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, height + 30.0),
+            egui::Layout::top_down(egui::Align::LEFT),
+            |ui| {
+                setup_media_header(ui, preview.kind.icon(), preview.label, accent, width);
+                ui.add_space(6.0);
+                self.preview(
+                    ui,
+                    preview.kind,
+                    preview.frame,
+                    [width, height],
+                    preview.actual_output,
+                    PreviewOptions::settings(preview.empty_message),
+                );
+            },
+        )
+        .response
+        .rect
+    }
+
+    fn update_setup_reference_capture(&mut self, snapshot: &AppSnapshot) {
+        let SetupReferenceCaptureState::Pending {
+            started_at,
+            previous_sequence,
+        } = self.setup_reference_capture
+        else {
+            return;
+        };
+        let current_sequence = snapshot
+            .previews
+            .reference
+            .as_ref()
+            .map(|frame| frame.sequence);
+        if current_sequence.is_some() && current_sequence != previous_sequence {
+            self.setup_reference_capture = SetupReferenceCaptureState::Success;
+        } else if Instant::now().saturating_duration_since(started_at) >= REFERENCE_CAPTURE_TIMEOUT
+        {
+            self.setup_reference_capture = SetupReferenceCaptureState::Failed;
+        }
+    }
+
+    fn setup_example_textures(&mut self, context: &egui::Context) -> SetupExampleTextures {
+        self.setup_example_textures
+            .get_or_insert_with(|| SetupExampleTextures {
+                reference: load_embedded_texture(
+                    context,
+                    "setup-reference-example",
+                    include_bytes!("../assets/setup-reference-example.png"),
+                ),
+                webcam: load_embedded_texture(
+                    context,
+                    "setup-webcam-example",
+                    include_bytes!("../assets/setup-webcam-example.png"),
+                ),
+                screen: load_embedded_texture(
+                    context,
+                    "setup-screen-example",
+                    include_bytes!("../assets/setup-screen-example.png"),
+                ),
+            })
+            .clone()
+    }
+
+    fn dashboard(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.snapshot();
         for warning in self
             .load_warnings
@@ -1873,15 +2531,8 @@ impl SwitcherApp {
             );
             debug_assert!(controls.inner.footer.is_positive());
             debug_assert!(controls.inner.body.sections.iter().all(Rect::is_positive));
-            DashboardTutorialTargets {
-                reference_preview: previews.inner.cells[2],
-                preview_grid: previews.inner.grid,
-                health: controls.inner.body.sections[0],
-                controls: controls.inner.body.sections[1],
-                prepare: controls.inner.body.sections[2].union(controls.inner.footer),
-            }
-        })
-        .inner
+            debug_assert!(previews.inner.grid.is_positive());
+        });
     }
 
     fn preview_workspace(
@@ -1986,7 +2637,6 @@ impl SwitcherApp {
             });
         }
         PreviewGridLayout {
-            cells,
             grid: cells[0].union(cells[3]),
         }
     }
@@ -2504,20 +3154,20 @@ impl SwitcherApp {
             "StageSwap watches your selected screen. While it matches your saved reference image, your video calls see your webcam. When the screen changes, StageSwap automatically switches to the screen. When the reference returns, it switches back to your webcam.",
         );
         ui.add_space(12.0);
-        let mut open_tutorial = false;
+        let mut open_setup_guide = false;
         if settings_single_button_row(
             ui,
-            "Dashboard tutorial",
-            "Review the previews, status information, and everyday controls.",
-            "Open tutorial",
-            152.0,
+            "Setup guide",
+            "Learn how StageSwap works and choose your webcam, screen, and reference.",
+            "Open setup guide",
+            206.0,
         )
         .clicked()
         {
-            open_tutorial = true;
+            open_setup_guide = true;
         }
-        if open_tutorial {
-            self.start_tutorial(TutorialReturnView::Settings);
+        if open_setup_guide {
+            self.start_setup_guide(SetupReturnView::Settings);
             return;
         }
 
@@ -3771,6 +4421,24 @@ fn dialog_action_width(available_width: f32, gap: f32, action_count: usize) -> f
 
 impl eframe::App for SwitcherApp {
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(not(windows))]
+        if let Some(image) = context.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot { image, .. } => Some(Arc::clone(image)),
+                _ => None,
+            })
+        }) && let Some(capture) = self.ui_screenshot.take()
+        {
+            match save_ui_screenshot(&capture.path, &image) {
+                Ok(()) => eprintln!(
+                    "StageSwap UI screenshot saved to {}",
+                    capture.path.display()
+                ),
+                Err(error) => eprintln!("StageSwap UI screenshot failed: {error}"),
+            }
+            self.exit_requested = true;
+            context.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         #[cfg(windows)]
         if let Some(readiness) = self.instance_readiness.take() {
             readiness.mark_ready();
@@ -3943,8 +4611,47 @@ impl eframe::App for SwitcherApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         set_ui_locale(ui.ctx(), self.locale());
         self.root_ui(ui);
+        #[cfg(not(windows))]
+        if let Some(capture) = self.ui_screenshot.as_mut()
+            && !capture.requested
+        {
+            if capture.frames_until_request > 0 {
+                capture.frames_until_request -= 1;
+                ui.ctx().request_repaint();
+            } else {
+                eprintln!("StageSwap UI screenshot requested");
+                ui.ctx()
+                    .send_viewport_cmd(
+                        egui::ViewportCommand::Screenshot(egui::UserData::default()),
+                    );
+                capture.requested = true;
+                ui.ctx().request_repaint();
+            }
+        }
         ui.ctx().request_repaint_after(repaint_interval(true));
     }
+}
+
+#[cfg(not(windows))]
+fn save_ui_screenshot(path: &std::path::Path, image: &egui::ColorImage) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    }
+    let mut rgba = Vec::with_capacity(image.pixels.len() * 4);
+    for pixel in &image.pixels {
+        rgba.extend_from_slice(&pixel.to_array());
+    }
+    let source = image::RgbaImage::from_raw(image.size[0] as u32, image.size[1] as u32, rgba)
+        .ok_or_else(|| "screenshot pixel buffer had an invalid size".to_string())?;
+    let output = if source.dimensions() == (1280, 720) {
+        source
+    } else {
+        image::imageops::resize(&source, 1280, 720, image::imageops::FilterType::Lanczos3)
+    };
+    output
+        .save(path)
+        .map_err(|error| format!("could not save {}: {error}", path.display()))
 }
 
 const UI_LOCALE_ID: &str = "stageswap-ui-locale";
@@ -4048,143 +4755,752 @@ fn animation_progress(started_at: Option<Instant>, duration: Duration) -> f32 {
     })
 }
 
-fn tutorial_keyboard_action(context: &egui::Context, step: TutorialStep) -> Option<TutorialAction> {
+fn session_elapsed(session: Option<SetupSession>, now: Instant) -> Option<Duration> {
+    let session = session?;
+    (session.step == SetupStep::HowItWorks)
+        .then(|| {
+            session
+                .step_changed_at
+                .map(|start| now.saturating_duration_since(start))
+        })
+        .flatten()
+}
+
+fn setup_demo_changed_alpha(elapsed: Duration) -> f32 {
+    let phase = elapsed.as_secs_f32() % SETUP_DEMO_LOOP_DURATION;
+    if phase < SETUP_DEMO_HOLD_DURATION {
+        0.0
+    } else if phase < SETUP_DEMO_HOLD_DURATION + SETUP_DEMO_FADE_DURATION {
+        (phase - SETUP_DEMO_HOLD_DURATION) / SETUP_DEMO_FADE_DURATION
+    } else if phase < SETUP_DEMO_HOLD_DURATION * 2.0 + SETUP_DEMO_FADE_DURATION {
+        1.0
+    } else {
+        1.0 - (phase - (SETUP_DEMO_HOLD_DURATION * 2.0 + SETUP_DEMO_FADE_DURATION))
+            / SETUP_DEMO_FADE_DURATION
+    }
+    .clamp(0.0, 1.0)
+}
+
+fn setup_guide_keyboard_action(context: &egui::Context, step: SetupStep) -> Option<SetupAction> {
     context.input_mut(|input| {
         if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
-            return Some(TutorialAction::Close);
+            return Some(SetupAction::Close);
         }
         if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
-            return step.previous().map(|_| TutorialAction::Previous);
+            return step.previous().map(|_| SetupAction::Previous);
         }
         if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
             || input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
             || input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
         {
-            return Some(TutorialAction::Next);
+            return Some(SetupAction::Next);
         }
         None
     })
 }
 
-fn tutorial_callout_width(content: Rect, targeted: bool) -> f32 {
-    if targeted {
-        (content.width() * 0.28).clamp(300.0, 340.0)
-    } else {
-        520.0
-    }
-}
-
-fn animate_tutorial_rect(context: &egui::Context, target: Rect) -> Rect {
-    let duration = TUTORIAL_STEP_DURATION.as_secs_f32();
-    Rect::from_min_max(
-        Pos2::new(
-            context.animate_value_with_time(
-                egui::Id::new(("tutorial-target", "left")),
-                target.left(),
-                duration,
-            ),
-            context.animate_value_with_time(
-                egui::Id::new(("tutorial-target", "top")),
-                target.top(),
-                duration,
-            ),
-        ),
-        Pos2::new(
-            context.animate_value_with_time(
-                egui::Id::new(("tutorial-target", "right")),
-                target.right(),
-                duration,
-            ),
-            context.animate_value_with_time(
-                egui::Id::new(("tutorial-target", "bottom")),
-                target.bottom(),
-                duration,
-            ),
-        ),
+fn load_embedded_texture(
+    context: &egui::Context,
+    name: &'static str,
+    bytes: &[u8],
+) -> TextureHandle {
+    let image = image::load_from_memory(bytes)
+        .unwrap_or_else(|error| panic!("{name} should be a valid embedded image: {error}"))
+        .to_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    context.load_texture(
+        name,
+        egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+        TextureOptions::LINEAR,
     )
 }
 
-fn paint_tutorial_backdrop(
-    painter: &egui::Painter,
-    content: Rect,
-    target: Option<Rect>,
-    progress: f32,
-) {
-    let shade = Color32::from_black_alpha((190.0 * progress) as u8);
-    let Some(target) = target else {
-        painter.rect_filled(content, 0, shade);
-        return;
-    };
-    let target = target.intersect(content);
-    for rect in [
-        Rect::from_min_max(content.min, Pos2::new(content.right(), target.top())),
-        Rect::from_min_max(
-            Pos2::new(content.left(), target.bottom()),
-            content.right_bottom(),
-        ),
-        Rect::from_min_max(
-            Pos2::new(content.left(), target.top()),
-            Pos2::new(target.left(), target.bottom()),
-        ),
-        Rect::from_min_max(
-            Pos2::new(target.right(), target.top()),
-            Pos2::new(content.right(), target.bottom()),
-        ),
-    ] {
-        if rect.is_positive() {
-            painter.rect_filled(rect, 0, shade);
-        }
-    }
-    painter.rect_stroke(
-        target,
-        10,
-        Stroke::new(
+fn setup_footer_progress(ui: &mut egui::Ui, step: SetupStep) {
+    let background = ui.visuals().panel_fill;
+    let step_text = format_text(
+        ui_locale(ui),
+        "Step {0} of {1}",
+        &[
+            &step.number().to_string(),
+            &SetupStep::ALL.len().to_string(),
+        ],
+    );
+    ui.label(RichText::new(step_text).size(11.5).color(mix_color(
+        background,
+        SETUP_SIGNAL_WHITE,
+        0.54,
+    )));
+    ui.add_space(4.0);
+    setup_progress_rail(ui, step, 180.0);
+}
+
+fn setup_progress_rail(ui: &mut egui::Ui, step: SetupStep, width: f32) -> Rect {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 8.0), Sense::hover());
+    let rail = Rect::from_center_size(rect.center(), egui::vec2(width, 2.0));
+    let background = ui.visuals().panel_fill;
+    ui.painter()
+        .rect_filled(rail, 1, mix_color(background, SETUP_SIGNAL_WHITE, 0.13));
+    let fill = Rect::from_min_size(
+        rail.min,
+        egui::vec2(
+            rail.width() * step.number() as f32 / SetupStep::ALL.len() as f32,
             2.0,
-            Color32::from_rgba_unmultiplied(112, 160, 248, (245.0 * progress) as u8),
         ),
-        StrokeKind::Outside,
+    );
+    ui.painter().rect_filled(fill, 1, SETTINGS_BLUE);
+    rect
+}
+
+fn setup_rounded_image(
+    ui: &egui::Ui,
+    rect: Rect,
+    texture: egui::TextureId,
+    opacity: f32,
+    background: Color32,
+    corner_radius: u8,
+) {
+    egui::Image::new((texture, rect.size()))
+        .corner_radius(corner_radius)
+        .tint(Color32::WHITE.gamma_multiply(opacity))
+        .paint_at(ui, rect);
+    ui.painter().rect_stroke(
+        rect,
+        corner_radius,
+        Stroke::new(1.0, mix_color(background, SETUP_SIGNAL_WHITE, 0.15)),
+        StrokeKind::Inside,
     );
 }
 
-fn tutorial_detail(ui: &mut egui::Ui, detail: &tutorial::TutorialDetail) {
-    let (fill, accent) = tutorial_accent_palette(detail.accent);
-    ui.horizontal_top(|ui| {
-        let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
-        ui.painter().rect_filled(icon_rect, 6, fill);
-        ui_icon::paint(ui.painter(), icon_rect.shrink(5.0), detail.icon, accent);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add(
-                egui::Label::new(
-                    RichText::new(tr(ui, detail.title))
-                        .size(11.75)
-                        .strong()
-                        .color(accent),
-                )
-                .wrap(),
+fn setup_crossfade_image(
+    ui: &egui::Ui,
+    rect: Rect,
+    first: egui::TextureId,
+    second: egui::TextureId,
+    blend: f32,
+    background: Color32,
+) {
+    egui::Image::new((first, rect.size()))
+        .corner_radius(9)
+        .tint(Color32::WHITE.gamma_multiply(1.0 - blend))
+        .paint_at(ui, rect);
+    if blend > 0.0 {
+        egui::Image::new((second, rect.size()))
+            .corner_radius(9)
+            .tint(Color32::WHITE.gamma_multiply(blend))
+            .paint_at(ui, rect);
+    }
+    ui.painter().rect_stroke(
+        rect,
+        9,
+        Stroke::new(1.0, mix_color(background, SETUP_SIGNAL_WHITE, 0.15)),
+        StrokeKind::Inside,
+    );
+}
+
+fn setup_animated_switching_demo(
+    ui: &mut egui::Ui,
+    textures: &SetupExampleTextures,
+    changed_alpha: f32,
+    background: Color32,
+) {
+    let compact = ui.available_height() < 420.0;
+    let input_width = if compact { 120.0 } else { 150.0 };
+    let output_width = if compact { 300.0 } else { 360.0 };
+    let input_height = input_width / WINDOW_ASPECT_RATIO;
+    let output_height = output_width / WINDOW_ASPECT_RATIO;
+    let caption_height = 16.0;
+    let caption_gap = 4.0;
+    let block_height = caption_height + caption_gap + input_height;
+    let card_gap = if compact { 6.0 } else { 8.0 };
+    let card_padding_x = 14.0;
+    let card_padding_y = 8.0;
+    let card_width = input_width + card_padding_x * 2.0;
+    let card_height = block_height + card_padding_y * 2.0;
+    let diagram_height = card_height * 2.0 + card_gap;
+    let output_gap = if compact { 46.0 } else { 64.0 };
+    let diagram_width = card_width + output_gap + output_width;
+    let (diagram, _) =
+        ui.allocate_exact_size(egui::vec2(diagram_width, diagram_height), Sense::hover());
+
+    let content_left = diagram.left() + card_padding_x;
+    let screen_caption = Rect::from_min_size(
+        Pos2::new(content_left, diagram.top() + card_padding_y),
+        egui::vec2(input_width, caption_height),
+    );
+    let screen = Rect::from_min_size(
+        Pos2::new(content_left, screen_caption.bottom() + caption_gap),
+        egui::vec2(input_width, input_height),
+    );
+    let screen_card = Rect::from_min_max(
+        diagram.min,
+        Pos2::new(diagram.left() + card_width, diagram.top() + card_height),
+    );
+    let webcam_caption = Rect::from_min_size(
+        Pos2::new(
+            content_left,
+            screen_card.bottom() + card_gap + card_padding_y,
+        ),
+        egui::vec2(input_width, caption_height),
+    );
+    let webcam = Rect::from_min_size(
+        Pos2::new(content_left, webcam_caption.bottom() + caption_gap),
+        egui::vec2(input_width, input_height),
+    );
+    let webcam_card = Rect::from_min_max(
+        Pos2::new(diagram.left(), screen_card.bottom() + card_gap),
+        Pos2::new(
+            diagram.left() + card_width,
+            screen_card.bottom() + card_gap + card_height,
+        ),
+    );
+    let output_block_height = caption_height + caption_gap + output_height;
+    let output_caption = Rect::from_min_size(
+        Pos2::new(
+            diagram.right() - output_width,
+            diagram.center().y - output_block_height / 2.0,
+        ),
+        egui::vec2(output_width, caption_height),
+    );
+    let output = Rect::from_min_size(
+        Pos2::new(output_caption.left(), output_caption.bottom() + caption_gap),
+        egui::vec2(output_width, output_height),
+    );
+
+    paint_setup_group_card(ui, screen_card, changed_alpha, background);
+    paint_setup_group_card(ui, webcam_card, 1.0 - changed_alpha, background);
+
+    paint_setup_centered_label(
+        ui,
+        screen_caption,
+        "Screen",
+        mix_color(background, SETUP_SIGNAL_WHITE, 0.62),
+    );
+    paint_setup_centered_label(
+        ui,
+        webcam_caption,
+        "Webcam",
+        mix_color(background, SETUP_SIGNAL_WHITE, 0.62).gamma_multiply(1.0 - changed_alpha * 0.42),
+    );
+    paint_setup_centered_label(
+        ui,
+        output_caption,
+        "Zoom",
+        mix_color(background, SETUP_SIGNAL_WHITE, 0.76),
+    );
+
+    setup_crossfade_image(
+        ui,
+        screen,
+        textures.reference.id(),
+        textures.screen.id(),
+        changed_alpha,
+        background,
+    );
+    setup_rounded_image(
+        ui,
+        webcam,
+        textures.webcam.id(),
+        1.0 - changed_alpha * 0.42,
+        background,
+        8,
+    );
+    setup_crossfade_image(
+        ui,
+        output,
+        textures.webcam.id(),
+        textures.screen.id(),
+        changed_alpha,
+        background,
+    );
+
+    ui.painter().rect_stroke(
+        output,
+        9,
+        Stroke::new(1.5, SETTINGS_BLUE.gamma_multiply(0.72)),
+        StrokeKind::Inside,
+    );
+
+    ui.add_space(if compact { 4.0 } else { 8.0 });
+    setup_demo_rule(ui, diagram_width.min(740.0), changed_alpha, background);
+    ui.add_space(if compact { 2.0 } else { 6.0 });
+    setup_plain_zoom_reminder(ui, diagram_width.min(620.0), background);
+}
+
+fn paint_setup_group_card(ui: &egui::Ui, rect: Rect, active_strength: f32, background: Color32) {
+    ui.painter()
+        .rect_filled(rect, 10, mix_color(background, SETUP_SIGNAL_WHITE, 0.025));
+    let neutral = mix_color(background, SETUP_SIGNAL_WHITE, 0.12);
+    ui.painter().rect_stroke(
+        rect,
+        10,
+        Stroke::new(
+            1.0 + active_strength * 0.5,
+            mix_color(neutral, SETTINGS_BLUE, active_strength * 0.78),
+        ),
+        StrokeKind::Inside,
+    );
+}
+
+fn paint_setup_centered_label(ui: &egui::Ui, rect: Rect, text: &str, color: Color32) {
+    let text = tr(ui, text);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.into_owned(), FontId::proportional(11.5), color);
+    ui.painter().galley(
+        Pos2::new(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
+    );
+}
+
+fn paint_setup_active_outline(ui: &egui::Ui, rect: Rect, strength: f32) {
+    if strength > 0.0 {
+        ui.painter().rect_stroke(
+            rect,
+            8,
+            Stroke::new(1.5, SETTINGS_BLUE.gamma_multiply(strength * 0.72)),
+            StrokeKind::Inside,
+        );
+    }
+}
+
+fn paint_setup_crossfade_text(
+    ui: &egui::Ui,
+    rect: Rect,
+    first: &str,
+    second: &str,
+    blend: f32,
+    font: FontId,
+    color: Color32,
+) {
+    let first = tr(ui, first);
+    let second = tr(ui, second);
+    let first_color = color.gamma_multiply(1.0 - blend);
+    let second_color = color.gamma_multiply(blend);
+    paint_setup_text(ui, rect, first.as_ref(), font.clone(), first_color);
+    if blend > 0.0 {
+        paint_setup_text(ui, rect, second.as_ref(), font, second_color);
+    }
+}
+
+fn paint_setup_text(ui: &egui::Ui, rect: Rect, text: &str, font: FontId, color: Color32) {
+    if let Some((left, right)) = text.split_once('→') {
+        let left = ui
+            .painter()
+            .layout_no_wrap(left.trim().to_owned(), font.clone(), color);
+        let right = ui
+            .painter()
+            .layout_no_wrap(right.trim().to_owned(), font, color);
+        let arrow_width = 24.0;
+        let total_width = left.size().x + arrow_width + right.size().x;
+        let top = rect.center().y - left.size().y.max(right.size().y) / 2.0;
+        let left_pos = Pos2::new(rect.center().x - total_width / 2.0, top);
+        ui.painter().galley(left_pos, left.clone(), color);
+        let arrow_center = Pos2::new(
+            left_pos.x + left.size().x + arrow_width / 2.0,
+            rect.center().y,
+        );
+        let arrow_start = Pos2::new(arrow_center.x - 6.0, arrow_center.y);
+        let arrow_end = Pos2::new(arrow_center.x + 6.0, arrow_center.y);
+        ui.painter()
+            .line_segment([arrow_start, arrow_end], Stroke::new(1.3, color));
+        ui.painter().line_segment(
+            [arrow_end, arrow_end + egui::vec2(-3.5, -3.5)],
+            Stroke::new(1.3, color),
+        );
+        ui.painter().line_segment(
+            [arrow_end, arrow_end + egui::vec2(-3.5, 3.5)],
+            Stroke::new(1.3, color),
+        );
+        ui.painter().galley(
+            Pos2::new(left_pos.x + left.size().x + arrow_width, top),
+            right,
+            color,
+        );
+    } else {
+        let galley = ui
+            .painter()
+            .layout(text.to_owned(), font, color, rect.width());
+        let pos = Pos2::new(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        ui.painter().galley(pos, galley, color);
+    }
+}
+
+fn setup_demo_rule(ui: &mut egui::Ui, width: f32, blend: f32, background: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 38.0), Sense::hover());
+    paint_setup_crossfade_text(
+        ui,
+        rect,
+        "Screen matches the reference → Zoom sees your webcam",
+        "Screen does not match the reference → Zoom sees your screen",
+        blend,
+        FontId::proportional(13.0),
+        mix_color(background, SETUP_SIGNAL_WHITE, 0.82),
+    );
+}
+
+fn setup_plain_zoom_reminder(ui: &mut egui::Ui, width: f32, background: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 28.0), Sense::hover());
+    let color = mix_color(background, SETUP_SIGNAL_WHITE, 0.76);
+    let text = tr(ui, "Choose StageSwap as your camera in Zoom.");
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.into_owned(), FontId::proportional(12.5), color);
+    let icon_size = 16.0;
+    let gap = 8.0;
+    let total_width = icon_size + gap + galley.size().x;
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(
+            rect.center().x - total_width / 2.0,
+            rect.center().y - icon_size / 2.0,
+        ),
+        egui::vec2(icon_size, icon_size),
+    );
+    ui_icon::paint(ui.painter(), icon_rect, UiIcon::Broadcast, SETTINGS_BLUE);
+    ui.painter().galley(
+        Pos2::new(
+            icon_rect.right() + gap,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
+    );
+}
+
+fn setup_static_switching_demo(
+    ui: &mut egui::Ui,
+    textures: &SetupExampleTextures,
+    background: Color32,
+) {
+    let width = ui.available_width().min(700.0);
+    let row_height = (ui.available_height() / 2.0 - 18.0).clamp(105.0, 132.0);
+    setup_static_signal_row(
+        ui,
+        width,
+        row_height,
+        "Screen matches the reference → Zoom sees your webcam",
+        textures,
+        false,
+        background,
+    );
+    ui.add_space(7.0);
+    setup_static_signal_row(
+        ui,
+        width,
+        row_height,
+        "Screen does not match the reference → Zoom sees your screen",
+        textures,
+        true,
+        background,
+    );
+    ui.add_space(5.0);
+    setup_plain_zoom_reminder(ui, width.min(620.0), background);
+}
+
+fn setup_static_signal_row(
+    ui: &mut egui::Ui,
+    width: f32,
+    row_height: f32,
+    rule: &str,
+    textures: &SetupExampleTextures,
+    changed: bool,
+    background: Color32,
+) {
+    let (row, _) = ui.allocate_exact_size(egui::vec2(width, row_height), Sense::hover());
+    let rule_rect = Rect::from_min_size(row.min, egui::vec2(width, 24.0));
+    paint_setup_text(
+        ui,
+        rule_rect,
+        tr(ui, rule).as_ref(),
+        FontId::proportional(12.0),
+        mix_color(background, SETUP_SIGNAL_WHITE, 0.82),
+    );
+    let media_width = ((row_height - 47.0) * WINDOW_ASPECT_RATIO).clamp(86.0, 104.0);
+    let media_height = media_width / WINDOW_ASPECT_RATIO;
+    let zoom_width = media_width * 1.2;
+    let stage_width = media_width * 2.0 + zoom_width + 90.0;
+    let stage_left = row.center().x - stage_width / 2.0;
+    let caption_top = rule_rect.bottom() + 3.0;
+    let image_top = caption_top + 17.0;
+    let screen = Rect::from_min_size(
+        Pos2::new(stage_left, image_top),
+        egui::vec2(media_width, media_height),
+    );
+    let webcam = Rect::from_min_size(
+        Pos2::new(screen.right() + 34.0, image_top),
+        egui::vec2(media_width, media_height),
+    );
+    let output = Rect::from_min_size(
+        Pos2::new(
+            row.right() - (row.width() - stage_width) / 2.0 - zoom_width,
+            image_top,
+        ),
+        egui::vec2(zoom_width, zoom_width / WINDOW_ASPECT_RATIO),
+    );
+    let screen_card = Rect::from_min_max(
+        Pos2::new(screen.left() - 8.0, caption_top - 5.0),
+        Pos2::new(screen.right() + 8.0, screen.bottom() + 8.0),
+    );
+    let webcam_card = Rect::from_min_max(
+        Pos2::new(webcam.left() - 8.0, caption_top - 5.0),
+        Pos2::new(webcam.right() + 8.0, webcam.bottom() + 8.0),
+    );
+    paint_setup_group_card(ui, screen_card, f32::from(changed), background);
+    paint_setup_group_card(ui, webcam_card, f32::from(!changed), background);
+    let label_color = mix_color(background, SETUP_SIGNAL_WHITE, 0.62);
+    for (rect, label) in [(screen, "Screen"), (webcam, "Webcam"), (output, "Zoom")] {
+        paint_setup_centered_label(
+            ui,
+            Rect::from_min_size(
+                Pos2::new(rect.left(), caption_top),
+                egui::vec2(rect.width(), 15.0),
+            ),
+            label,
+            label_color,
+        );
+    }
+    setup_rounded_image(
+        ui,
+        screen,
+        if changed {
+            textures.screen.id()
+        } else {
+            textures.reference.id()
+        },
+        1.0,
+        background,
+        7,
+    );
+    setup_rounded_image(
+        ui,
+        webcam,
+        textures.webcam.id(),
+        if changed { 0.58 } else { 1.0 },
+        background,
+        7,
+    );
+    setup_rounded_image(
+        ui,
+        output,
+        if changed {
+            textures.screen.id()
+        } else {
+            textures.webcam.id()
+        },
+        1.0,
+        background,
+        7,
+    );
+    paint_setup_active_outline(ui, output, 1.0);
+}
+
+fn setup_footer_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    size: Vec2,
+    primary: bool,
+    enabled: bool,
+    accent: Color32,
+) -> egui::Response {
+    let label = tr(ui, label);
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let amount = if enabled { 1.0 } else { 0.34 };
+    let hovered = enabled && response.hovered();
+    let fill = if primary {
+        if hovered {
+            mix_color(SETTINGS_BLUE, SETUP_SIGNAL_WHITE, 0.12)
+        } else {
+            SETTINGS_BLUE
+        }
+    } else if hovered {
+        SETUP_SIGNAL_DECK
+    } else {
+        Color32::TRANSPARENT
+    };
+    let stroke = if primary {
+        Stroke::NONE
+    } else {
+        Stroke::new(
+            1.0,
+            mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.18).gamma_multiply(amount),
+        )
+    };
+    ui.painter()
+        .rect_filled(rect, 7, fill.gamma_multiply(amount));
+    ui.painter()
+        .rect_stroke(rect, 7, stroke, StrokeKind::Inside);
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            9,
+            Stroke::new(2.0, accent),
+            StrokeKind::Outside,
+        );
+    }
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label.as_ref(),
+        FontId::proportional(13.5),
+        SETUP_SIGNAL_WHITE.gamma_multiply(amount),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label.as_ref())
+    });
+    if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    }
+}
+
+fn setup_media_header(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    label: &str,
+    _accent: Color32,
+    width: f32,
+) -> Rect {
+    let label = tr(ui, label);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 24.0), Sense::hover());
+    let icon_rect = Rect::from_center_size(
+        Pos2::new(rect.left() + 8.0, rect.center().y),
+        egui::vec2(14.0, 14.0),
+    );
+    ui_icon::paint(
+        ui.painter(),
+        icon_rect,
+        icon,
+        mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.62),
+    );
+    let galley = ui.painter().layout_no_wrap(
+        label.into_owned(),
+        FontId::proportional(12.0),
+        mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.78),
+    );
+    let text_pos = Pos2::new(
+        icon_rect.right() + 7.0,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    ui.painter().galley(
+        text_pos,
+        galley,
+        mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.78),
+    );
+    rect
+}
+
+fn setup_example_image(
+    ui: &mut egui::Ui,
+    texture: egui::TextureId,
+    width: f32,
+    icon: UiIcon,
+    label: &str,
+    accent: Color32,
+) -> Rect {
+    let width = width.min(ui.available_width()).max(1.0);
+    let height = width / WINDOW_ASPECT_RATIO;
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, height + 30.0),
+        egui::Layout::top_down(egui::Align::LEFT),
+        |ui| {
+            setup_media_header(ui, icon, label, accent, width);
+            ui.add_space(6.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+            ui.painter()
+                .rect_filled(rect, 10, Color32::from_rgb(7, 9, 14));
+            ui.painter().image(
+                texture,
+                rect.shrink(3.0),
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
             );
+            ui.painter().rect_stroke(
+                rect,
+                10,
+                Stroke::new(1.0, mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.16)),
+                StrokeKind::Inside,
+            );
+        },
+    )
+    .response
+    .rect
+}
+
+fn setup_rule_label(ui: &mut egui::Ui, text: &str, _color: Color32) {
+    ui.add(
+        egui::Label::new(
+            RichText::new(tr(ui, text))
+                .size(12.0)
+                .strong()
+                .line_height(Some(17.0))
+                .color(mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.78)),
+        )
+        .wrap(),
+    );
+}
+
+fn setup_control_label(ui: &mut egui::Ui, icon: UiIcon, label: &str, accent: Color32) {
+    ui.horizontal(|ui| {
+        let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), Sense::hover());
+        ui_icon::paint(ui.painter(), icon_rect, icon, accent);
+        ui.label(
+            RichText::new(tr(ui, label))
+                .size(12.0)
+                .strong()
+                .color(SETUP_SIGNAL_WHITE),
+        );
+    });
+}
+
+fn setup_status_pill(ui: &mut egui::Ui, icon: UiIcon, label: &str, accent: Color32) -> Rect {
+    let frame = egui::Frame::new()
+        .fill(mix_color(SETUP_SIGNAL_DECK, accent, 0.12))
+        .stroke(Stroke::new(1.0, accent.gamma_multiply(0.4)))
+        .corner_radius(20)
+        .inner_margin(egui::Margin::symmetric(11, 7))
+        .show(ui, |ui| {
+            icon_text(ui, icon, label, accent, false);
+        });
+    frame.response.rect
+}
+
+fn setup_message(ui: &mut egui::Ui, text: &str, color: Color32) {
+    let frame = egui::Frame::new()
+        .fill(mix_color(SETUP_SIGNAL_DECK, color, 0.08))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.3)))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(14, 11))
+        .show(ui, |ui| {
             ui.add(
                 egui::Label::new(
-                    RichText::new(tr(ui, detail.explanation))
-                        .size(10.75)
-                        .color(Color32::from_rgb(157, 165, 179)),
+                    RichText::new(tr(ui, text))
+                        .size(11.5)
+                        .line_height(Some(17.0))
+                        .color(mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.82)),
                 )
                 .wrap(),
             );
         });
-    });
-}
-
-fn tutorial_accent_palette(accent: tutorial::TutorialAccent) -> (Color32, Color32) {
-    match accent {
-        tutorial::TutorialAccent::Blue => (
-            Color32::from_rgb(33, 39, 50),
-            Color32::from_rgb(128, 169, 243),
+    let stripe = Rect::from_min_max(
+        Pos2::new(frame.response.rect.left(), frame.response.rect.top() + 7.0),
+        Pos2::new(
+            frame.response.rect.left() + 3.0,
+            frame.response.rect.bottom() - 7.0,
         ),
-        tutorial::TutorialAccent::Green => (Color32::from_rgb(34, 81, 58), ACTIVE_GREEN),
-        tutorial::TutorialAccent::Amber => (Color32::from_rgb(82, 67, 33), TRANSITION_AMBER),
-        tutorial::TutorialAccent::Red => (Color32::from_rgb(86, 38, 42), LIVE_RED),
-    }
+    );
+    ui.painter().rect_filled(stripe, 2, color);
 }
 
 fn controls_section_heading(ui: &mut egui::Ui, icon: UiIcon, title: &str) -> Rect {
@@ -6360,22 +7676,6 @@ mod tests {
     }
 
     #[test]
-    fn tutorial_color_explanations_use_the_dashboard_semantic_colors() {
-        assert_eq!(
-            tutorial_accent_palette(tutorial::TutorialAccent::Green),
-            (Color32::from_rgb(34, 81, 58), ACTIVE_GREEN)
-        );
-        assert_eq!(
-            tutorial_accent_palette(tutorial::TutorialAccent::Amber),
-            (Color32::from_rgb(82, 67, 33), TRANSITION_AMBER)
-        );
-        assert_eq!(
-            tutorial_accent_palette(tutorial::TutorialAccent::Red),
-            (Color32::from_rgb(86, 38, 42), LIVE_RED)
-        );
-    }
-
-    #[test]
     fn fps_overlays_use_runtime_metrics_for_all_live_pipelines() {
         assert!(PreviewKind::Webcam.shows_fps());
         assert!(PreviewKind::Screen.shows_fps());
@@ -6532,16 +7832,16 @@ mod tests {
                 })
             );
         }
-        for step in TutorialStep::ALL {
+        for step in SetupStep::ALL {
             let args = vec![
                 "StageSwap".to_owned(),
                 "--ui-preview".to_owned(),
-                format!("tutorial-{}", step.number()),
+                format!("setup-{}", step.number()),
             ];
             assert_eq!(
                 parse_ui_preview_request(&args).unwrap(),
                 Some(UiPreviewRequest {
-                    target: UiPreviewTarget::Tutorial(step),
+                    target: UiPreviewTarget::Setup(step),
                 })
             );
         }
@@ -6607,10 +7907,84 @@ mod tests {
             parse_ui_preview_request(&[
                 "StageSwap".to_owned(),
                 "--ui-preview".to_owned(),
-                "tutorial-8".to_owned(),
+                "setup-6".to_owned(),
             ])
             .is_err()
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn ui_screenshot_cli_requires_an_absolute_png_path() {
+        let path = "/tmp/stageswap-setup.png";
+        assert_eq!(
+            parse_ui_screenshot_path(&[
+                "StageSwap".to_owned(),
+                "--ui-screenshot".to_owned(),
+                path.to_owned(),
+            ])
+            .unwrap(),
+            Some(PathBuf::from(path))
+        );
+        assert!(
+            parse_ui_screenshot_path(&[
+                "StageSwap".to_owned(),
+                "--ui-screenshot".to_owned(),
+                "setup.png".to_owned(),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_ui_screenshot_path(&[
+                "StageSwap".to_owned(),
+                "--ui-screenshot".to_owned(),
+                "/tmp/setup.jpg".to_owned(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn setup_demo_preview_state_is_deterministic() {
+        assert_eq!(
+            parse_setup_demo_preview_state(&[
+                "StageSwap".to_owned(),
+                "--ui-setup-demo-state".to_owned(),
+                "matching".to_owned(),
+            ])
+            .unwrap(),
+            Some(SetupDemoPreviewState::Matching)
+        );
+        assert_eq!(
+            parse_setup_demo_preview_state(&[
+                "StageSwap".to_owned(),
+                "--ui-setup-demo-state".to_owned(),
+                "non-matching".to_owned(),
+            ])
+            .unwrap(),
+            Some(SetupDemoPreviewState::Changed)
+        );
+        assert!(
+            parse_setup_demo_preview_state(&[
+                "StageSwap".to_owned(),
+                "--ui-setup-demo-state".to_owned(),
+                "unknown".to_owned(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn setup_demo_loop_holds_and_crossfades_at_locked_boundaries() {
+        let alpha = |seconds: f32| setup_demo_changed_alpha(Duration::from_secs_f32(seconds));
+        assert_eq!(alpha(0.0), 0.0);
+        assert_eq!(alpha(3.5), 0.0);
+        assert!((alpha(3.7) - 0.5).abs() < 0.001);
+        assert!((alpha(3.9) - 1.0).abs() < 0.001);
+        assert!((alpha(7.4) - 1.0).abs() < 0.001);
+        assert!((alpha(7.6) - 0.5).abs() < 0.001);
+        assert_eq!(alpha(7.8), 0.0);
     }
 
     #[cfg(not(windows))]
@@ -6689,7 +8063,7 @@ mod tests {
     }
 
     #[test]
-    fn tutorial_settings_action_is_flush_with_the_right_control_edge() {
+    fn setup_guide_settings_action_is_flush_with_the_right_control_edge() {
         let context = egui::Context::default();
         let mut button_rect = Rect::NOTHING;
         let mut row_right = 0.0;
@@ -6703,17 +8077,17 @@ mod tests {
                 row_right = ui.available_rect_before_wrap().right();
                 button_rect = settings_single_button_row(
                     ui,
-                    "Dashboard tutorial",
-                    "Review the previews, status information, and everyday controls.",
-                    "Open tutorial",
-                    116.0,
+                    "Setup guide",
+                    "Learn how StageSwap works and choose your webcam, screen, and reference.",
+                    "Open setup guide",
+                    206.0,
                 )
                 .rect;
             },
         );
         assert!(
             (button_rect.right() - row_right).abs() <= 2.0,
-            "tutorial button should align with the full settings row: \
+            "setup guide button should align with the full settings row: \
              button={button_rect:?}, row_right={row_right}"
         );
     }
@@ -7492,56 +8866,122 @@ mod tests {
     }
 
     #[test]
-    fn manual_tutorial_navigation_returns_to_general_settings_and_persists_completion() {
+    fn manual_setup_guide_navigation_and_dismissal_return_to_general_settings() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path());
         let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store);
+        app.setup_animations_enabled = false;
         app.view = AppView::Settings;
         app.settings_tab = SettingsTab::General;
 
-        app.start_tutorial(TutorialReturnView::Settings);
-        assert_eq!(app.view, AppView::Dashboard);
+        app.start_setup_guide(SetupReturnView::Settings);
+        assert_eq!(app.view, AppView::SetupGuide);
         assert_eq!(
-            app.tutorial_session.map(|session| session.step),
-            Some(TutorialStep::Welcome)
+            app.setup_session.map(|session| session.step),
+            Some(SetupStep::HowItWorks)
         );
 
-        app.apply_tutorial_action(TutorialAction::Previous);
+        app.apply_setup_action(SetupAction::Previous);
         assert_eq!(
-            app.tutorial_session.map(|session| session.step),
-            Some(TutorialStep::Welcome)
+            app.setup_session.map(|session| session.step),
+            Some(SetupStep::HowItWorks)
         );
-        app.apply_tutorial_action(TutorialAction::Next);
+        app.apply_setup_action(SetupAction::Next);
         assert_eq!(
-            app.tutorial_session.map(|session| session.step),
-            Some(TutorialStep::Automatic)
+            app.setup_session.map(|session| session.step),
+            Some(SetupStep::Webcam)
         );
-        app.apply_tutorial_action(TutorialAction::Previous);
-        for _ in 0..6 {
-            app.apply_tutorial_action(TutorialAction::Next);
-        }
-        assert_eq!(
-            app.tutorial_session.map(|session| session.step),
-            Some(TutorialStep::Ready)
-        );
-        app.apply_tutorial_action(TutorialAction::Next);
+        app.apply_setup_action(SetupAction::Close);
 
-        assert!(app.tutorial_session.is_none());
+        assert!(app.setup_session.is_none());
         assert_eq!(app.view, AppView::Settings);
         assert_eq!(app.settings_tab, SettingsTab::General);
         assert!(
-            !TutorialStateStore::new(directory.path())
+            !SetupStateStore::new(directory.path())
                 .initialize(false)
-                .show_tutorial
+                .show_setup_guide
         );
     }
 
     #[test]
-    fn tutorial_completion_is_independent_from_user_and_admin_configuration() {
+    fn setup_guide_keyboard_navigation_matches_the_visible_actions() {
+        fn action_for(key: egui::Key, step: SetupStep) -> Option<SetupAction> {
+            let context = egui::Context::default();
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..egui::RawInput::default()
+            };
+            let mut action = None;
+            let _ = context.run_ui(input, |_ui| {
+                action = setup_guide_keyboard_action(&context, step);
+            });
+            action
+        }
+
+        assert_eq!(
+            action_for(egui::Key::Escape, SetupStep::Webcam),
+            Some(SetupAction::Close)
+        );
+        assert_eq!(
+            action_for(egui::Key::ArrowLeft, SetupStep::Webcam),
+            Some(SetupAction::Previous)
+        );
+        assert_eq!(
+            action_for(egui::Key::ArrowLeft, SetupStep::HowItWorks),
+            None
+        );
+        assert_eq!(
+            action_for(egui::Key::ArrowRight, SetupStep::Ready),
+            Some(SetupAction::Next)
+        );
+        assert_eq!(
+            action_for(egui::Key::Enter, SetupStep::Screen),
+            Some(SetupAction::Next)
+        );
+        assert_eq!(
+            action_for(egui::Key::Space, SetupStep::Reference),
+            Some(SetupAction::Next)
+        );
+    }
+
+    #[test]
+    fn finishing_setup_guide_starts_automatic_mode_and_opens_dashboard() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            AppConfig {
+                output_mode: OutputMode::ForceScreen,
+                start_automatically: false,
+                ..AppConfig::default()
+            },
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        );
+        app.start_setup_guide(SetupReturnView::Settings);
+        app.setup_session.as_mut().unwrap().go_to(SetupStep::Ready);
+        app.apply_setup_action(SetupAction::Next);
+
+        assert_eq!(app.view, AppView::Dashboard);
+        assert!(app.setup_session.is_none());
+        assert_eq!(app.config.output_mode, OutputMode::Automatic);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.snapshot().run_state != RunState::Running && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(app.snapshot().run_state, RunState::Running);
+    }
+
+    #[test]
+    fn setup_guide_dismissal_is_independent_from_user_and_admin_configuration() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path());
         let config = AppConfig {
-            selected_video_device_id: "tutorial-independent-camera".into(),
+            selected_video_device_id: "setup-independent-camera".into(),
             ..AppConfig::default()
         };
         save_config(&store, &config).unwrap();
@@ -7550,8 +8990,8 @@ mod tests {
         let admin_before = std::fs::read(admin_store.profile_path()).unwrap();
 
         let mut app = SwitcherApp::new(config.clone(), Vec::new(), store.clone());
-        app.start_tutorial(TutorialReturnView::Dashboard);
-        app.apply_tutorial_action(TutorialAction::Close);
+        app.start_setup_guide(SetupReturnView::Dashboard);
+        app.apply_setup_action(SetupAction::Close);
 
         assert_eq!(store.load().config, config);
         assert_eq!(
@@ -7560,8 +9000,9 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
-    fn tutorial_targets_and_callouts_stay_bounded_at_supported_dpi() {
+    fn all_setup_steps_render_full_window_in_every_locale_and_supported_dpi() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
             AppConfig {
@@ -7570,137 +9011,91 @@ mod tests {
             },
             Vec::new(),
             ConfigStore::new(directory.path()),
-        );
+        )
+        .with_ui_preview(UiPreviewRequest {
+            target: UiPreviewTarget::Setup(SetupStep::HowItWorks),
+        });
         let context = egui::Context::default();
         ui_icon::install_fonts(&context);
-        for viewport in [
-            egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
-            egui::vec2(1280.0, 720.0),
-        ] {
-            for dpi_scale in [1.0, 1.5] {
-                let mut input = egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
-                    ..egui::RawInput::default()
-                };
-                input
-                    .viewports
-                    .get_mut(&egui::ViewportId::ROOT)
-                    .unwrap()
-                    .native_pixels_per_point = Some(dpi_scale);
-                let _ = context.run_ui(input, |ui| {
-                    let content = ui.max_rect();
-                    let targets = app.dashboard(ui);
-                    for target in [
-                        targets.reference_preview,
-                        targets.preview_grid,
-                        targets.health,
-                        targets.controls,
-                        targets.prepare,
-                    ] {
-                        assert!(target.is_positive());
-                        assert!(content.contains_rect(target));
-                    }
-                    for step in TutorialStep::ALL {
-                        let target = match step {
-                            TutorialStep::Welcome | TutorialStep::Ready => None,
-                            TutorialStep::Automatic => Some(targets.reference_preview),
-                            TutorialStep::Previews => Some(targets.preview_grid),
-                            TutorialStep::Health => Some(targets.health),
-                            TutorialStep::Controls => Some(targets.controls),
-                            TutorialStep::Prepare => Some(targets.prepare),
+
+        for locale in Locale::ALL {
+            app.config.interface_language = locale.tag().into();
+            set_ui_locale(&context, locale);
+            for viewport in [
+                egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
+                egui::vec2(1280.0, 720.0),
+            ] {
+                for dpi_scale in [1.0, 1.5] {
+                    for step in SetupStep::ALL {
+                        app.view = AppView::SetupGuide;
+                        app.setup_session = Some(SetupSession::preview(step));
+                        let mut input = egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
+                            ..egui::RawInput::default()
                         };
-                        let width = tutorial_callout_width(content, target.is_some());
-                        let callout = tutorial::callout_rect(
-                            content,
-                            target,
-                            egui::vec2(width, step.callout_height()),
-                        );
+                        input
+                            .viewports
+                            .get_mut(&egui::ViewportId::ROOT)
+                            .unwrap()
+                            .native_pixels_per_point = Some(dpi_scale);
+                        let output = context.run_ui(input, |ui| {
+                            let content = app.root_ui(ui);
+                            assert!(ui.max_rect().contains_rect(content));
+                        });
                         assert!(
-                            content.contains_rect(callout),
-                            "{step:?} callout escaped {content:?}: {callout:?}"
+                            output.shapes.len() > 10,
+                            "{step:?} did not render at {locale:?}, {viewport:?}, {dpi_scale}"
                         );
+                        assert_eq!(app.view, AppView::SetupGuide);
                     }
-                });
+                }
             }
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
-    fn all_tutorial_previews_render_and_the_overlay_blocks_dashboard_settings() {
+    fn setup_reference_capture_tracks_success_and_timeout() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
-            AppConfig {
-                start_automatically: false,
-                ..AppConfig::default()
-            },
+            AppConfig::default(),
             Vec::new(),
             ConfigStore::new(directory.path()),
         );
-        let context = egui::Context::default();
-        ui_icon::install_fonts(&context);
-        let viewport = egui::vec2(1280.0, 720.0);
-        let screen_rect = Rect::from_min_size(Pos2::ZERO, viewport);
+        let snapshot = ui_preview_snapshot();
+        let sequence = snapshot.previews.reference.as_ref().unwrap().sequence;
 
-        for tutorial_viewport in [
-            egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
-            viewport,
-        ] {
-            let tutorial_screen = Rect::from_min_size(Pos2::ZERO, tutorial_viewport);
-            for step in TutorialStep::ALL {
-                app.tutorial_session = Some(TutorialSession::preview(step));
-                let output = context.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(tutorial_screen),
-                        ..egui::RawInput::default()
-                    },
-                    |ui| {
-                        app.root_ui(ui);
-                    },
-                );
-                assert!(
-                    output.shapes.len() > 80,
-                    "{step:?} did not render the dashboard, spotlight, and callout at \
-                     {tutorial_viewport:?}"
-                );
-            }
-        }
-
-        app.tutorial_session = Some(TutorialSession::preview(TutorialStep::Controls));
-        let _ = context.run_ui(
-            egui::RawInput {
-                screen_rect: Some(screen_rect),
-                ..egui::RawInput::default()
-            },
-            |ui| {
-                app.root_ui(ui);
-            },
-        );
-        let settings_position = Pos2::new(1120.0, 675.0);
-        let click_input = egui::RawInput {
-            time: Some(1.0),
-            screen_rect: Some(screen_rect),
-            events: vec![
-                egui::Event::PointerMoved(settings_position),
-                egui::Event::PointerButton {
-                    pos: settings_position,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-                egui::Event::PointerButton {
-                    pos: settings_position,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
-            ..egui::RawInput::default()
+        app.setup_reference_capture = SetupReferenceCaptureState::Pending {
+            started_at: Instant::now(),
+            previous_sequence: Some(sequence.wrapping_sub(1)),
         };
-        let _ = context.run_ui(click_input, |ui| {
-            app.root_ui(ui);
-        });
-        assert_eq!(app.view, AppView::Dashboard);
-        assert!(app.tutorial_session.is_some());
+        app.update_setup_reference_capture(&snapshot);
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::Success
+        ));
+
+        app.setup_reference_capture = SetupReferenceCaptureState::Pending {
+            started_at: Instant::now() - REFERENCE_CAPTURE_TIMEOUT,
+            previous_sequence: Some(sequence),
+        };
+        app.update_setup_reference_capture(&snapshot);
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::Failed
+        ));
+    }
+
+    #[test]
+    fn embedded_setup_images_have_the_approved_dimensions() {
+        for bytes in [
+            include_bytes!("../assets/setup-reference-example.png").as_slice(),
+            include_bytes!("../assets/setup-webcam-example.png").as_slice(),
+            include_bytes!("../assets/setup-screen-example.png").as_slice(),
+        ] {
+            let image = image::load_from_memory(bytes).unwrap();
+            assert_eq!((image.width(), image.height()), (1672, 941));
+        }
     }
 
     #[test]

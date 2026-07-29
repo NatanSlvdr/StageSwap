@@ -49,8 +49,8 @@ StageSwap requires a 64-bit Windows 11 computer, a camera, and the display you w
 <p align="center"><em>First launch lets you install StageSwap or run the downloaded copy once.</em></p>
 
 3. Approve the administrator prompt. This is required only to add or update the virtual camera; normal launches run without administrator access.
-4. On a fresh installation, follow the short dashboard tutorial. It explains Automatic mode, the four previews, component health, and the main controls. You can skip it or open it again later under **Settings → General → Open tutorial**.
-5. Choose the camera and display StageSwap should use.
+4. On a fresh installation, follow the five-step full-page setup guide. It explains how StageSwap switches sources, lets you choose and preview the webcam and screen, captures the reference, and reminds you to choose StageSwap in Zoom. You can choose **Set up later** or reopen it under **Settings → General → Open setup guide**.
+5. Confirm the webcam and screen StageSwap should use.
 
 <p align="center">
   <img src="docs/images/readme/dashboard.svg" width="760" alt="Placeholder for the StageSwap dashboard">
@@ -94,7 +94,7 @@ StageSwap can include or hide the mouse cursor, intelligently crop non-16:9 came
 - **Camera**, **Display**, and **Automatic** can be selected from the dashboard or tray menu.
 - **Capture reference** saves the current display view.
 - **Rescan screens** searches the connected displays for the saved reference. It does not restart screen capture.
-- **Open tutorial** under General Settings reviews the dashboard and everyday workflow at any time.
+- **Open setup guide** under General Settings repeats the interactive webcam, screen, reference, and Zoom setup at any time.
 - Closing the dashboard to the tray keeps capture and output running. Fully exiting stops capture; camera apps receive the StageSwap off screen.
 
 ## Privacy

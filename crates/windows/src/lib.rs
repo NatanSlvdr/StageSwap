@@ -33,6 +33,10 @@ mod system_locale;
 #[cfg(windows)]
 pub use system_locale::{preferred_interface_locale, user_interface_locale};
 #[cfg(windows)]
+mod system_animation;
+#[cfg(windows)]
+pub use system_animation::client_area_animations_enabled;
+#[cfg(windows)]
 mod dialog;
 #[cfg(windows)]
 mod shell_ui;
