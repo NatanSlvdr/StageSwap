@@ -1962,12 +1962,22 @@ impl SwitcherApp {
             footer_rect.center(),
             egui::vec2(content_width, footer_rect.height()),
         );
+        let next_width = if step.is_last() { 180.0 } else { 146.0 };
+        let back_width = 40.0;
+        let actions_width = back_width + 10.0 + next_width;
         let left_rect = Rect::from_center_size(
             Pos2::new(
-                footer_content_rect.left() + 70.0,
+                footer_content_rect.left() + actions_width / 2.0,
                 footer_content_rect.center().y,
             ),
-            egui::vec2(140.0, 40.0),
+            egui::vec2(actions_width, 40.0),
+        );
+        let actions_rect = Rect::from_center_size(
+            Pos2::new(
+                footer_content_rect.right() - actions_width / 2.0,
+                footer_content_rect.center().y,
+            ),
+            egui::vec2(actions_width, 40.0),
         );
         let mut later_ui = ui.new_child(
             egui::UiBuilder::new()
@@ -1982,9 +1992,8 @@ impl SwitcherApp {
             &mut later_ui,
             UiIcon::Clock,
             "Set up later",
-            egui::vec2(140.0, 40.0),
-            false,
-            false,
+            egui::vec2(actions_width, 40.0),
+            SetupFooterButtonStyle::Secondary,
             true,
         )
         .clicked()
@@ -1993,7 +2002,7 @@ impl SwitcherApp {
         }
 
         let progress_rect =
-            Rect::from_center_size(footer_content_rect.center(), egui::vec2(220.0, 48.0));
+            Rect::from_center_size(footer_content_rect.center(), egui::vec2(292.0, 52.0));
         let mut progress_ui = ui.new_child(
             egui::UiBuilder::new()
                 .id_salt("setup-guide-progress")
@@ -2001,17 +2010,10 @@ impl SwitcherApp {
                 .layout(egui::Layout::top_down(egui::Align::Center)),
         );
         progress_ui.set_opacity(entrance);
-        setup_footer_progress(&mut progress_ui, step);
+        if let Some(destination) = setup_footer_progress(&mut progress_ui, step) {
+            action = Some(SetupAction::GoTo(destination));
+        }
 
-        let next_width = if step.is_last() { 180.0 } else { 146.0 };
-        let actions_width = 112.0 + 10.0 + next_width;
-        let actions_rect = Rect::from_center_size(
-            Pos2::new(
-                footer_content_rect.right() - actions_width / 2.0,
-                footer_content_rect.center().y,
-            ),
-            egui::vec2(actions_width, 40.0),
-        );
         let mut actions_ui = ui.new_child(
             egui::UiBuilder::new()
                 .id_salt("setup-guide-actions")
@@ -2023,9 +2025,8 @@ impl SwitcherApp {
             &mut actions_ui,
             UiIcon::Back,
             "Back",
-            egui::vec2(112.0, 40.0),
-            false,
-            false,
+            egui::vec2(back_width, 40.0),
+            SetupFooterButtonStyle::IconOnly,
             step.previous().is_some(),
         )
         .clicked()
@@ -2048,8 +2049,9 @@ impl SwitcherApp {
             icon,
             label,
             egui::vec2(next_width, 40.0),
-            true,
-            !step.is_last(),
+            SetupFooterButtonStyle::Primary {
+                icon_after: !step.is_last(),
+            },
             true,
         )
         .clicked()
@@ -4946,22 +4948,38 @@ const fn setup_step_icon(step: SetupStep) -> UiIcon {
 }
 
 fn setup_step_title(ui: &mut egui::Ui, step: SetupStep) -> Rect {
-    ui.horizontal(|ui| {
-        let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::hover());
-        ui_icon::paint(
-            ui.painter(),
-            icon_rect.shrink(1.0),
-            setup_step_icon(step),
-            SETTINGS_BLUE,
-        );
-        ui.add_space(2.0);
-        ui.label(
-            RichText::new(tr(ui, step.title()))
-                .size(30.0)
-                .strong()
-                .color(SETUP_SIGNAL_WHITE),
-        );
-    })
+    let title = tr(ui, step.title()).into_owned();
+    let title_width = ui
+        .painter()
+        .layout_no_wrap(
+            title.clone(),
+            FontId::proportional(30.0),
+            SETUP_SIGNAL_WHITE,
+        )
+        .size()
+        .x;
+    let title_group_width = 28.0 + 8.0 + title_width;
+
+    ui.allocate_ui_with_layout(
+        egui::vec2(title_group_width, 36.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::hover());
+            ui_icon::paint(
+                ui.painter(),
+                icon_rect.shrink(1.0),
+                setup_step_icon(step),
+                SETTINGS_BLUE,
+            );
+            ui.label(
+                RichText::new(title)
+                    .size(30.0)
+                    .strong()
+                    .color(SETUP_SIGNAL_WHITE),
+            );
+        },
+    )
     .response
     .rect
 }
@@ -5000,7 +5018,7 @@ fn load_embedded_texture(
     )
 }
 
-fn setup_footer_progress(ui: &mut egui::Ui, step: SetupStep) {
+fn setup_footer_progress(ui: &mut egui::Ui, step: SetupStep) -> Option<SetupStep> {
     let background = ui.visuals().panel_fill;
     let step_text = format_text(
         ui_locale(ui),
@@ -5010,30 +5028,102 @@ fn setup_footer_progress(ui: &mut egui::Ui, step: SetupStep) {
             &SetupStep::ALL.len().to_string(),
         ],
     );
-    ui.label(RichText::new(step_text).size(11.5).color(mix_color(
-        background,
-        SETUP_SIGNAL_WHITE,
-        0.54,
-    )));
-    ui.add_space(4.0);
-    setup_progress_rail(ui, step, 180.0);
-}
+    ui.label(
+        RichText::new(step_text)
+            .size(12.0)
+            .strong()
+            .color(mix_color(background, SETUP_SIGNAL_WHITE, 0.78)),
+    );
+    ui.add_space(3.0);
 
-fn setup_progress_rail(ui: &mut egui::Ui, step: SetupStep, width: f32) -> Rect {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 8.0), Sense::hover());
-    let rail = Rect::from_center_size(rect.center(), egui::vec2(width, 2.0));
-    let background = ui.visuals().panel_fill;
+    let width = 268.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 24.0), Sense::hover());
+    let first_x = rect.left() + 12.0;
+    let last_x = rect.right() - 12.0;
+    let center_y = rect.center().y;
+    let step_gap = (last_x - first_x) / (SetupStep::ALL.len() - 1) as f32;
+    let rail = Rect::from_min_max(
+        Pos2::new(first_x, center_y - 1.0),
+        Pos2::new(last_x, center_y + 1.0),
+    );
     ui.painter()
         .rect_filled(rail, 1, mix_color(background, SETUP_SIGNAL_WHITE, 0.13));
-    let fill = Rect::from_min_size(
-        rail.min,
-        egui::vec2(
-            rail.width() * step.number() as f32 / SetupStep::ALL.len() as f32,
-            2.0,
-        ),
-    );
-    ui.painter().rect_filled(fill, 1, SETTINGS_BLUE);
-    rect
+    if step.number() > 1 {
+        let active_x = first_x + step_gap * (step.number() - 1) as f32;
+        ui.painter().rect_filled(
+            Rect::from_min_max(rail.min, Pos2::new(active_x, rail.bottom())),
+            1,
+            SETTINGS_BLUE,
+        );
+    }
+
+    let mut destination = None;
+    for (index, candidate) in SetupStep::ALL.into_iter().enumerate() {
+        let number = index + 1;
+        let center = Pos2::new(first_x + step_gap * index as f32, center_y);
+        let hit_rect = Rect::from_center_size(center, egui::vec2(34.0, 24.0));
+        let response = ui.interact(
+            hit_rect,
+            egui::Id::new(("setup-progress-step", number)),
+            Sense::click(),
+        );
+        let is_current = candidate == step;
+        let is_complete = number < step.number();
+        let hovered = response.hovered() && !is_current;
+        let node_fill = if is_current {
+            SETTINGS_BLUE
+        } else if is_complete {
+            mix_color(SETTINGS_BLUE, SETUP_SIGNAL_WHITE, 0.08)
+        } else if hovered {
+            mix_color(background, SETUP_SIGNAL_WHITE, 0.2)
+        } else {
+            mix_color(background, SETUP_SIGNAL_WHITE, 0.12)
+        };
+        let radius = if is_current { 9.0 } else { 6.0 };
+
+        if is_current {
+            ui.painter()
+                .circle_filled(center, 12.0, SETTINGS_BLUE.gamma_multiply(0.18));
+        }
+        ui.painter().circle_filled(center, radius, node_fill);
+        if !is_complete {
+            ui.painter().text(
+                center,
+                Align2::CENTER_CENTER,
+                number.to_string(),
+                FontId::proportional(if is_current { 10.5 } else { 9.0 }),
+                if is_current {
+                    SETUP_SIGNAL_WHITE
+                } else {
+                    mix_color(background, SETUP_SIGNAL_WHITE, 0.62)
+                },
+            );
+        } else {
+            ui_icon::paint(
+                ui.painter(),
+                Rect::from_center_size(center, egui::vec2(8.0, 8.0)),
+                UiIcon::Check,
+                SETUP_SIGNAL_WHITE,
+            );
+        }
+
+        let label = tr(ui, candidate.title());
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                ui.is_enabled(),
+                is_current,
+                label.as_ref(),
+            )
+        });
+        let response = response
+            .on_hover_text(label)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked() && !is_current {
+            destination = Some(candidate);
+        }
+    }
+    destination
 }
 
 fn setup_rounded_image(
@@ -5485,15 +5575,24 @@ fn setup_static_signal_row(
     paint_setup_active_outline(ui, output, 1.0);
 }
 
+#[derive(Clone, Copy)]
+enum SetupFooterButtonStyle {
+    Secondary,
+    IconOnly,
+    Primary { icon_after: bool },
+}
+
 fn setup_footer_button(
     ui: &mut egui::Ui,
     icon: UiIcon,
     label: &str,
     size: Vec2,
-    primary: bool,
-    icon_after: bool,
+    style: SetupFooterButtonStyle,
     enabled: bool,
 ) -> egui::Response {
+    let primary = matches!(style, SetupFooterButtonStyle::Primary { .. });
+    let icon_after = matches!(style, SetupFooterButtonStyle::Primary { icon_after: true });
+    let icon_only = matches!(style, SetupFooterButtonStyle::IconOnly);
     let label = tr(ui, label);
     let sense = if enabled {
         Sense::click()
@@ -5539,27 +5638,44 @@ fn setup_footer_button(
         .painter()
         .layout_no_wrap(label.to_string(), FontId::proportional(13.5), color);
     let icon_size = 15.0;
-    let gap = 7.0;
-    let content_width = icon_size + gap + galley.size().x;
-    let content_left = rect.center().x - content_width / 2.0;
-    let (icon_left, text_left) = if icon_after {
-        (content_left + galley.size().x + gap, content_left)
+    let icon_rect = if icon_only {
+        Rect::from_center_size(rect.center(), egui::vec2(icon_size, icon_size))
     } else {
-        (content_left, content_left + icon_size + gap)
+        let gap = 7.0;
+        let content_width = icon_size + gap + galley.size().x;
+        let content_left = rect.center().x - content_width / 2.0;
+        let icon_left = if icon_after {
+            content_left + galley.size().x + gap
+        } else {
+            content_left
+        };
+        Rect::from_min_size(
+            Pos2::new(icon_left, rect.center().y - icon_size / 2.0),
+            egui::vec2(icon_size, icon_size),
+        )
     };
-    let icon_rect = Rect::from_min_size(
-        Pos2::new(icon_left, rect.center().y - icon_size / 2.0),
-        egui::vec2(icon_size, icon_size),
-    );
     ui_icon::paint(ui.painter(), icon_rect, icon, color);
-    ui.painter().galley(
-        Pos2::new(text_left, rect.center().y - galley.size().y / 2.0),
-        galley,
-        color,
-    );
+    if !icon_only {
+        let gap = 7.0;
+        let text_left = if icon_after {
+            icon_rect.left() - gap - galley.size().x
+        } else {
+            icon_rect.right() + gap
+        };
+        ui.painter().galley(
+            Pos2::new(text_left, rect.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+    }
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label.as_ref())
     });
+    let response = if icon_only {
+        response.on_hover_text(label)
+    } else {
+        response
+    };
     if enabled {
         response.on_hover_cursor(egui::CursorIcon::PointingHand)
     } else {
