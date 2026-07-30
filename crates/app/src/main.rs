@@ -82,7 +82,7 @@ fn main() -> eframe::Result {
         Err(error) => {
             eprintln!("StageSwap UI preview: {error}");
             eprintln!(
-                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|setup-1..5|dialog-*] [--ui-language en-US|fr-FR|es]"
+                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|setup-1..5|dialog-*] [--ui-language en-US|fr-FR|es] [--ui-setup-reference-state captured|empty|missing-screen]"
             );
             return Ok(());
         }
@@ -97,6 +97,14 @@ fn main() -> eframe::Result {
     };
     #[cfg(not(windows))]
     let setup_demo_preview_state = match parse_setup_demo_preview_state(&ui_arguments) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("StageSwap UI preview: {error}");
+            return Ok(());
+        }
+    };
+    #[cfg(not(windows))]
+    let setup_reference_preview_state = match parse_setup_reference_preview_state(&ui_arguments) {
         Ok(state) => state,
         Err(error) => {
             eprintln!("StageSwap UI preview: {error}");
@@ -294,6 +302,8 @@ fn main() -> eframe::Result {
             };
             #[cfg(not(windows))]
             let app = app.with_setup_demo_preview_state(setup_demo_preview_state);
+            #[cfg(not(windows))]
+            let app = app.with_setup_reference_preview_state(setup_reference_preview_state);
             #[cfg(windows)]
             let app =
                 app.with_launch_context(launch_context.mode, instance_receiver, instance_readiness);
@@ -460,6 +470,14 @@ enum SetupDemoPreviewState {
 }
 
 #[cfg(not(windows))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SetupReferencePreviewState {
+    Captured,
+    Empty,
+    MissingScreen,
+}
+
+#[cfg(not(windows))]
 impl SettingsTab {
     #[cfg(test)]
     const fn preview_name(self) -> &'static str {
@@ -558,6 +576,26 @@ fn parse_setup_demo_preview_state(
         Some("matching") => Ok(Some(SetupDemoPreviewState::Matching)),
         Some("changed" | "non-matching") => Ok(Some(SetupDemoPreviewState::Changed)),
         _ => Err("--ui-setup-demo-state requires either matching or non-matching".to_string()),
+    }
+}
+
+#[cfg(not(windows))]
+fn parse_setup_reference_preview_state(
+    args: &[String],
+) -> Result<Option<SetupReferencePreviewState>, String> {
+    let Some(index) = args
+        .iter()
+        .position(|argument| argument == "--ui-setup-reference-state")
+    else {
+        return Ok(None);
+    };
+    match args.get(index + 1).map(String::as_str) {
+        Some("captured") => Ok(Some(SetupReferencePreviewState::Captured)),
+        Some("empty") => Ok(Some(SetupReferencePreviewState::Empty)),
+        Some("missing-screen") => Ok(Some(SetupReferencePreviewState::MissingScreen)),
+        _ => Err(
+            "--ui-setup-reference-state requires captured, empty, or missing-screen".to_string(),
+        ),
     }
 }
 
@@ -997,6 +1035,7 @@ struct PreviewGridLayout {
 enum SetupAction {
     Previous,
     Next,
+    GoTo(SetupStep),
     Close,
 }
 
@@ -1306,6 +1345,35 @@ impl SwitcherApp {
         self
     }
 
+    #[cfg(not(windows))]
+    fn with_setup_reference_preview_state(
+        mut self,
+        state: Option<SetupReferencePreviewState>,
+    ) -> Self {
+        let Some(state) = state else {
+            return self;
+        };
+        let Some(preview) = self.ui_preview.as_mut() else {
+            return self;
+        };
+        match state {
+            SetupReferencePreviewState::Captured => {}
+            SetupReferencePreviewState::Empty => {
+                preview.snapshot.previews.reference = None;
+            }
+            SetupReferencePreviewState::MissingScreen => {
+                preview.snapshot.previews.reference = None;
+                preview.snapshot.previews.screen = None;
+                preview.snapshot.selected_monitor = None;
+                preview.snapshot.monitors = Vec::new().into();
+                preview.snapshot.screen_state = DeviceState::Unavailable;
+                preview.snapshot.availability.screen_ready = false;
+                self.config.selected_monitor_label.clear();
+            }
+        }
+        self
+    }
+
     fn setup_demo_preview_alpha(&self) -> Option<f32> {
         #[cfg(not(windows))]
         {
@@ -1442,6 +1510,10 @@ impl SwitcherApp {
                 } else {
                     self.finish_setup_guide();
                 }
+            }
+            SetupAction::GoTo(step) => {
+                session.transition_to(step, self.setup_animations_enabled);
+                self.setup_session = Some(session);
             }
             SetupAction::Close => self.dismiss_setup_guide(session.return_view),
         }
@@ -1830,16 +1902,7 @@ impl SwitcherApp {
                 body_ui.set_max_height((body_rect.height() - 24.0).max(200.0));
                 body_ui.set_opacity(entrance * page_opacity);
                 body_ui.with_layout(egui::Layout::top_down(egui::Align::Center), |body_ui| {
-                    body_ui.add(
-                        egui::Label::new(
-                            RichText::new(tr(body_ui, step.title()))
-                                .size(30.0)
-                                .strong()
-                                .color(SETUP_SIGNAL_WHITE),
-                        )
-                        .wrap()
-                        .halign(egui::Align::Center),
-                    );
+                    setup_step_title(body_ui, step);
                     body_ui.add_space(5.0);
                     body_ui.allocate_ui_with_layout(
                         egui::vec2(content_width.min(700.0), 1.0),
@@ -1878,7 +1941,11 @@ impl SwitcherApp {
                             .max_height(max_scroll_height)
                             .show(body_ui, |ui| {
                                 ui.set_width(content_width);
-                                self.setup_step_content(ui, step, &snapshot, &textures);
+                                if let Some(content_action) =
+                                    self.setup_step_content(ui, step, &snapshot, &textures)
+                                {
+                                    action = Some(content_action);
+                                }
                             });
                     }
                 });
@@ -1913,11 +1980,12 @@ impl SwitcherApp {
         later_ui.set_opacity(entrance);
         if setup_footer_button(
             &mut later_ui,
+            UiIcon::Clock,
             "Set up later",
             egui::vec2(140.0, 40.0),
             false,
+            false,
             true,
-            SETTINGS_BLUE,
         )
         .clicked()
         {
@@ -1953,11 +2021,12 @@ impl SwitcherApp {
         actions_ui.set_opacity(entrance);
         if setup_footer_button(
             &mut actions_ui,
+            UiIcon::Back,
             "Back",
             egui::vec2(112.0, 40.0),
             false,
+            false,
             step.previous().is_some(),
-            SETTINGS_BLUE,
         )
         .clicked()
         {
@@ -1969,13 +2038,19 @@ impl SwitcherApp {
         } else {
             "Continue"
         };
+        let icon = if step.is_last() {
+            UiIcon::Play
+        } else {
+            UiIcon::ArrowRight
+        };
         if setup_footer_button(
             &mut actions_ui,
+            icon,
             label,
             egui::vec2(next_width, 40.0),
             true,
+            !step.is_last(),
             true,
-            SETTINGS_BLUE,
         )
         .clicked()
         {
@@ -1993,19 +2068,31 @@ impl SwitcherApp {
         step: SetupStep,
         snapshot: &AppSnapshot,
         textures: &SetupExampleTextures,
-    ) {
+    ) -> Option<SetupAction> {
         match step {
-            SetupStep::HowItWorks => self.setup_how_it_works(
-                ui,
-                textures,
-                None,
-                self.setup_animations_enabled,
-                ui.visuals().panel_fill,
-            ),
-            SetupStep::Webcam => self.setup_webcam_step(ui, snapshot),
-            SetupStep::Screen => self.setup_screen_step(ui, snapshot),
+            SetupStep::HowItWorks => {
+                self.setup_how_it_works(
+                    ui,
+                    textures,
+                    None,
+                    self.setup_animations_enabled,
+                    ui.visuals().panel_fill,
+                );
+                None
+            }
+            SetupStep::Webcam => {
+                self.setup_webcam_step(ui, snapshot);
+                None
+            }
+            SetupStep::Screen => {
+                self.setup_screen_step(ui, snapshot);
+                None
+            }
             SetupStep::Reference => self.setup_reference_step(ui, snapshot, textures),
-            SetupStep::Ready => self.setup_ready_step(ui, snapshot),
+            SetupStep::Ready => {
+                self.setup_ready_step(ui, snapshot);
+                None
+            }
         }
     }
 
@@ -2197,137 +2284,233 @@ impl SwitcherApp {
         ui: &mut egui::Ui,
         snapshot: &AppSnapshot,
         textures: &SetupExampleTextures,
-    ) {
-        let gap = 18.0;
-        let wide = ui.available_width() >= 590.0;
-        let panel_width = if wide {
-            ((ui.available_width() - gap) / 2.0).clamp(220.0, 360.0)
+    ) -> Option<SetupAction> {
+        let compact = ui.ctx().content_rect().height() <= 620.0;
+        let group_width = ui.available_width().min(920.0);
+        let card_gap = if compact { 8.0 } else { 10.0 };
+        let card_width = (group_width - card_gap * 2.0) / 3.0;
+        let card_height = if compact { 280.0 } else { 308.0 };
+        let preview_width = (card_width - 24.0).min(if compact { 174.0 } else { 204.0 });
+        let preview_size = egui::vec2(preview_width, preview_width / WINDOW_ASPECT_RATIO);
+        let screen_selected = snapshot.selected_monitor.is_some();
+        let reference_available = snapshot.previews.reference.is_some();
+        let pending = matches!(
+            self.setup_reference_capture,
+            SetupReferenceCaptureState::Pending { .. }
+        );
+        let capture_failed = matches!(
+            self.setup_reference_capture,
+            SetupReferenceCaptureState::Failed
+        );
+        let capture_succeeded = matches!(
+            self.setup_reference_capture,
+            SetupReferenceCaptureState::Success
+        ) || reference_available;
+        let mut go_to_screen = false;
+
+        let capture_tone = if capture_failed {
+            Some(LIVE_RED)
+        } else if pending {
+            Some(SETTINGS_BLUE)
+        } else if capture_succeeded {
+            Some(ACTIVE_GREEN)
         } else {
-            ui.available_width().min(480.0)
+            None
         };
-        if wide {
-            let group_width = panel_width * 2.0 + gap;
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                ui.horizontal_top(|ui| {
-                    ui.add_space(((ui.available_width() - group_width - gap) / 2.0).max(0.0));
-                    setup_example_image(
-                        ui,
-                        textures.reference.id(),
-                        panel_width,
-                        UiIcon::Image,
-                        "Reference",
-                        SETTINGS_BLUE,
-                    );
-                    self.setup_live_preview_panel(
-                        ui,
-                        SettingsPreview {
-                            kind: PreviewKind::Reference,
-                            frame: snapshot.previews.reference.as_ref(),
-                            label: "Reference preview",
-                            empty_message: "No reference captured yet.",
-                            actual_output: snapshot.actual_output,
-                        },
-                        panel_width,
-                        SETTINGS_BLUE,
-                    );
-                });
-            });
-        } else {
-            setup_example_image(
-                ui,
-                textures.reference.id(),
-                panel_width,
-                UiIcon::Image,
-                "Reference",
-                SETTINGS_BLUE,
-            );
-            ui.add_space(16.0);
-            self.setup_live_preview_panel(
-                ui,
-                SettingsPreview {
-                    kind: PreviewKind::Reference,
-                    frame: snapshot.previews.reference.as_ref(),
-                    label: "Reference preview",
-                    empty_message: "No reference captured yet.",
-                    actual_output: snapshot.actual_output,
-                },
-                panel_width,
-                SETTINGS_BLUE,
-            );
-        }
-        ui.add_space(18.0);
-        let details_width = ui.available_width().min(738.0);
+
         ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), 1.0),
+            egui::vec2(ui.available_width(), card_height),
             egui::Layout::top_down(egui::Align::Center),
             |ui| {
-                ui.set_width(details_width);
-                setup_rule_label(
-                    ui,
-                    "When the screen matches the reference, StageSwap shows your webcam. When the screen changes, StageSwap shows the screen.",
-                    SETTINGS_BLUE,
-                );
-                ui.add_space(16.0);
-                ui.horizontal(|ui| {
-            let available = snapshot.previews.reference.is_some();
-            let label = if available {
-                "Capture again"
-            } else {
-                "Capture reference"
-            };
-            let pending = matches!(
-                self.setup_reference_capture,
-                SetupReferenceCaptureState::Pending { .. }
-            );
-            if ui
-                .add_enabled_ui(!pending, |ui| {
-                    accent_icon_button(
+                ui.set_width(group_width);
+                ui.spacing_mut().item_spacing.x = card_gap;
+                ui.horizontal_top(|ui| {
+                    setup_reference_card(
                         ui,
-                        UiIcon::Capture,
-                        label,
-                        egui::vec2(178.0, 40.0),
-                        SETTINGS_BLUE,
-                    )
-                })
-                .inner
-                .clicked()
-            {
-                if snapshot.previews.screen.is_none() {
-                    self.setup_reference_capture = SetupReferenceCaptureState::Failed;
-                } else {
-                    self.setup_reference_capture = SetupReferenceCaptureState::Pending {
-                        started_at: Instant::now(),
-                        previous_sequence: snapshot
-                            .previews
-                            .reference
-                            .as_ref()
-                            .map(|frame| frame.sequence),
-                    };
-                    self.send(Command::CaptureReference);
-                }
-            }
-            if matches!(
-                self.setup_reference_capture,
-                SetupReferenceCaptureState::Success
-            ) || available
-            {
-                setup_status_pill(ui, UiIcon::Check, "Reference captured", ACTIVE_GREEN);
-            }
+                        card_width,
+                        card_height,
+                        None,
+                        compact,
+                        |ui| {
+                            setup_centered_reference_preview(ui, preview_size, |ui| {
+                                setup_reference_example_thumbnail(
+                                    ui,
+                                    textures.reference.id(),
+                                    preview_size,
+                                );
+                            });
+                            ui.add_space(if compact { 7.0 } else { 10.0 });
+                            setup_numbered_card_heading(ui, 1, "Example reference");
+                            ui.add_space(4.0);
+                            setup_card_help(
+                                ui,
+                                "This is only an example. Your own holding or idle picture can look different.",
+                            );
+                        },
+                    );
+
+                    setup_reference_card(
+                        ui,
+                        card_width,
+                        card_height,
+                        (!screen_selected).then_some(TRANSITION_AMBER),
+                        compact,
+                        |ui| {
+                            setup_centered_reference_preview(ui, preview_size, |ui| {
+                                setup_reference_live_thumbnail(
+                                    self,
+                                    ui,
+                                    PreviewKind::Screen,
+                                    snapshot.previews.screen.as_ref(),
+                                    preview_size,
+                                    snapshot.actual_output,
+                                    "No screen frame",
+                                );
+                            });
+                            ui.add_space(if compact { 7.0 } else { 10.0 });
+                            setup_numbered_card_heading(ui, 2, "Prepare your screen");
+                            ui.add_space(4.0);
+                            setup_card_help(
+                                ui,
+                                "Show your normal holding or idle picture on the selected screen.",
+                            );
+                            ui.with_layout(
+                                egui::Layout::bottom_up(egui::Align::LEFT),
+                                |ui| {
+                                    let button_width = ui.available_width();
+                                    let response = if screen_selected {
+                                        icon_button(
+                                            ui,
+                                            UiIcon::Monitor,
+                                            "Change screen",
+                                            egui::vec2(button_width, 32.0),
+                                            false,
+                                            false,
+                                        )
+                                    } else {
+                                        accent_icon_button(
+                                            ui,
+                                            UiIcon::Monitor,
+                                            "Choose a screen",
+                                            egui::vec2(button_width, 32.0),
+                                            SETTINGS_BLUE,
+                                        )
+                                    };
+                                    if response.clicked() {
+                                        go_to_screen = true;
+                                    }
+                                    if !screen_selected {
+                                        ui.add_space(4.0);
+                                        setup_compact_state(
+                                            ui,
+                                            UiIcon::Unavailable,
+                                            "Choose a screen before capturing a reference.",
+                                            TRANSITION_AMBER,
+                                        );
+                                    }
+                                }
+                            );
+                        },
+                    );
+
+                    setup_reference_card(
+                        ui,
+                        card_width,
+                        card_height,
+                        capture_tone,
+                        compact,
+                        |ui| {
+                            setup_centered_reference_preview(ui, preview_size, |ui| {
+                                setup_reference_live_thumbnail(
+                                    self,
+                                    ui,
+                                    PreviewKind::Reference,
+                                    snapshot.previews.reference.as_ref(),
+                                    preview_size,
+                                    snapshot.actual_output,
+                                    "No reference captured yet.",
+                                );
+                            });
+                            ui.add_space(if compact { 7.0 } else { 10.0 });
+                    ui.set_width(ui.available_width());
+                    setup_numbered_card_heading(ui, 3, "Capture the reference");
+                    ui.add_space(4.0);
+                            setup_card_help(
+                                ui,
+                                "Check the live preview, then capture it as the reference.",
+                            );
+                            ui.with_layout(
+                                egui::Layout::bottom_up(egui::Align::LEFT),
+                                |ui| {
+                                    let button_width = ui.available_width();
+                                    if pending {
+                                        setup_pending_capture_button(
+                                            ui,
+                                            "Capturing…",
+                                            egui::vec2(button_width, 32.0),
+                                        );
+                                    } else {
+                                        let label = if reference_available {
+                                            "Capture again"
+                                        } else {
+                                            "Capture reference"
+                                        };
+                                        let response = ui
+                                            .add_enabled_ui(screen_selected, |ui| {
+                                                accent_icon_button(
+                                                    ui,
+                                                    UiIcon::Capture,
+                                                    label,
+                                                    egui::vec2(button_width, 32.0),
+                                                    SETTINGS_BLUE,
+                                                )
+                                            })
+                                            .inner;
+                                        if response.clicked() {
+                                            if snapshot.previews.screen.is_none() {
+                                                self.setup_reference_capture =
+                                                    SetupReferenceCaptureState::Failed;
+                                            } else {
+                                                self.setup_reference_capture =
+                                                    SetupReferenceCaptureState::Pending {
+                                                        started_at: Instant::now(),
+                                                        previous_sequence: snapshot
+                                                            .previews
+                                                            .reference
+                                                            .as_ref()
+                                                            .map(|frame| frame.sequence),
+                                                    };
+                                                self.send(Command::CaptureReference);
+                                            }
+                                        }
+                                    }
+                                    if !pending && (capture_failed || capture_succeeded) {
+                                        ui.add_space(4.0);
+                                        if capture_failed {
+                                            setup_compact_state(
+                                                ui,
+                                                UiIcon::Error,
+                                                "StageSwap couldn’t capture the screen. Check the screen preview and try again.",
+                                                LIVE_RED,
+                                            );
+                                        } else {
+                                            setup_compact_state(
+                                                ui,
+                                                UiIcon::CheckCircle,
+                                                "Reference captured",
+                                                ACTIVE_GREEN,
+                                            );
+                                        }
+                                    }
+                                }
+                            );
+                        },
+                    );
                 });
             },
         );
-        if matches!(
-            self.setup_reference_capture,
-            SetupReferenceCaptureState::Failed
-        ) {
-            ui.add_space(7.0);
-            setup_message(
-                ui,
-                "StageSwap couldn’t capture the screen. Check the screen preview and try again.",
-                LIVE_RED,
-            );
-        }
+
+        go_to_screen.then_some(SetupAction::GoTo(SetupStep::Screen))
     }
 
     fn setup_ready_step(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
@@ -2421,35 +2604,6 @@ impl SwitcherApp {
                 TRANSITION_AMBER,
             );
         }
-    }
-
-    fn setup_live_preview_panel(
-        &mut self,
-        ui: &mut egui::Ui,
-        preview: SettingsPreview<'_>,
-        width: f32,
-        accent: Color32,
-    ) -> Rect {
-        let width = width.min(ui.available_width()).max(1.0);
-        let height = (width / WINDOW_ASPECT_RATIO).min(SETTINGS_PREVIEW_HEIGHT + 86.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(width, height + 30.0),
-            egui::Layout::top_down(egui::Align::LEFT),
-            |ui| {
-                setup_media_header(ui, preview.kind.icon(), preview.label, accent, width);
-                ui.add_space(6.0);
-                self.preview(
-                    ui,
-                    preview.kind,
-                    preview.frame,
-                    [width, height],
-                    preview.actual_output,
-                    PreviewOptions::settings(preview.empty_message),
-                );
-            },
-        )
-        .response
-        .rect
     }
 
     fn update_setup_reference_capture(&mut self, snapshot: &AppSnapshot) {
@@ -4781,6 +4935,37 @@ fn setup_demo_changed_alpha(elapsed: Duration) -> f32 {
     .clamp(0.0, 1.0)
 }
 
+const fn setup_step_icon(step: SetupStep) -> UiIcon {
+    match step {
+        SetupStep::HowItWorks => UiIcon::Route,
+        SetupStep::Webcam => UiIcon::Camera,
+        SetupStep::Screen => UiIcon::Monitor,
+        SetupStep::Reference => UiIcon::Capture,
+        SetupStep::Ready => UiIcon::CheckCircle,
+    }
+}
+
+fn setup_step_title(ui: &mut egui::Ui, step: SetupStep) -> Rect {
+    ui.horizontal(|ui| {
+        let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::hover());
+        ui_icon::paint(
+            ui.painter(),
+            icon_rect.shrink(1.0),
+            setup_step_icon(step),
+            SETTINGS_BLUE,
+        );
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new(tr(ui, step.title()))
+                .size(30.0)
+                .strong()
+                .color(SETUP_SIGNAL_WHITE),
+        );
+    })
+    .response
+    .rect
+}
+
 fn setup_guide_keyboard_action(context: &egui::Context, step: SetupStep) -> Option<SetupAction> {
     context.input_mut(|input| {
         if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
@@ -5302,11 +5487,12 @@ fn setup_static_signal_row(
 
 fn setup_footer_button(
     ui: &mut egui::Ui,
+    icon: UiIcon,
     label: &str,
     size: Vec2,
     primary: bool,
+    icon_after: bool,
     enabled: bool,
-    accent: Color32,
 ) -> egui::Response {
     let label = tr(ui, label);
     let sense = if enabled {
@@ -5344,16 +5530,32 @@ fn setup_footer_button(
         ui.painter().rect_stroke(
             rect.expand(2.0),
             9,
-            Stroke::new(2.0, accent),
+            Stroke::new(2.0, SETTINGS_BLUE),
             StrokeKind::Outside,
         );
     }
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        label.as_ref(),
-        FontId::proportional(13.5),
-        SETUP_SIGNAL_WHITE.gamma_multiply(amount),
+    let color = SETUP_SIGNAL_WHITE.gamma_multiply(amount);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), FontId::proportional(13.5), color);
+    let icon_size = 15.0;
+    let gap = 7.0;
+    let content_width = icon_size + gap + galley.size().x;
+    let content_left = rect.center().x - content_width / 2.0;
+    let (icon_left, text_left) = if icon_after {
+        (content_left + galley.size().x + gap, content_left)
+    } else {
+        (content_left, content_left + icon_size + gap)
+    };
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(icon_left, rect.center().y - icon_size / 2.0),
+        egui::vec2(icon_size, icon_size),
+    );
+    ui_icon::paint(ui.painter(), icon_rect, icon, color);
+    ui.painter().galley(
+        Pos2::new(text_left, rect.center().y - galley.size().y / 2.0),
+        galley,
+        color,
     );
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label.as_ref())
@@ -5365,90 +5567,198 @@ fn setup_footer_button(
     }
 }
 
-fn setup_media_header(
+fn setup_reference_card<R>(
     ui: &mut egui::Ui,
-    icon: UiIcon,
-    label: &str,
-    _accent: Color32,
     width: f32,
-) -> Rect {
-    let label = tr(ui, label);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 24.0), Sense::hover());
-    let icon_rect = Rect::from_center_size(
-        Pos2::new(rect.left() + 8.0, rect.center().y),
-        egui::vec2(14.0, 14.0),
+    height: f32,
+    tone: Option<Color32>,
+    compact: bool,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+    let background = ui.visuals().panel_fill;
+    let margin_x = if compact { 9.0 } else { 11.0 };
+    let margin_y = if compact { 7.0 } else { 9.0 };
+    let stroke = tone.map_or_else(
+        || Stroke::new(1.0, mix_color(background, SETUP_SIGNAL_WHITE, 0.12)),
+        |tone| Stroke::new(1.0, tone.gamma_multiply(0.48)),
     );
-    ui_icon::paint(
-        ui.painter(),
-        icon_rect,
-        icon,
-        mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.62),
+    ui.painter()
+        .rect_filled(rect, 9, mix_color(background, SETUP_SIGNAL_WHITE, 0.035));
+    ui.painter()
+        .rect_stroke(rect, 9, stroke, StrokeKind::Inside);
+    let content_rect = Rect::from_min_max(
+        rect.min + egui::vec2(margin_x, margin_y),
+        rect.max - egui::vec2(margin_x, margin_y),
     );
-    let galley = ui.painter().layout_no_wrap(
-        label.into_owned(),
-        FontId::proportional(12.0),
-        mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.78),
+    let mut card_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("setup-reference-card", rect.min.x.to_bits()))
+            .max_rect(content_rect)
+            .layout(egui::Layout::top_down(egui::Align::LEFT)),
     );
-    let text_pos = Pos2::new(
-        icon_rect.right() + 7.0,
-        rect.center().y - galley.size().y / 2.0,
-    );
-    ui.painter().galley(
-        text_pos,
-        galley,
-        mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.78),
-    );
-    rect
+    card_ui.set_clip_rect(rect.shrink(1.0));
+    add_contents(&mut card_ui)
 }
 
-fn setup_example_image(
+fn setup_centered_reference_preview<R>(
     ui: &mut egui::Ui,
-    texture: egui::TextureId,
-    width: f32,
-    icon: UiIcon,
-    label: &str,
-    accent: Color32,
-) -> Rect {
-    let width = width.min(ui.available_width()).max(1.0);
-    let height = width / WINDOW_ASPECT_RATIO;
+    size: Vec2,
+    add_preview: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
     ui.allocate_ui_with_layout(
-        egui::vec2(width, height + 30.0),
-        egui::Layout::top_down(egui::Align::LEFT),
-        |ui| {
-            setup_media_header(ui, icon, label, accent, width);
-            ui.add_space(6.0);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
-            ui.painter()
-                .rect_filled(rect, 10, Color32::from_rgb(7, 9, 14));
-            ui.painter().image(
-                texture,
-                rect.shrink(3.0),
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
-            ui.painter().rect_stroke(
-                rect,
-                10,
-                Stroke::new(1.0, mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.16)),
-                StrokeKind::Inside,
-            );
-        },
+        egui::vec2(ui.available_width(), size.y),
+        egui::Layout::top_down(egui::Align::Center),
+        |ui| add_preview(ui),
     )
-    .response
-    .rect
+    .inner
 }
 
-fn setup_rule_label(ui: &mut egui::Ui, text: &str, _color: Color32) {
+fn setup_reference_example_thumbnail(ui: &mut egui::Ui, texture: egui::TextureId, size: Vec2) {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 7, Color32::from_rgb(7, 9, 14));
+    ui.painter().image(
+        texture,
+        rect.shrink(2.0),
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    ui.painter().rect_stroke(
+        rect,
+        7,
+        Stroke::new(1.0, mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.16)),
+        StrokeKind::Inside,
+    );
+}
+
+fn setup_reference_live_thumbnail(
+    app: &mut SwitcherApp,
+    ui: &mut egui::Ui,
+    kind: PreviewKind,
+    frame: Option<&Arc<Frame>>,
+    size: Vec2,
+    actual_output: Source,
+    empty_message: &'static str,
+) {
+    app.preview(
+        ui,
+        kind,
+        frame,
+        [size.x, size.y],
+        actual_output,
+        PreviewOptions::settings(empty_message),
+    );
+}
+
+fn setup_numbered_card_heading(ui: &mut egui::Ui, number: usize, title: &str) {
+    ui.horizontal(|ui| {
+        let (number_rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
+        ui.painter().circle_filled(
+            number_rect.center(),
+            11.0,
+            SETTINGS_BLUE.gamma_multiply(0.22),
+        );
+        ui.painter().text(
+            number_rect.center(),
+            Align2::CENTER_CENTER,
+            number,
+            FontId::proportional(11.5),
+            mix_color(ui.visuals().panel_fill, SETUP_SIGNAL_WHITE, 0.92),
+        );
+        ui.add_space(1.0);
+        ui.label(
+            RichText::new(tr(ui, title))
+                .size(13.5)
+                .strong()
+                .color(SETUP_SIGNAL_WHITE),
+        );
+    });
+}
+
+fn setup_card_help(ui: &mut egui::Ui, text: &str) {
     ui.add(
         egui::Label::new(
             RichText::new(tr(ui, text))
-                .size(12.0)
-                .strong()
-                .line_height(Some(17.0))
-                .color(mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.78)),
+                .size(11.5)
+                .line_height(Some(16.0))
+                .color(mix_color(ui.visuals().panel_fill, SETUP_SIGNAL_WHITE, 0.66)),
         )
         .wrap(),
     );
+}
+
+fn setup_compact_state(ui: &mut egui::Ui, icon: UiIcon, text: &str, color: Color32) {
+    let available = ui.available_width().max(1.0);
+    let text = tr(ui, text);
+    let text_width = (available - 21.0).max(1.0);
+    let galley = ui.painter().layout(
+        text.into_owned(),
+        FontId::proportional(11.0),
+        color,
+        text_width,
+    );
+    let height = (galley.size().y + 6.0).max(30.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(available, height), Sense::hover());
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.center().y - 7.0),
+        egui::vec2(14.0, 14.0),
+    );
+    ui_icon::paint(ui.painter(), icon_rect, icon, color);
+    let text_rect = Rect::from_min_max(Pos2::new(icon_rect.right() + 7.0, rect.top()), rect.max);
+    ui.painter().galley(
+        Pos2::new(
+            text_rect.left(),
+            text_rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
+    );
+}
+
+fn setup_pending_capture_button(ui: &mut egui::Ui, label: &str, size: Vec2) -> Rect {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let fill = mix_color(SETUP_SIGNAL_DECK, SETTINGS_BLUE, 0.2);
+    ui.painter().rect_filled(rect, 6, fill);
+    ui.painter().rect_stroke(
+        rect,
+        6,
+        Stroke::new(1.0, SETTINGS_BLUE.gamma_multiply(0.58)),
+        StrokeKind::Inside,
+    );
+    let label = tr(ui, label);
+    let color = SETUP_SIGNAL_WHITE.gamma_multiply(0.78);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.into_owned(), FontId::proportional(12.0), color);
+    let spinner_size = 14.0;
+    let gap = 7.0;
+    let content_width = spinner_size + gap + galley.size().x;
+    let spinner_rect = Rect::from_min_size(
+        Pos2::new(
+            rect.center().x - content_width / 2.0,
+            rect.center().y - spinner_size / 2.0,
+        ),
+        egui::vec2(spinner_size, spinner_size),
+    );
+    let mut spinner_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("setup-reference-capture-spinner")
+            .max_rect(spinner_rect)
+            .layout(egui::Layout::centered_and_justified(
+                egui::Direction::TopDown,
+            )),
+    );
+    spinner_ui.add(egui::Spinner::new().size(spinner_size).color(SETTINGS_BLUE));
+    ui.painter().galley(
+        Pos2::new(
+            spinner_rect.right() + gap,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
+    );
+    rect
 }
 
 fn setup_control_label(ui: &mut egui::Ui, icon: UiIcon, label: &str, accent: Color32) {
@@ -5462,18 +5772,6 @@ fn setup_control_label(ui: &mut egui::Ui, icon: UiIcon, label: &str, accent: Col
                 .color(SETUP_SIGNAL_WHITE),
         );
     });
-}
-
-fn setup_status_pill(ui: &mut egui::Ui, icon: UiIcon, label: &str, accent: Color32) -> Rect {
-    let frame = egui::Frame::new()
-        .fill(mix_color(SETUP_SIGNAL_DECK, accent, 0.12))
-        .stroke(Stroke::new(1.0, accent.gamma_multiply(0.4)))
-        .corner_radius(20)
-        .inner_margin(egui::Margin::symmetric(11, 7))
-        .show(ui, |ui| {
-            icon_text(ui, icon, label, accent, false);
-        });
-    frame.response.rect
 }
 
 fn setup_message(ui: &mut egui::Ui, text: &str, color: Color32) {
@@ -7382,6 +7680,20 @@ mod tests {
     }
 
     #[test]
+    fn setup_steps_use_distinct_semantic_title_icons() {
+        assert_eq!(
+            SetupStep::ALL.map(setup_step_icon),
+            [
+                UiIcon::Route,
+                UiIcon::Camera,
+                UiIcon::Monitor,
+                UiIcon::Capture,
+                UiIcon::CheckCircle,
+            ]
+        );
+    }
+
+    #[test]
     fn user_data_directory_is_stageswap() {
         assert_eq!(
             local_data_directory()
@@ -7911,6 +8223,29 @@ mod tests {
             ])
             .is_err()
         );
+        for (value, expected) in [
+            ("captured", SetupReferencePreviewState::Captured),
+            ("empty", SetupReferencePreviewState::Empty),
+            ("missing-screen", SetupReferencePreviewState::MissingScreen),
+        ] {
+            assert_eq!(
+                parse_setup_reference_preview_state(&[
+                    "StageSwap".to_owned(),
+                    "--ui-setup-reference-state".to_owned(),
+                    value.to_owned(),
+                ])
+                .unwrap(),
+                Some(expected)
+            );
+        }
+        assert!(
+            parse_setup_reference_preview_state(&[
+                "StageSwap".to_owned(),
+                "--ui-setup-reference-state".to_owned(),
+                "unknown".to_owned(),
+            ])
+            .is_err()
+        );
     }
 
     #[cfg(not(windows))]
@@ -8003,6 +8338,38 @@ mod tests {
         assert!(snapshot.previews.final_output.is_some());
         assert_eq!(snapshot.video_devices.len(), 2);
         assert_eq!(snapshot.monitors.len(), 2);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn setup_reference_preview_states_cover_captured_empty_and_missing_screen() {
+        let build = |state| {
+            let directory = tempfile::tempdir().unwrap();
+            SwitcherApp::new(
+                ui_preview_config(),
+                Vec::new(),
+                ConfigStore::new(directory.path()),
+            )
+            .with_ui_preview(UiPreviewRequest {
+                target: UiPreviewTarget::Setup(SetupStep::Reference),
+            })
+            .with_setup_reference_preview_state(Some(state))
+        };
+
+        let captured = build(SetupReferencePreviewState::Captured);
+        assert!(captured.snapshot().previews.reference.is_some());
+
+        let empty = build(SetupReferencePreviewState::Empty);
+        assert!(empty.snapshot().previews.screen.is_some());
+        assert!(empty.snapshot().previews.reference.is_none());
+
+        let missing = build(SetupReferencePreviewState::MissingScreen);
+        let snapshot = missing.snapshot();
+        assert!(snapshot.previews.screen.is_none());
+        assert!(snapshot.previews.reference.is_none());
+        assert!(snapshot.selected_monitor.is_none());
+        assert!(snapshot.monitors.is_empty());
+        assert_eq!(snapshot.screen_state, DeviceState::Unavailable);
     }
 
     #[cfg(not(windows))]
@@ -8891,6 +9258,16 @@ mod tests {
             app.setup_session.map(|session| session.step),
             Some(SetupStep::Webcam)
         );
+        app.apply_setup_action(SetupAction::GoTo(SetupStep::Reference));
+        assert_eq!(
+            app.setup_session.map(|session| session.step),
+            Some(SetupStep::Reference)
+        );
+        app.apply_setup_action(SetupAction::GoTo(SetupStep::Screen));
+        assert_eq!(
+            app.setup_session.map(|session| session.step),
+            Some(SetupStep::Screen)
+        );
         app.apply_setup_action(SetupAction::Close);
 
         assert!(app.setup_session.is_none());
@@ -9050,6 +9427,59 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn setup_reference_capture_states_render_at_the_minimum_window_size() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            ui_preview_config(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        )
+        .with_ui_preview(UiPreviewRequest {
+            target: UiPreviewTarget::Setup(SetupStep::Reference),
+        });
+        let context = egui::Context::default();
+        ui_icon::install_fonts(&context);
+        set_ui_locale(&context, Locale::English);
+        let captured_frame = app.snapshot().previews.reference.clone();
+
+        for (state, reference) in [
+            (SetupReferenceCaptureState::Idle, None),
+            (
+                SetupReferenceCaptureState::Pending {
+                    started_at: Instant::now(),
+                    previous_sequence: None,
+                },
+                None,
+            ),
+            (SetupReferenceCaptureState::Success, captured_frame.clone()),
+            (SetupReferenceCaptureState::Failed, None),
+        ] {
+            app.setup_reference_capture = state;
+            app.ui_preview.as_mut().unwrap().snapshot.previews.reference = reference;
+            app.setup_session = Some(SetupSession::preview(SetupStep::Reference));
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        Pos2::ZERO,
+                        egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
+                    )),
+                    ..egui::RawInput::default()
+                },
+                |ui| {
+                    let content = app.root_ui(ui);
+                    assert!(ui.max_rect().contains_rect(content));
+                },
+            );
+            assert!(output.shapes.len() > 20);
+            assert_eq!(
+                app.setup_session.map(|session| session.step),
+                Some(SetupStep::Reference)
+            );
         }
     }
 

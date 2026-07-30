@@ -8,11 +8,14 @@ use image::{Rgba, RgbaImage, imageops::FilterType};
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum UiIcon {
     Back,
+    ArrowRight,
     Bell,
     Broadcast,
     Camera,
     Capture,
     Check,
+    CheckCircle,
+    Clock,
     Error,
     Folder,
     Image,
@@ -39,13 +42,16 @@ pub(crate) enum UiIcon {
 
 impl UiIcon {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 28] = [
+    pub(crate) const ALL: [Self; 31] = [
         Self::Back,
+        Self::ArrowRight,
         Self::Bell,
         Self::Broadcast,
         Self::Camera,
         Self::Capture,
         Self::Check,
+        Self::CheckCircle,
+        Self::Clock,
         Self::Error,
         Self::Folder,
         Self::Image,
@@ -73,11 +79,14 @@ impl UiIcon {
     pub(crate) const fn glyph(self) -> &'static str {
         match self {
             Self::Back => regular::ARROW_LEFT,
+            Self::ArrowRight => regular::ARROW_RIGHT,
             Self::Bell => regular::BELL,
             Self::Broadcast => regular::BROADCAST,
             Self::Camera => regular::WEBCAM,
             Self::Capture => regular::SCAN,
             Self::Check => regular::CHECK,
+            Self::CheckCircle => regular::CHECK_CIRCLE,
+            Self::Clock => regular::CLOCK,
             Self::Error => regular::X_CIRCLE,
             Self::Folder => regular::FOLDER_OPEN,
             Self::Image => regular::IMAGE,

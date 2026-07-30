@@ -72,9 +72,7 @@ impl SetupStep {
             Self::HowItWorks => "StageSwap compares your screen with a reference image.",
             Self::Webcam => "Choose the webcam you want people in Zoom to see.",
             Self::Screen => "Choose the screen you want StageSwap to show in Zoom.",
-            Self::Reference => {
-                "Show your normal holding or idle picture on the screen you selected. Then capture it as the reference."
-            }
+            Self::Reference => "Create the reference StageSwap uses to recognize your idle screen.",
             Self::Ready => "Before your Zoom call, choose StageSwap as your camera in Zoom.",
         }
     }
