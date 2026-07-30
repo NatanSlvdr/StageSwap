@@ -59,21 +59,25 @@ impl SetupStep {
 
     pub(crate) const fn title(self) -> &'static str {
         match self {
-            Self::HowItWorks => "How StageSwap works",
+            Self::HowItWorks => "JW Library to Zoom",
             Self::Webcam => "Choose your webcam",
-            Self::Screen => "Choose your screen",
-            Self::Reference => "Set up automatic switching",
-            Self::Ready => "You’re ready",
+            Self::Screen => "Choose the JW Library display",
+            Self::Reference => "Capture the idle display",
+            Self::Ready => "Ready for the meeting",
         }
     }
 
     pub(crate) const fn explanation(self) -> &'static str {
         match self {
-            Self::HowItWorks => "StageSwap compares your screen with a reference image.",
-            Self::Webcam => "Choose the webcam you want people in Zoom to see.",
-            Self::Screen => "Choose the screen you want StageSwap to show in Zoom.",
-            Self::Reference => "Create the reference StageSwap uses to recognize your idle screen.",
-            Self::Ready => "Before your Zoom call, choose StageSwap as your camera in Zoom.",
+            Self::HowItWorks => {
+                "Automatic Zoom retransmission for congregation meetings using JW Library."
+            }
+            Self::Webcam => "Choose the webcam Zoom should show while JW Library is idle.",
+            Self::Screen => "Choose the second display JW Library uses for presentations.",
+            Self::Reference => "Capture the normal JW Library idle display as the reference.",
+            Self::Ready => {
+                "Open the JW Library presentation, choose StageSwap in Zoom, and start automation."
+            }
         }
     }
 }

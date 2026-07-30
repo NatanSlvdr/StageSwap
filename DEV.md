@@ -4,7 +4,7 @@ This document contains the engineering, build, test, packaging, and release info
 
 ## Product contract
 
-StageSwap is a local-only, native Windows 11 x64 virtual camera for hybrid meetings.
+StageSwap is a local-only, native Windows 11 x64 virtual camera for automatic Zoom retransmission during congregation meetings using JW Library. It watches the second display visually and does not integrate with or control JW Library.
 
 - Frames are immutable CPU BGRA and the internal/output contract is fixed at 1280×720, 30 fps.
 - Webcam input uses Media Foundation with native-aspect-aware centered 16:9 cropping. Native 16:9 and unknown-aspect signals pass through unchanged. Screen input uses Windows Graphics Capture. Cropping feeds both preview and output.
@@ -70,7 +70,7 @@ cargo run -p stageswap --bin StageSwap -- --ui-preview matching
 
 Available page names are `general`, `webcam`, `screen`, `matching`, and `diagnostics`. You can still navigate between every page after launch.
 
-Tutorial previews are `tutorial-1` through `tutorial-7`. Each name opens one deterministic walkthrough step over the dashboard.
+Setup-guide previews are `setup-1` through `setup-5`. Each name opens one deterministic full-window step for the JW Library-to-Zoom workflow.
 
 Dialog previews are `dialog-exit`, `dialog-clear-logs`, `dialog-admin`, `dialog-replace-baseline`, `dialog-load-admin-config`, and `dialog-remove-baseline`.
 

@@ -1844,6 +1844,38 @@ mod tests {
     }
 
     #[test]
+    fn illustrated_jw_library_idle_display_is_not_treated_as_failed_capture() {
+        let mut image =
+            image::load_from_memory(include_bytes!("../assets/setup-reference-example.png"))
+                .unwrap()
+                .to_rgba8();
+        for pixel in image.pixels_mut() {
+            pixel.0.swap(0, 2);
+        }
+        let size = Size::new(image.width(), image.height());
+        let frame = Frame::new(
+            image.into_raw().into(),
+            size,
+            size.width * 4,
+            1,
+            0,
+            Instant::now(),
+        )
+        .unwrap();
+        let mut recovery = ScreenBlackRecovery::default();
+
+        assert!(!is_nearly_black(&frame));
+        assert_eq!(
+            recovery.observe(Some(&frame)),
+            BlackScreenObservation::Clear
+        );
+        assert_eq!(
+            recovery.observe(Some(&frame)),
+            BlackScreenObservation::Clear
+        );
+    }
+
+    #[test]
     fn black_screen_recovery_requires_two_consecutive_scheduled_checks() {
         let black = frame_with_bright_pixels(0);
         let visible = frame_with_bright_pixels(200);

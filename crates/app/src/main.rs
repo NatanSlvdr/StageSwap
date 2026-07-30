@@ -435,11 +435,13 @@ impl SettingsTab {
             locale,
             match self {
                 Self::General => {
-                    "Choose how the app launches, stays available, and reports problems."
+                    "Configure StageSwap for automatic Zoom retransmission using JW Library."
                 }
-                Self::Webcam => "Select, verify, and recover the camera used for webcam output.",
-                Self::Screen => "Choose the display Automatic mode watches and how it is captured.",
-                Self::Matching => "Teach Automatic mode when the screen should show the webcam.",
+                Self::Webcam => "Choose the webcam Zoom shows while JW Library is idle.",
+                Self::Screen => "Choose the second display JW Library uses for presentations.",
+                Self::Matching => {
+                    "Capture and tune the JW Library idle reference used for automatic switching."
+                }
                 Self::Diagnostics => {
                     "Inspect component health, technical details, logs, and recovery tools."
                 }
@@ -831,9 +833,9 @@ impl PreviewKind {
     const fn label(self) -> &'static str {
         match self {
             Self::Webcam => "WEBCAM",
-            Self::Screen => "SCREEN",
-            Self::Reference => "REFERENCE",
-            Self::Output => "OUTPUT",
+            Self::Screen => "SECONDARY SCREEN",
+            Self::Reference => "IDLE REFERENCE",
+            Self::Output => "ZOOM OUTPUT",
         }
     }
 
@@ -862,9 +864,9 @@ impl PreviewKind {
     const fn empty_message(self) -> &'static str {
         match self {
             Self::Webcam => "No webcam frame",
-            Self::Screen => "No screen frame",
-            Self::Reference => "No reference image",
-            Self::Output => "No output frame",
+            Self::Screen => "No secondary screen frame",
+            Self::Reference => "No idle reference",
+            Self::Output => "No Zoom output frame",
         }
     }
 }
@@ -2205,9 +2207,9 @@ impl SwitcherApp {
             .iter()
             .any(|monitor| monitor.label == self.config.selected_monitor_label);
         let empty_message = if !self.config.selected_monitor_label.is_empty() && !saved_available {
-            "This screen is unavailable. Choose another one or rescan."
+            "This JW Library display is unavailable. Choose another one or rescan."
         } else {
-            "No screen found. Connect a screen, then rescan."
+            "No display found. Connect the JW Library presentation display, then rescan."
         };
         let selected_name = snapshot
             .selected_monitor
@@ -2224,14 +2226,14 @@ impl SwitcherApp {
                     SettingsPreview {
                         kind: PreviewKind::Screen,
                         frame: snapshot.previews.screen.as_ref(),
-                        label: "Screen preview",
+                        label: "JW Library display preview",
                         empty_message,
                         actual_output: snapshot.actual_output,
                     },
                     SETUP_HARDWARE_PREVIEW_WIDTH,
                 );
                 ui.add_space(13.0);
-                setup_control_label(ui, UiIcon::Monitor, "Screen", SETTINGS_BLUE);
+                setup_control_label(ui, UiIcon::Monitor, "JW Library display", SETTINGS_BLUE);
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let geometry = selector_utility_geometry(
@@ -2342,11 +2344,11 @@ impl SwitcherApp {
                                 );
                             });
                             ui.add_space(if compact { 7.0 } else { 10.0 });
-                            setup_numbered_card_heading(ui, 1, "Example reference");
+                            setup_numbered_card_heading(ui, 1, "Example idle display");
                             ui.add_space(4.0);
                             setup_card_help(
                                 ui,
-                                "This is only an example. Your own holding or idle picture can look different.",
+                                "The real idle display has centered text and a gray square in the corner; this example uses unbranded shapes.",
                             );
                         },
                     );
@@ -2366,15 +2368,15 @@ impl SwitcherApp {
                                     snapshot.previews.screen.as_ref(),
                                     preview_size,
                                     snapshot.actual_output,
-                                    "No screen frame",
+                                    "No JW Library display frame",
                                 );
                             });
                             ui.add_space(if compact { 7.0 } else { 10.0 });
-                            setup_numbered_card_heading(ui, 2, "Prepare your screen");
+                            setup_numbered_card_heading(ui, 2, "Prepare JW Library");
                             ui.add_space(4.0);
                             setup_card_help(
                                 ui,
-                                "Show your normal holding or idle picture on the selected screen.",
+                                "Show the normal JW Library idle display with centered text and a gray square in the corner.",
                             );
                             ui.with_layout(
                                 egui::Layout::bottom_up(egui::Align::LEFT),
@@ -2384,7 +2386,7 @@ impl SwitcherApp {
                                         icon_button(
                                             ui,
                                             UiIcon::Monitor,
-                                            "Change screen",
+                                            "Change display",
                                             egui::vec2(button_width, 32.0),
                                             false,
                                             false,
@@ -2393,7 +2395,7 @@ impl SwitcherApp {
                                         accent_icon_button(
                                             ui,
                                             UiIcon::Monitor,
-                                            "Choose a screen",
+                                            "Choose a display",
                                             egui::vec2(button_width, 32.0),
                                             SETTINGS_BLUE,
                                         )
@@ -2406,7 +2408,7 @@ impl SwitcherApp {
                                         setup_compact_state(
                                             ui,
                                             UiIcon::Unavailable,
-                                            "Choose a screen before capturing a reference.",
+                                            "Choose the JW Library display before capturing a reference.",
                                             TRANSITION_AMBER,
                                         );
                                     }
@@ -2434,12 +2436,12 @@ impl SwitcherApp {
                                 );
                             });
                             ui.add_space(if compact { 7.0 } else { 10.0 });
-                    ui.set_width(ui.available_width());
-                    setup_numbered_card_heading(ui, 3, "Capture the reference");
-                    ui.add_space(4.0);
+                            ui.set_width(ui.available_width());
+                            setup_numbered_card_heading(ui, 3, "Capture the idle display");
+                            ui.add_space(4.0);
                             setup_card_help(
                                 ui,
-                                "Check the live preview, then capture it as the reference.",
+                                "Check the live preview, then capture the idle display as the reference.",
                             );
                             ui.with_layout(
                                 egui::Layout::bottom_up(egui::Align::LEFT),
@@ -2455,7 +2457,7 @@ impl SwitcherApp {
                                         let label = if reference_available {
                                             "Capture again"
                                         } else {
-                                            "Capture reference"
+                                            "Capture idle display"
                                         };
                                         let response = ui
                                             .add_enabled_ui(screen_selected, |ui| {
@@ -2499,7 +2501,7 @@ impl SwitcherApp {
                                             setup_compact_state(
                                                 ui,
                                                 UiIcon::CheckCircle,
-                                                "Reference captured",
+                                                "Idle reference captured",
                                                 ACTIVE_GREEN,
                                             );
                                         }
@@ -2533,14 +2535,14 @@ impl SwitcherApp {
             (
                 UiIcon::Monitor,
                 screen_ready,
-                "Screen ready",
-                "Screen not selected",
+                "JW Library display ready",
+                "JW Library display not selected",
             ),
             (
                 UiIcon::Image,
                 reference_ready,
-                "Reference ready",
-                "Reference not captured",
+                "Idle reference ready",
+                "Idle reference not captured",
             ),
         ];
         let width = ui.available_width().min(620.0);
@@ -2848,11 +2850,16 @@ impl SwitcherApp {
         let health_heading = controls_section_heading(ui, UiIcon::Check, "Components health");
         let health_indicators = [
             health_state_group(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state),
-            health_state_group(ui, UiIcon::Monitor, "Screen", snapshot.screen_state),
+            health_state_group(
+                ui,
+                UiIcon::Monitor,
+                "Secondary screen",
+                snapshot.screen_state,
+            ),
             health_state_group(
                 ui,
                 UiIcon::Broadcast,
-                "Output",
+                "Zoom output",
                 snapshot.virtual_camera_state,
             ),
             detection_state_group(ui, snapshot.detection),
@@ -2936,7 +2943,7 @@ impl SwitcherApp {
                         snapshot.mode == OutputMode::ForceScreen,
                         false,
                     )
-                    .on_hover_text(localized_text(self.locale(), "Screen"))
+                    .on_hover_text(localized_text(self.locale(), "Secondary screen"))
                     .clicked()
                     {
                         self.set_mode(OutputMode::ForceScreen);
@@ -2953,7 +2960,7 @@ impl SwitcherApp {
         let capture = icon_button(
             ui,
             UiIcon::Capture,
-            "Capture reference",
+            "Capture idle display",
             egui::vec2(ui.available_width(), 32.0),
             false,
             false,
@@ -3307,14 +3314,19 @@ impl SwitcherApp {
     fn general_settings(&mut self, ui: &mut egui::Ui) {
         settings_info_card(
             ui,
-            "StageSwap watches your selected screen. While it matches your saved reference image, your video calls see your webcam. When the screen changes, StageSwap automatically switches to the screen. When the reference returns, it switches back to your webcam.",
+            "StageSwap automates Zoom retransmission using JW Library. While the selected JW Library display matches the saved idle reference, Zoom sees the webcam. When JW Library shows media, Zoom sees the display. When JW Library returns to idle, Zoom returns to the webcam.",
+        );
+        ui.add_space(10.0);
+        settings_info_card(
+            ui,
+            "StageSwap is an independent, unofficial project and is not affiliated with or endorsed by the publisher of JW Library. The name JW Library is used only to describe compatibility.",
         );
         ui.add_space(12.0);
         let mut open_setup_guide = false;
         if settings_single_button_row(
             ui,
             "Setup guide",
-            "Learn how StageSwap works and choose your webcam, screen, and reference.",
+            "Set up the webcam, JW Library display, idle reference, and Zoom output.",
             "Open setup guide",
             206.0,
         )
@@ -3542,14 +3554,15 @@ impl SwitcherApp {
             ui,
             SettingsSection {
                 icon: UiIcon::Monitor,
-                title: "Screen capture",
-                description: "This display is used by Display mode and watched by Automatic mode for reference changes.",
+                title: "JW Library display",
+                description: "This is the second display JW Library uses for presentations. Automatic mode watches it for media changes.",
             },
             SettingsPreview {
                 kind: PreviewKind::Screen,
                 frame: snapshot.previews.screen.as_ref(),
-                label: "Live screen",
-                empty_message: "No screen frame — choose a display or use Recovery in Diagnostics.",
+                label: "Live JW Library display",
+                empty_message:
+                    "No JW Library display frame — choose a display or use Recovery in Diagnostics.",
                 actual_output: snapshot.actual_output,
             },
             |app, ui| {
@@ -3617,15 +3630,15 @@ impl SwitcherApp {
             ui,
             SettingsSection {
                 icon: UiIcon::Target,
-                title: "Reference matching",
-                description:
-                    "Reference matches: Camera. Reference changes: Display. Without a usable reference, Automatic mode stays on Camera.",
+                title: "Idle reference",
+                description: "JW Library is idle: Webcam. JW Library shows media: Display. Without a usable idle reference, Automatic mode stays on Webcam.",
             },
             SettingsPreview {
                 kind: PreviewKind::Reference,
                 frame: snapshot.previews.reference.as_ref(),
-                label: "Reference image",
-                empty_message: "No reference image — capture the current screen or import one.",
+                label: "Idle reference",
+                empty_message:
+                    "No idle reference — show the JW Library idle display and capture it.",
                 actual_output: snapshot.actual_output,
             },
             |app, ui| {
@@ -3655,7 +3668,7 @@ impl SwitcherApp {
                     if icon_button(
                         ui,
                         UiIcon::Capture,
-                        "Capture screen",
+                        "Capture idle display",
                         egui::vec2(geometry.action_width, 32.0),
                         false,
                         false,
@@ -5247,7 +5260,7 @@ fn setup_animated_switching_demo(
     paint_setup_centered_label(
         ui,
         screen_caption,
-        "Screen",
+        "JW Library",
         mix_color(background, SETUP_SIGNAL_WHITE, 0.62),
     );
     paint_setup_centered_label(
@@ -5412,8 +5425,8 @@ fn setup_demo_rule(ui: &mut egui::Ui, width: f32, blend: f32, background: Color3
     paint_setup_crossfade_text(
         ui,
         rect,
-        "Screen matches the reference → Zoom sees your webcam",
-        "Screen does not match the reference → Zoom sees your screen",
+        "JW Library is idle → Zoom sees the webcam",
+        "JW Library shows media → Zoom sees the display",
         blend,
         FontId::proportional(13.0),
         mix_color(background, SETUP_SIGNAL_WHITE, 0.82),
@@ -5459,7 +5472,7 @@ fn setup_static_switching_demo(
         ui,
         width,
         row_height,
-        "Screen matches the reference → Zoom sees your webcam",
+        "JW Library is idle → Zoom sees the webcam",
         textures,
         false,
         background,
@@ -5469,7 +5482,7 @@ fn setup_static_switching_demo(
         ui,
         width,
         row_height,
-        "Screen does not match the reference → Zoom sees your screen",
+        "JW Library shows media → Zoom sees the display",
         textures,
         true,
         background,
@@ -5529,7 +5542,7 @@ fn setup_static_signal_row(
     paint_setup_group_card(ui, screen_card, f32::from(changed), background);
     paint_setup_group_card(ui, webcam_card, f32::from(!changed), background);
     let label_color = mix_color(background, SETUP_SIGNAL_WHITE, 0.62);
-    for (rect, label) in [(screen, "Screen"), (webcam, "Webcam"), (output, "Zoom")] {
+    for (rect, label) in [(screen, "JW Library"), (webcam, "Webcam"), (output, "Zoom")] {
         paint_setup_centered_label(
             ui,
             Rect::from_min_size(
@@ -6232,7 +6245,7 @@ const fn component_health_guidance(
         virtual_camera,
         DeviceState::Failed | DeviceState::Unavailable
     ) {
-        "The virtual camera needs attention. Restart it here, then reselect StageSwap in the meeting app if necessary."
+        "The virtual camera needs attention. Restart it here, then reselect StageSwap in Zoom if necessary."
     } else if matches!(webcam, DeviceState::Initializing)
         || matches!(screen, DeviceState::Initializing)
         || matches!(virtual_camera, DeviceState::Initializing)
@@ -6777,7 +6790,7 @@ fn screen_mix_group(ui: &mut egui::Ui, screen_mix: f64) -> Rect {
         },
         IndicatorChoice {
             icon: UiIcon::Monitor,
-            label: "Screen only",
+            label: "Secondary screen",
             current: active == 2,
             tone: IndicatorTone::Green,
             span: 1,
@@ -7017,13 +7030,26 @@ fn paint_fps_overlay(ui: &egui::Ui, preview_rect: Rect, fps: Option<u32>) {
 fn app_title(ui: &mut egui::Ui, texture: egui::TextureId) {
     const ICON_SIZE: f32 = 22.0;
     const GAP: f32 = 7.0;
+    const ROUTE_ICON_SIZE: f32 = 13.0;
+    const ROUTE_GAP: f32 = 5.0;
     let color = Color32::from_rgb(205, 211, 222);
-    let galley =
-        ui.painter()
-            .layout_no_wrap("StageSwap".to_owned(), FontId::proportional(14.0), color);
+    let font = FontId::proportional(14.0);
+    let secondary_screen = tr(ui, "Secondary screen");
+    let route = ui.painter().layout_no_wrap(
+        format!("StageSwap · {secondary_screen}"),
+        font.clone(),
+        color,
+    );
+    let destination = ui.painter().layout_no_wrap("Zoom".to_owned(), font, color);
     let size = egui::vec2(
-        ICON_SIZE + GAP + galley.size().x,
-        galley.size().y.max(ICON_SIZE),
+        ICON_SIZE
+            + GAP
+            + route.size().x
+            + ROUTE_GAP
+            + ROUTE_ICON_SIZE
+            + ROUTE_GAP
+            + destination.size().x,
+        route.size().y.max(destination.size().y).max(ICON_SIZE),
     );
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let icon_rect = Rect::from_min_size(
@@ -7036,12 +7062,25 @@ fn app_title(ui: &mut egui::Ui, texture: egui::TextureId) {
         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
         Color32::WHITE,
     );
+    let route_pos = Pos2::new(
+        icon_rect.right() + GAP,
+        rect.center().y - route.size().y / 2.0,
+    );
+    ui.painter().galley(route_pos, route.clone(), color);
+    let route_icon = Rect::from_min_size(
+        Pos2::new(
+            route_pos.x + route.size().x + ROUTE_GAP,
+            rect.center().y - ROUTE_ICON_SIZE / 2.0,
+        ),
+        egui::vec2(ROUTE_ICON_SIZE, ROUTE_ICON_SIZE),
+    );
+    ui_icon::paint(ui.painter(), route_icon, UiIcon::ArrowRight, SETTINGS_BLUE);
     ui.painter().galley(
         Pos2::new(
-            icon_rect.right() + GAP,
-            rect.center().y - galley.size().y / 2.0,
+            route_icon.right() + ROUTE_GAP,
+            rect.center().y - destination.size().y / 2.0,
         ),
-        galley,
+        destination,
         color,
     );
 }
@@ -8521,7 +8560,7 @@ mod tests {
         assert!(
             SettingsTab::Matching
                 .description(Locale::English)
-                .contains("webcam")
+                .contains("JW Library")
         );
         assert_ne!(SettingsTab::Screen, SettingsTab::Matching);
     }
@@ -8561,7 +8600,7 @@ mod tests {
                 button_rect = settings_single_button_row(
                     ui,
                     "Setup guide",
-                    "Learn how StageSwap works and choose your webcam, screen, and reference.",
+                    "Set up the webcam, JW Library display, idle reference, and Zoom output.",
                     "Open setup guide",
                     206.0,
                 )

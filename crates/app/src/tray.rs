@@ -54,7 +54,7 @@ impl Tray {
         );
         let automatic = CheckMenuItem::new(text(locale, "Automatic"), true, true, None);
         let camera = CheckMenuItem::new(text(locale, "Webcam only"), true, false, None);
-        let screen = CheckMenuItem::new(text(locale, "Screen only"), true, false, None);
+        let screen = CheckMenuItem::new(text(locale, "JW Library display only"), true, false, None);
         let output_mode = Submenu::with_items(
             text(locale, "Output mode"),
             true,
@@ -121,7 +121,8 @@ impl Tray {
             self.show.set_text(text(locale, "Open StageSwap"));
             self.automatic.set_text(text(locale, "Automatic"));
             self.camera.set_text(text(locale, "Webcam only"));
-            self.screen.set_text(text(locale, "Screen only"));
+            self.screen
+                .set_text(text(locale, "JW Library display only"));
             self.output_mode.set_text(text(locale, "Output mode"));
             self.settings.set_text(text(locale, "Settings"));
             self.exit.set_text(text(locale, "Exit"));

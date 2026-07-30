@@ -84,15 +84,23 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Display" => ("Écran", "Pantalla"),
         "Webcam" => ("Webcam", "Cámara web"),
         "Screen" => ("Écran", "Pantalla"),
+        "Secondary screen" => ("Écran secondaire", "Pantalla secundaria"),
+        "JW Library" => ("JW Library", "JW Library"),
+        "JW Library display" => ("Écran JW Library", "Pantalla de JW Library"),
         "Output" => ("Sortie", "Salida"),
+        "Zoom output" => ("Sortie Zoom", "Salida de Zoom"),
         "Reference" => ("Référence", "Referencia"),
         "Detection" => ("Détection", "Detección"),
         "Live" => ("EN DIRECT", "EN DIRECTO"),
         "LIVE" => ("EN DIRECT", "EN DIRECTO"),
         "WEBCAM" => ("WEBCAM", "CÁMARA WEB"),
         "SCREEN" => ("ÉCRAN", "PANTALLA"),
+        "SECONDARY SCREEN" => ("ÉCRAN SECONDAIRE", "PANTALLA SECUNDARIA"),
+        "JW LIBRARY" => ("JW LIBRARY", "JW LIBRARY"),
         "REFERENCE" => ("RÉFÉRENCE", "REFERENCIA"),
+        "IDLE REFERENCE" => ("RÉFÉRENCE D’ATTENTE", "REFERENCIA INACTIVA"),
         "OUTPUT" => ("SORTIE", "SALIDA"),
+        "ZOOM OUTPUT" => ("SORTIE ZOOM", "SALIDA DE ZOOM"),
         "Unknown" => ("Inconnu", "Desconocido"),
         "Crossfading" => ("Fondu enchaîné", "Fundido cruzado"),
         "Screen mix" => ("Mixage écran", "Mezcla de pantalla"),
@@ -112,21 +120,21 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Stopping automation…" => ("Arrêt de l’automatisation…", "Deteniendo automatización…"),
         "Output mode" => ("Mode de sortie", "Modo de salida"),
         "Other" => ("Autres actions", "Otras acciones"),
-        "Capture reference" => ("Capturer la référence", "Capturar referencia"),
         "Rescan screens" => ("Rechercher les écrans", "Buscar pantallas"),
         "No webcam frame" => ("Aucune image de webcam", "No hay imagen de la cámara web"),
-        "No screen frame" => ("Aucune image d’écran", "No hay imagen de pantalla"),
-        "No reference image" => ("Aucune image de référence", "No hay imagen de referencia"),
-        "No output frame" => ("Aucune image de sortie", "No hay imagen de salida"),
+        "No secondary screen frame" => ("Aucune image de l’écran secondaire", "No hay imagen de la pantalla secundaria"),
+        "No JW Library display frame" => ("Aucune image de l’écran JW Library", "No hay imagen de la pantalla de JW Library"),
+        "No idle reference" => ("Aucune référence d’attente", "No hay referencia inactiva"),
+        "No Zoom output frame" => ("Aucune image de sortie Zoom", "No hay imagen de salida de Zoom"),
         "Preparing preview…" => ("Préparation de l’aperçu…", "Preparando vista previa…"),
 
         // Settings shell.
         "General" => ("Général", "General"),
         "Diagnostics" => ("Diagnostic", "Diagnóstico"),
-        "Choose how the app launches, stays available, and reports problems." => ("Choisissez le mode de démarrage de l’application, sa disponibilité et le signalement des problèmes.", "Elige cómo se inicia la aplicación, cómo permanece disponible y cómo informa de los problemas."),
-        "Select, verify, and recover the camera used for webcam output." => ("Sélectionnez, vérifiez et rétablissez la caméra utilisée pour la sortie webcam.", "Selecciona, comprueba y recupera la cámara utilizada para la salida de cámara web."),
-        "Choose the display Automatic mode watches and how it is captured." => ("Choisissez l’écran surveillé par le mode Automatique et la façon dont il est capturé.", "Elige la pantalla que vigila el modo Automático y cómo se captura."),
-        "Teach Automatic mode when the screen should show the webcam." => ("Indiquez au mode Automatique quand l’écran doit afficher la webcam.", "Indica al modo Automático cuándo debe mostrarse la cámara web."),
+        "Configure StageSwap for automatic Zoom retransmission using JW Library." => ("Configurez StageSwap pour la retransmission Zoom automatique avec JW Library.", "Configura StageSwap para la retransmisión automática por Zoom con JW Library."),
+        "Choose the webcam Zoom shows while JW Library is idle." => ("Choisissez la webcam affichée dans Zoom lorsque JW Library est en attente.", "Elige la cámara web que Zoom muestra mientras JW Library está inactiva."),
+        "Choose the second display JW Library uses for presentations." => ("Choisissez le deuxième écran utilisé par JW Library pour les présentations.", "Elige la segunda pantalla que JW Library usa para las presentaciones."),
+        "Capture and tune the JW Library idle reference used for automatic switching." => ("Capturez et ajustez la référence d’attente de JW Library utilisée pour le basculement automatique.", "Captura y ajusta la referencia inactiva de JW Library que se usa para el cambio automático."),
         "Inspect component health, technical details, logs, and recovery tools." => ("Consultez l’état des composants, les détails techniques, les journaux et les outils de récupération.", "Consulta el estado de los componentes, los detalles técnicos, los registros y las herramientas de recuperación."),
         "PREFERENCES" => ("PRÉFÉRENCES", "PREFERENCIAS"),
         "Back to dashboard" => ("Retour au tableau de bord", "Volver al panel"),
@@ -136,8 +144,8 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Couldn’t save" => ("Échec de l’enregistrement", "No se pudo guardar"),
 
         // General settings.
-        "How StageSwap works" => ("Fonctionnement de StageSwap", "Cómo funciona StageSwap"),
-        "StageSwap watches your selected screen. While it matches your saved reference image, your video calls see your webcam. When the screen changes, StageSwap automatically switches to the screen. When the reference returns, it switches back to your webcam." => ("StageSwap surveille l’écran sélectionné. Tant qu’il correspond à l’image de référence enregistrée, vos appels vidéo voient votre webcam. Lorsque l’écran change, StageSwap bascule automatiquement vers l’écran. Lorsque la référence réapparaît, il revient à votre webcam.", "StageSwap vigila la pantalla seleccionada. Mientras coincida con la imagen de referencia guardada, las videollamadas verán tu cámara web. Cuando cambie la pantalla, StageSwap cambiará automáticamente a ella. Cuando vuelva la referencia, regresará a la cámara web."),
+        "StageSwap automates Zoom retransmission using JW Library. While the selected JW Library display matches the saved idle reference, Zoom sees the webcam. When JW Library shows media, Zoom sees the display. When JW Library returns to idle, Zoom returns to the webcam." => ("StageSwap automatise la retransmission Zoom avec JW Library. Tant que l’écran JW Library sélectionné correspond à la référence d’attente enregistrée, Zoom affiche la webcam. Lorsque JW Library affiche un média, Zoom affiche l’écran. Lorsque JW Library revient en attente, Zoom revient à la webcam.", "StageSwap automatiza la retransmisión por Zoom con JW Library. Mientras la pantalla de JW Library seleccionada coincida con la referencia inactiva guardada, Zoom muestra la cámara web. Cuando JW Library muestra contenido multimedia, Zoom muestra la pantalla. Cuando JW Library vuelve al estado inactivo, Zoom vuelve a la cámara web."),
+        "StageSwap is an independent, unofficial project and is not affiliated with or endorsed by the publisher of JW Library. The name JW Library is used only to describe compatibility." => ("StageSwap est un projet indépendant et non officiel. Il n’est ni affilié à l’éditeur de JW Library ni approuvé par celui-ci. Le nom JW Library est utilisé uniquement pour décrire la compatibilité.", "StageSwap es un proyecto independiente y no oficial. No está afiliado ni respaldado por el editor de JW Library. El nombre JW Library se usa únicamente para describir la compatibilidad."),
         "Startup" => ("Démarrage", "Inicio"),
         "Applied the next time StageSwap starts." => ("Appliqué au prochain démarrage de StageSwap.", "Se aplica la próxima vez que se inicie StageSwap."),
         "Start with Windows" => ("Démarrer avec Windows", "Iniciar con Windows"),
@@ -181,10 +189,9 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Crop webcam to 16:9" => ("Recadrer la webcam en 16:9", "Recortar la cámara web a 16:9"),
         "Crop non-16:9 cameras to fill the frame." => ("Recadrer les caméras qui ne sont pas en 16:9 afin de remplir l’image.", "Recortar las cámaras que no sean 16:9 para llenar el encuadre."),
         "No display selected" => ("Aucun écran sélectionné", "No hay ninguna pantalla seleccionada"),
-        "Screen capture" => ("Capture d’écran", "Captura de pantalla"),
-        "This display is used by Display mode and watched by Automatic mode for reference changes." => ("Cet écran est utilisé par le mode Écran et surveillé par le mode Automatique pour détecter les changements de référence.", "Esta pantalla se utiliza en el modo Pantalla y el modo Automático la vigila para detectar cambios en la referencia."),
-        "Live screen" => ("Écran en direct", "Pantalla en directo"),
-        "No screen frame — choose a display or use Recovery in Diagnostics." => ("Aucune image d’écran — choisissez un écran ou utilisez Récupération dans Diagnostic.", "No hay imagen de pantalla: elige una pantalla o usa Recuperación en Diagnóstico."),
+        "This is the second display JW Library uses for presentations. Automatic mode watches it for media changes." => ("Il s’agit du deuxième écran utilisé par JW Library pour les présentations. Le mode Automatique le surveille pour détecter les changements de média.", "Esta es la segunda pantalla que JW Library usa para las presentaciones. El modo Automático la vigila para detectar cambios de contenido multimedia."),
+        "Live JW Library display" => ("Écran JW Library en direct", "Pantalla de JW Library en directo"),
+        "No JW Library display frame — choose a display or use Recovery in Diagnostics." => ("Aucune image de l’écran JW Library — choisissez un écran ou utilisez Récupération dans Diagnostic.", "No hay imagen de la pantalla de JW Library: elige una pantalla o usa Recuperación en Diagnóstico."),
         "Capture" => ("Capture", "Captura"),
         "Capture behavior" => ("Comportement de la capture", "Comportamiento de la captura"),
         "Include mouse cursor" => ("Inclure le pointeur de la souris", "Incluir el cursor del ratón"),
@@ -198,13 +205,11 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Off — Use Restart screen capture in Diagnostics." => ("Désactivé — Utilisez Redémarrer la capture d’écran dans Diagnostic.", "Desactivado: usa Reiniciar captura de pantalla en Diagnóstico."),
 
         // Matching.
-        "Reference matching" => ("Correspondance de référence", "Coincidencia de referencia"),
-        "Reference matches → Camera. Reference changes → Display. Without a usable reference, Automatic mode stays on Camera." => ("Référence identique → Caméra. Référence modifiée → Écran. Sans référence utilisable, le mode Automatique reste sur Caméra.", "La referencia coincide → Cámara. La referencia cambia → Pantalla. Sin una referencia válida, el modo Automático permanece en Cámara."),
-        "Reference matches: Camera. Reference changes: Display. Without a usable reference, Automatic mode stays on Camera." => ("Référence identique : Caméra. Référence modifiée : Écran. Sans référence utilisable, le mode Automatique reste sur Caméra.", "La referencia coincide: Cámara. La referencia cambia: Pantalla. Sin una referencia válida, el modo Automático permanece en Cámara."),
-        "Reference image" => ("Image de référence", "Imagen de referencia"),
-        "No reference image — capture the current screen or import one." => ("Aucune image de référence — capturez l’écran actuel ou importez-en une.", "No hay imagen de referencia: captura la pantalla actual o importa una."),
+        "Idle reference" => ("Référence d’attente", "Referencia inactiva"),
+        "JW Library is idle: Webcam. JW Library shows media: Display. Without a usable idle reference, Automatic mode stays on Webcam." => ("JW Library est en attente : Webcam. JW Library affiche un média : Écran. Sans référence d’attente utilisable, le mode Automatique reste sur Webcam.", "JW Library está inactiva: Cámara web. JW Library muestra contenido multimedia: Pantalla. Sin una referencia inactiva válida, el modo Automático permanece en Cámara web."),
+        "No idle reference — show the JW Library idle display and capture it." => ("Aucune référence d’attente — affichez l’écran d’attente de JW Library et capturez-le.", "No hay referencia inactiva: muestra la pantalla inactiva de JW Library y captúrala."),
         "Checks 4×/s · 5 matches or 3 mismatches · 0.5s fade" => ("4 vérifications/s · 5 correspondances ou 3 différences · fondu de 0,5 s", "4 comprobaciones/s · 5 coincidencias o 3 diferencias · fundido de 0,5 s"),
-        "Capture screen" => ("Capturer l’écran", "Capturar pantalla"),
+        "Capture idle display" => ("Capturer l’écran d’attente", "Capturar pantalla inactiva"),
         "Import image…" => ("Importer une image…", "Importar imagen…"),
         "Match strictness" => ("Précision de la correspondance", "Precisión de coincidencia"),
         "Reset 98%" => ("Réinitialiser à 98 %", "Restablecer al 98 %"),
@@ -250,7 +255,7 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Clear…" => ("Effacer…", "Borrar…"),
         "The webcam needs attention. Choose or refresh the camera in Webcam, then restart it here if needed." => ("La webcam nécessite votre attention. Choisissez ou actualisez la caméra dans Webcam, puis redémarrez-la ici si nécessaire.", "La cámara web requiere atención. Elige o actualiza la cámara en Cámara web y reiníciala aquí si es necesario."),
         "Screen capture needs attention. Choose a display in Screen, then restart capture here if needed." => ("La capture d’écran nécessite votre attention. Choisissez un écran dans Écran, puis redémarrez la capture ici si nécessaire.", "La captura de pantalla requiere atención. Elige una pantalla en Pantalla y reinicia la captura aquí si es necesario."),
-        "The virtual camera needs attention. Restart it here, then reselect StageSwap in the meeting app if necessary." => ("La caméra virtuelle nécessite votre attention. Redémarrez-la ici, puis sélectionnez de nouveau StageSwap dans l’application de réunion si nécessaire.", "La cámara virtual requiere atención. Reiníciala aquí y vuelve a seleccionar StageSwap en la aplicación de reuniones si es necesario."),
+        "The virtual camera needs attention. Restart it here, then reselect StageSwap in Zoom if necessary." => ("La caméra virtuelle nécessite votre attention. Redémarrez-la ici, puis sélectionnez de nouveau StageSwap dans Zoom si nécessaire.", "La cámara virtual requiere atención. Reiníciala aquí y vuelve a seleccionar StageSwap en Zoom si es necesario."),
         "One or more components are still starting. Wait briefly before using a recovery action." => ("Un ou plusieurs composants sont encore en cours de démarrage. Patientez un instant avant d’utiliser une action de récupération.", "Uno o varios componentes todavía se están iniciando. Espera un momento antes de usar una acción de recuperación."),
         "The pipeline is ready, but Automatic mode needs a captured or imported reference." => ("Le pipeline est prêt, mais le mode Automatique nécessite une référence capturée ou importée.", "El flujo está listo, pero el modo Automático necesita una referencia capturada o importada."),
         "The components are ready; StageSwap is waiting for enough reference checks to decide." => ("Les composants sont prêts ; StageSwap attend suffisamment de vérifications de la référence pour prendre une décision.", "Los componentes están listos; StageSwap espera suficientes comprobaciones de la referencia para decidir."),
@@ -288,46 +293,52 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Step {0} of {1}" => ("Étape {0} sur {1}", "Paso {0} de {1}"),
         "Set up later" => ("Configurer plus tard", "Configurar más tarde"),
         "Start StageSwap" => ("Démarrer StageSwap", "Iniciar StageSwap"),
-        "StageSwap compares your screen with a reference image." => ("StageSwap compare votre écran à une image de référence.", "StageSwap compara tu pantalla con una imagen de referencia."),
-        "Screen matches the reference → Zoom sees your webcam" => ("L’écran correspond à la référence → Zoom affiche votre webcam", "La pantalla coincide con la referencia → Zoom muestra tu cámara web"),
-        "Screen does not match the reference → Zoom sees your screen" => ("L’écran ne correspond pas à la référence → Zoom affiche votre écran", "La pantalla no coincide con la referencia → Zoom muestra tu pantalla"),
+        "JW Library to Zoom" => ("JW Library vers Zoom", "De JW Library a Zoom"),
+        "Automatic Zoom retransmission for congregation meetings using JW Library." => ("Retransmission Zoom automatique pour les réunions d’assemblée utilisant JW Library.", "Retransmisión automática por Zoom para reuniones de congregación que usan JW Library."),
+        "JW Library is idle → Zoom sees the webcam" => ("JW Library est en attente → Zoom affiche la webcam", "JW Library está inactiva → Zoom muestra la cámara web"),
+        "JW Library shows media → Zoom sees the display" => ("JW Library affiche un média → Zoom affiche l’écran", "JW Library muestra contenido multimedia → Zoom muestra la pantalla"),
         "Choose StageSwap as your camera in Zoom." => ("Choisissez StageSwap comme caméra dans Zoom.", "Elige StageSwap como cámara en Zoom."),
         "Choose your webcam" => ("Choisissez votre webcam", "Elige tu cámara web"),
-        "Choose the webcam you want people in Zoom to see." => ("Choisissez la webcam que vous souhaitez montrer aux participants dans Zoom.", "Elige la cámara web que quieres que vean las personas en Zoom."),
+        "Choose the webcam Zoom should show while JW Library is idle." => ("Choisissez la webcam que Zoom doit afficher lorsque JW Library est en attente.", "Elige la cámara web que Zoom debe mostrar mientras JW Library está inactiva."),
         "Webcam preview" => ("Aperçu de la webcam", "Vista previa de la cámara web"),
         "No webcam found. Connect a webcam, then refresh the list." => ("Aucune webcam détectée. Connectez une webcam, puis actualisez la liste.", "No se encontró ninguna cámara web. Conecta una y actualiza la lista."),
         "This webcam is unavailable. Choose another one or refresh the list." => ("Cette webcam est indisponible. Choisissez-en une autre ou actualisez la liste.", "Esta cámara web no está disponible. Elige otra o actualiza la lista."),
         "Refresh webcams" => ("Actualiser les webcams", "Actualizar cámaras web"),
-        "Choose your screen" => ("Choisissez votre écran", "Elige tu pantalla"),
-        "Choose the screen you want StageSwap to show in Zoom." => ("Choisissez l’écran que StageSwap doit afficher dans Zoom.", "Elige la pantalla que quieres que StageSwap muestre en Zoom."),
-        "Screen preview" => ("Aperçu de l’écran", "Vista previa de la pantalla"),
-        "No screen found. Connect a screen, then rescan." => ("Aucun écran détecté. Connectez un écran, puis relancez la recherche.", "No se encontró ninguna pantalla. Conecta una y vuelve a buscar."),
-        "This screen is unavailable. Choose another one or rescan." => ("Cet écran est indisponible. Choisissez-en un autre ou relancez la recherche.", "Esta pantalla no está disponible. Elige otra o vuelve a buscar."),
-        "Set up automatic switching" => ("Configurez le basculement automatique", "Configura el cambio automático"),
-        "Show your normal holding or idle picture on the screen you selected. Then capture it as the reference." => ("Affichez votre image d’attente habituelle sur l’écran sélectionné. Capturez-la ensuite comme référence.", "Muestra en la pantalla seleccionada tu imagen habitual de espera o inactividad. Después, captúrala como referencia."),
-        "When the screen matches the reference, StageSwap shows your webcam. When the screen changes, StageSwap shows the screen." => ("Lorsque l’écran correspond à la référence, StageSwap affiche votre webcam. Lorsque l’écran change, StageSwap affiche l’écran.", "Cuando la pantalla coincide con la referencia, StageSwap muestra tu cámara web. Cuando la pantalla cambia, StageSwap muestra la pantalla."),
-        "Reference preview" => ("Aperçu de la référence", "Vista previa de la referencia"),
+        "Choose the JW Library display" => ("Choisissez l’écran JW Library", "Elige la pantalla de JW Library"),
+        "JW Library display preview" => ("Aperçu de l’écran JW Library", "Vista previa de la pantalla de JW Library"),
+        "No display found. Connect the JW Library presentation display, then rescan." => ("Aucun écran détecté. Connectez l’écran de présentation JW Library, puis relancez la recherche.", "No se encontró ninguna pantalla. Conecta la pantalla de presentación de JW Library y vuelve a buscar."),
+        "This JW Library display is unavailable. Choose another one or rescan." => ("Cet écran JW Library est indisponible. Choisissez-en un autre ou relancez la recherche.", "Esta pantalla de JW Library no está disponible. Elige otra o vuelve a buscar."),
+        "Capture the idle display" => ("Capturez l’écran d’attente", "Captura la pantalla inactiva"),
+        "Capture the normal JW Library idle display as the reference." => ("Capturez l’écran d’attente normal de JW Library comme référence.", "Captura la pantalla inactiva normal de JW Library como referencia."),
+        "Example idle display" => ("Exemple d’écran d’attente", "Ejemplo de pantalla inactiva"),
+        "The real idle display has centered text and a gray square in the corner; this example uses unbranded shapes." => ("L’écran d’attente réel comporte du texte centré et un carré gris dans un coin ; cet exemple utilise des formes sans marque.", "La pantalla inactiva real tiene texto centrado y un cuadrado gris en una esquina; este ejemplo usa formas sin marca."),
+        "Prepare JW Library" => ("Préparez JW Library", "Prepara JW Library"),
+        "Show the normal JW Library idle display with centered text and a gray square in the corner." => ("Affichez l’écran d’attente normal de JW Library avec son texte centré et un carré gris dans un coin.", "Muestra la pantalla inactiva normal de JW Library con texto centrado y un cuadrado gris en una esquina."),
+        "Change display" => ("Changer d’écran", "Cambiar pantalla"),
+        "Choose a display" => ("Choisir un écran", "Elegir una pantalla"),
+        "Choose the JW Library display before capturing a reference." => ("Choisissez l’écran JW Library avant de capturer une référence.", "Elige la pantalla de JW Library antes de capturar una referencia."),
+        "Check the live preview, then capture the idle display as the reference." => ("Vérifiez l’aperçu en direct, puis capturez l’écran d’attente comme référence.", "Comprueba la vista previa en directo y captura la pantalla inactiva como referencia."),
         "No reference captured yet." => ("Aucune référence capturée pour le moment.", "Aún no se ha capturado ninguna referencia."),
-        "Reference captured" => ("Référence capturée", "Referencia capturada"),
+        "Idle reference captured" => ("Référence d’attente capturée", "Referencia inactiva capturada"),
         "Capture again" => ("Capturer à nouveau", "Capturar de nuevo"),
         "StageSwap couldn’t capture the screen. Check the screen preview and try again." => ("StageSwap n’a pas pu capturer l’écran. Vérifiez l’aperçu de l’écran et réessayez.", "StageSwap no pudo capturar la pantalla. Comprueba la vista previa de la pantalla e inténtalo de nuevo."),
-        "You’re ready" => ("Tout est prêt", "Todo listo"),
-        "Before your Zoom call, choose StageSwap as your camera in Zoom." => ("Avant votre appel Zoom, choisissez StageSwap comme caméra dans Zoom.", "Antes de tu llamada de Zoom, elige StageSwap como cámara en Zoom."),
+        "Ready for the meeting" => ("Prêt pour la réunion", "Todo listo para la reunión"),
+        "Open the JW Library presentation, choose StageSwap in Zoom, and start automation." => ("Ouvrez la présentation JW Library, choisissez StageSwap dans Zoom et démarrez l’automatisation.", "Abre la presentación de JW Library, elige StageSwap en Zoom e inicia la automatización."),
         "Webcam ready" => ("Webcam prête", "Cámara web lista"),
         "Webcam not selected" => ("Webcam non sélectionnée", "Cámara web no seleccionada"),
-        "Screen ready" => ("Écran prêt", "Pantalla lista"),
-        "Screen not selected" => ("Écran non sélectionné", "Pantalla no seleccionada"),
-        "Reference ready" => ("Référence prête", "Referencia lista"),
-        "Reference not captured" => ("Référence non capturée", "Referencia no capturada"),
+        "JW Library display ready" => ("Écran JW Library prêt", "Pantalla de JW Library lista"),
+        "JW Library display not selected" => ("Écran JW Library non sélectionné", "Pantalla de JW Library no seleccionada"),
+        "Idle reference ready" => ("Référence d’attente prête", "Referencia inactiva lista"),
+        "Idle reference not captured" => ("Référence d’attente non capturée", "Referencia inactiva no capturada"),
         "Some setup is missing. StageSwap will start, but Automatic mode may not work as expected. You can finish setup later in Settings." => ("Certains éléments ne sont pas configurés. StageSwap va démarrer, mais le mode Automatique risque de ne pas fonctionner comme prévu. Vous pourrez terminer la configuration plus tard dans Paramètres.", "Faltan algunos elementos de la configuración. StageSwap se iniciará, pero es posible que el modo Automático no funcione como esperas. Puedes terminar la configuración más tarde en Ajustes."),
         "Setup guide" => ("Guide de configuration", "Guía de configuración"),
-        "Learn how StageSwap works and choose your webcam, screen, and reference." => ("Découvrez le fonctionnement de StageSwap et choisissez votre webcam, votre écran et votre référence.", "Aprende cómo funciona StageSwap y elige la cámara web, la pantalla y la referencia."),
+        "Set up the webcam, JW Library display, idle reference, and Zoom output." => ("Configurez la webcam, l’écran JW Library, la référence d’attente et la sortie Zoom.", "Configura la cámara web, la pantalla de JW Library, la referencia inactiva y la salida de Zoom."),
         "Open setup guide" => ("Ouvrir le guide de configuration", "Abrir guía de configuración"),
 
         // Tray and Windows notifications.
         "Open StageSwap" => ("Ouvrir StageSwap", "Abrir StageSwap"),
         "Webcam only" => ("Webcam uniquement", "Solo cámara web"),
-        "Screen only" => ("Écran uniquement", "Solo pantalla"),
+        "JW Library display only" => ("Écran JW Library uniquement", "Solo pantalla de JW Library"),
         "Exit" => ("Quitter", "Salir"),
         "StageSwap needs attention" => ("StageSwap nécessite votre attention", "StageSwap requiere atención"),
         "StageSwap installation failed" => ("Échec de l’installation de StageSwap", "Error al instalar StageSwap"),
@@ -415,18 +426,24 @@ mod tests {
     #[test]
     fn setup_guide_copy_uses_the_approved_localizations() {
         assert_eq!(
-            text(Locale::French, "Set up automatic switching"),
-            "Configurez le basculement automatique"
+            text(Locale::French, "Capture the idle display"),
+            "Capturez l’écran d’attente"
         );
         assert_eq!(
-            text(Locale::Spanish, "Set up automatic switching"),
-            "Configura el cambio automático"
+            text(
+                Locale::Spanish,
+                "JW Library shows media → Zoom sees the display"
+            ),
+            "JW Library muestra contenido multimedia → Zoom muestra la pantalla"
         );
         assert_eq!(
             text(Locale::French, "Open setup guide"),
             "Ouvrir le guide de configuration"
         );
-        assert_eq!(text(Locale::Spanish, "You’re ready"), "Todo listo");
+        assert_eq!(
+            text(Locale::Spanish, "Ready for the meeting"),
+            "Todo listo para la reunión"
+        );
         assert_eq!(
             format_text(Locale::French, "Step {0} of {1}", &["4", "5"]),
             "Étape 4 sur 5"
@@ -435,5 +452,72 @@ mod tests {
             format_text(Locale::Spanish, "Step {0} of {1}", &["4", "5"]),
             "Paso 4 de 5"
         );
+    }
+
+    #[test]
+    fn jw_library_workflow_copy_is_localized_in_every_supported_language() {
+        let strings = [
+            "Automatic Zoom retransmission for congregation meetings using JW Library.",
+            "Configure StageSwap for automatic Zoom retransmission using JW Library.",
+            "Choose the webcam Zoom shows while JW Library is idle.",
+            "Choose the second display JW Library uses for presentations.",
+            "Capture and tune the JW Library idle reference used for automatic switching.",
+            "JW Library is idle → Zoom sees the webcam",
+            "JW Library shows media → Zoom sees the display",
+            "Secondary screen",
+            "JW Library display",
+            "Zoom output",
+            "SECONDARY SCREEN",
+            "IDLE REFERENCE",
+            "ZOOM OUTPUT",
+            "No secondary screen frame",
+            "No JW Library display frame",
+            "No idle reference",
+            "No Zoom output frame",
+            "StageSwap automates Zoom retransmission using JW Library. While the selected JW Library display matches the saved idle reference, Zoom sees the webcam. When JW Library shows media, Zoom sees the display. When JW Library returns to idle, Zoom returns to the webcam.",
+            "Choose the JW Library display",
+            "Choose the webcam Zoom should show while JW Library is idle.",
+            "JW Library display preview",
+            "No display found. Connect the JW Library presentation display, then rescan.",
+            "This JW Library display is unavailable. Choose another one or rescan.",
+            "Capture the idle display",
+            "Capture the normal JW Library idle display as the reference.",
+            "Example idle display",
+            "The real idle display has centered text and a gray square in the corner; this example uses unbranded shapes.",
+            "Prepare JW Library",
+            "Show the normal JW Library idle display with centered text and a gray square in the corner.",
+            "Change display",
+            "Choose a display",
+            "Choose the JW Library display before capturing a reference.",
+            "Check the live preview, then capture the idle display as the reference.",
+            "Idle reference captured",
+            "Ready for the meeting",
+            "Open the JW Library presentation, choose StageSwap in Zoom, and start automation.",
+            "JW Library display ready",
+            "JW Library display not selected",
+            "Idle reference ready",
+            "Idle reference not captured",
+            "Set up the webcam, JW Library display, idle reference, and Zoom output.",
+            "This is the second display JW Library uses for presentations. Automatic mode watches it for media changes.",
+            "Live JW Library display",
+            "No JW Library display frame — choose a display or use Recovery in Diagnostics.",
+            "Idle reference",
+            "JW Library is idle: Webcam. JW Library shows media: Display. Without a usable idle reference, Automatic mode stays on Webcam.",
+            "No idle reference — show the JW Library idle display and capture it.",
+            "Capture idle display",
+            "StageSwap is an independent, unofficial project and is not affiliated with or endorsed by the publisher of JW Library. The name JW Library is used only to describe compatibility.",
+            "JW Library display only",
+            "The virtual camera needs attention. Restart it here, then reselect StageSwap in Zoom if necessary.",
+        ];
+
+        for source in strings {
+            for locale in [Locale::French, Locale::Spanish] {
+                assert_ne!(
+                    text(locale, source).as_ref(),
+                    source,
+                    "{source:?} fell back to English for {locale:?}"
+                );
+            }
+        }
     }
 }
