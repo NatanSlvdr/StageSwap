@@ -32,6 +32,9 @@ pub enum Command {
     UpdateSettings(Box<AppConfig>),
     ReloadSettings(Box<AppConfig>),
     CaptureReference,
+    CaptureReferenceCandidate,
+    ConfirmReferenceCandidate,
+    DiscardReferenceCandidate,
     ImportReference(PathBuf),
     SelectMonitor(MonitorDescriptor),
     RefreshVideoDevices,
@@ -46,6 +49,7 @@ pub struct PreviewFrames {
     pub webcam: Option<Arc<Frame>>,
     pub screen: Option<Arc<Frame>>,
     pub reference: Option<Arc<Frame>>,
+    pub reference_candidate: Option<Arc<Frame>>,
 }
 
 #[derive(Clone, Debug, Default)]

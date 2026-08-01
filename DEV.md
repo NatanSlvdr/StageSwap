@@ -72,6 +72,14 @@ Available page names are `general`, `webcam`, `screen`, `matching`, and `diagnos
 
 Setup-guide previews are `setup-1` through `setup-5`. Each name opens one deterministic full-window step for the JW Library-to-Zoom workflow.
 
+For the idle-reference step, append `--ui-setup-reference-state captured`, `empty`, `review`, or `missing-screen` to inspect its deterministic saved, initial, candidate-review, and unavailable-display states:
+
+```bash
+cargo run -p stageswap --bin StageSwap -- --ui-preview setup-4 --ui-setup-reference-state review
+```
+
+The `setup-4` capture, retake, confirmation, and capture-again controls are interactive in preview mode. They update only the in-memory mock frames and never write `reference.png`.
+
 Dialog previews are `dialog-exit`, `dialog-clear-logs`, `dialog-admin`, `dialog-replace-baseline`, `dialog-load-admin-config`, and `dialog-remove-baseline`.
 
 Append `--ui-language en-US`, `--ui-language fr-FR`, or `--ui-language es` to render any preview in a supported language:

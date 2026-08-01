@@ -46,6 +46,11 @@ const SETUP_BOOTH_BLACK: Color32 = Color32::from_rgb(16, 18, 23);
 const SETUP_SIGNAL_DECK: Color32 = Color32::from_rgb(26, 29, 36);
 const SETUP_SIGNAL_WHITE: Color32 = Color32::from_rgb(245, 247, 250);
 const REFERENCE_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
+const SETUP_REFERENCE_FLASH_DURATION: Duration = Duration::from_millis(120);
+const SETUP_REFERENCE_RAIL_WIDTH: f32 = 280.0;
+const SETUP_REFERENCE_CARD_HEIGHT: f32 = 262.0;
+const SETUP_REFERENCE_COLUMN_GAP: f32 = 16.0;
+const SETUP_REFERENCE_STACK_BREAKPOINT: f32 = 760.0;
 const DISCO_GESTURE_WINDOW: Duration = Duration::from_secs(3);
 const SETTINGS_SIDEBAR_WIDTH: f32 = 228.0;
 const SETTINGS_CONTENT_WIDTH: f32 = 960.0;
@@ -82,7 +87,7 @@ fn main() -> eframe::Result {
         Err(error) => {
             eprintln!("StageSwap UI preview: {error}");
             eprintln!(
-                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|setup-1..5|dialog-*] [--ui-language en-US|fr-FR|es] [--ui-setup-reference-state captured|empty|missing-screen]"
+                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|setup-1..5|dialog-*] [--ui-language en-US|fr-FR|es] [--ui-setup-reference-state captured|empty|review|missing-screen]"
             );
             return Ok(());
         }
@@ -476,6 +481,7 @@ enum SetupDemoPreviewState {
 enum SetupReferencePreviewState {
     Captured,
     Empty,
+    Review,
     MissingScreen,
 }
 
@@ -594,9 +600,11 @@ fn parse_setup_reference_preview_state(
     match args.get(index + 1).map(String::as_str) {
         Some("captured") => Ok(Some(SetupReferencePreviewState::Captured)),
         Some("empty") => Ok(Some(SetupReferencePreviewState::Empty)),
+        Some("review") => Ok(Some(SetupReferencePreviewState::Review)),
         Some("missing-screen") => Ok(Some(SetupReferencePreviewState::MissingScreen)),
         _ => Err(
-            "--ui-setup-reference-state requires captured, empty, or missing-screen".to_string(),
+            "--ui-setup-reference-state requires captured, empty, review, or missing-screen"
+                .to_string(),
         ),
     }
 }
@@ -888,8 +896,16 @@ fn ui_preview_config() -> AppConfig {
 
 #[cfg(not(windows))]
 fn ui_preview_snapshot() -> AppSnapshot {
-    let webcam = ui_preview_frame(1, [46, 30, 18], [139, 83, 37]);
-    let screen = ui_preview_frame(2, [39, 23, 15], [216, 118, 63]);
+    let webcam = ui_preview_frame(
+        1,
+        "setup-webcam-example",
+        include_bytes!("../assets/setup-webcam-example.png"),
+    );
+    let screen = ui_preview_frame(
+        2,
+        "setup-reference-example",
+        include_bytes!("../assets/setup-reference-example.png"),
+    );
     AppSnapshot {
         run_state: RunState::Running,
         mode: OutputMode::Automatic,
@@ -916,6 +932,7 @@ fn ui_preview_snapshot() -> AppSnapshot {
             webcam: Some(webcam),
             screen: Some(Arc::clone(&screen)),
             reference: Some(screen),
+            reference_candidate: None,
         },
         video_devices: vec![
             stageswap_core::VideoDeviceChoice {
@@ -960,17 +977,14 @@ fn ui_preview_snapshot() -> AppSnapshot {
 }
 
 #[cfg(not(windows))]
-fn ui_preview_frame(sequence: u64, background: [u8; 3], accent: [u8; 3]) -> Arc<Frame> {
-    let size = stageswap_core::Size::new(640, 360);
-    let mut pixels = vec![0; size.width as usize * size.height as usize * 4];
+fn ui_preview_frame(sequence: u64, name: &'static str, bytes: &[u8]) -> Arc<Frame> {
+    let image = image::load_from_memory(bytes)
+        .unwrap_or_else(|error| panic!("{name} should be a valid embedded image: {error}"))
+        .to_rgba8();
+    let size = stageswap_core::Size::new(image.width(), image.height());
+    let mut pixels = image.into_raw();
     for pixel in pixels.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&[background[2], background[1], background[0], 255]);
-    }
-    for y in 64..296 {
-        for x in 72..568 {
-            let offset = (y * size.width as usize + x) * 4;
-            pixels[offset..offset + 4].copy_from_slice(&[accent[2], accent[1], accent[0], 255]);
-        }
+        pixel.swap(0, 2);
     }
     Arc::new(
         Frame::new(
@@ -983,6 +997,20 @@ fn ui_preview_frame(sequence: u64, background: [u8; 3], accent: [u8; 3]) -> Arc<
         )
         .expect("UI preview frame is valid"),
     )
+}
+
+#[cfg(not(windows))]
+fn clone_ui_preview_frame(frame: &Frame, sequence: u64) -> Option<Arc<Frame>> {
+    Frame::new(
+        frame.pixels_arc(),
+        frame.size,
+        frame.stride,
+        sequence,
+        frame.timestamp_100ns,
+        Instant::now(),
+    )
+    .ok()
+    .map(Arc::new)
 }
 
 #[derive(Clone, Copy)]
@@ -1044,12 +1072,23 @@ enum SetupAction {
 #[derive(Clone, Copy, Debug)]
 enum SetupReferenceCaptureState {
     Idle,
-    Pending {
+    Preparing,
+    CapturingCandidate {
         started_at: Instant,
-        previous_sequence: Option<u64>,
+        previous_candidate_sequence: Option<u64>,
     },
-    Success,
-    Failed,
+    Review {
+        captured_at: Instant,
+    },
+    SavingCandidate {
+        started_at: Instant,
+        previous_reference_sequence: Option<u64>,
+    },
+    Confirmed,
+    CaptureFailed,
+    SaveFailed {
+        previous_reference_sequence: Option<u64>,
+    },
 }
 
 #[derive(Clone)]
@@ -1359,18 +1398,33 @@ impl SwitcherApp {
             return self;
         };
         match state {
-            SetupReferencePreviewState::Captured => {}
+            SetupReferencePreviewState::Captured => {
+                preview.snapshot.previews.reference_candidate = None;
+                self.setup_reference_capture = SetupReferenceCaptureState::Idle;
+            }
             SetupReferencePreviewState::Empty => {
                 preview.snapshot.previews.reference = None;
+                preview.snapshot.previews.reference_candidate = None;
+                self.setup_reference_capture = SetupReferenceCaptureState::Idle;
+            }
+            SetupReferencePreviewState::Review => {
+                preview.snapshot.previews.reference = None;
+                preview.snapshot.previews.reference_candidate =
+                    preview.snapshot.previews.screen.clone();
+                self.setup_reference_capture = SetupReferenceCaptureState::Review {
+                    captured_at: Instant::now() - SETUP_REFERENCE_FLASH_DURATION,
+                };
             }
             SetupReferencePreviewState::MissingScreen => {
                 preview.snapshot.previews.reference = None;
+                preview.snapshot.previews.reference_candidate = None;
                 preview.snapshot.previews.screen = None;
                 preview.snapshot.selected_monitor = None;
                 preview.snapshot.monitors = Vec::new().into();
                 preview.snapshot.screen_state = DeviceState::Unavailable;
                 preview.snapshot.availability.screen_ready = false;
                 self.config.selected_monitor_label.clear();
+                self.setup_reference_capture = SetupReferenceCaptureState::Idle;
             }
         }
         self
@@ -1400,6 +1454,49 @@ impl SwitcherApp {
 
     fn send(&self, command: Command) {
         let _ = self.runtime.send(command);
+    }
+
+    fn send_setup_reference_command(&mut self, command: Command) {
+        #[cfg(not(windows))]
+        if let Some(preview) = self.ui_preview.as_mut() {
+            match command {
+                Command::CaptureReferenceCandidate => {
+                    let next_sequence = [
+                        preview.snapshot.previews.screen.as_ref(),
+                        preview.snapshot.previews.reference.as_ref(),
+                        preview.snapshot.previews.reference_candidate.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(|frame| frame.sequence)
+                    .max()
+                    .unwrap_or_default()
+                    .wrapping_add(1)
+                    .max(1);
+                    preview.snapshot.previews.reference_candidate = preview
+                        .snapshot
+                        .previews
+                        .screen
+                        .as_ref()
+                        .and_then(|frame| clone_ui_preview_frame(frame, next_sequence));
+                }
+                Command::ConfirmReferenceCandidate => {
+                    if let Some(candidate) = preview.snapshot.previews.reference_candidate.take() {
+                        preview.snapshot.previews.reference = Some(candidate);
+                        preview.snapshot.detection = DetectionState::Unknown;
+                    }
+                }
+                Command::DiscardReferenceCandidate => {
+                    preview.snapshot.previews.reference_candidate = None;
+                }
+                _ => {
+                    debug_assert!(false, "unexpected setup reference preview command");
+                }
+            }
+            return;
+        }
+
+        self.send(command);
     }
 
     fn toggle_disco(&mut self) {
@@ -1488,6 +1585,7 @@ impl SwitcherApp {
         self.view = AppView::SetupGuide;
         self.setup_session = Some(SetupSession::live(return_view));
         self.setup_reference_capture = SetupReferenceCaptureState::Idle;
+        self.send_setup_reference_command(Command::DiscardReferenceCandidate);
         self.send(Command::RefreshVideoDevices);
         if self.config.automatic_monitor_rescans {
             self.send(Command::Rescan);
@@ -1498,6 +1596,26 @@ impl SwitcherApp {
         let Some(mut session) = self.setup_session else {
             return;
         };
+        let reference_requires_decision = session.step == SetupStep::Reference
+            && setup_reference_requires_decision(self.setup_reference_capture);
+        let moves_forward = matches!(action, SetupAction::Next)
+            || matches!(
+                action,
+                SetupAction::GoTo(destination)
+                    if destination.number() > SetupStep::Reference.number()
+            );
+        if reference_requires_decision && moves_forward {
+            return;
+        }
+        let leaves_reference = session.step == SetupStep::Reference
+            && match action {
+                SetupAction::Previous | SetupAction::Next | SetupAction::Close => true,
+                SetupAction::GoTo(destination) => destination != SetupStep::Reference,
+            };
+        if leaves_reference && reference_requires_decision {
+            self.send_setup_reference_command(Command::DiscardReferenceCandidate);
+            self.setup_reference_capture = SetupReferenceCaptureState::Idle;
+        }
         match action {
             SetupAction::Previous => {
                 if let Some(step) = session.step.previous() {
@@ -1537,6 +1655,7 @@ impl SwitcherApp {
         self.set_mode(OutputMode::Automatic);
         self.flush_settings();
         self.send(Command::Start);
+        self.send_setup_reference_command(Command::DiscardReferenceCandidate);
         self.setup_session = None;
         self.setup_reference_capture = SetupReferenceCaptureState::Idle;
         self.view = AppView::Dashboard;
@@ -1544,6 +1663,7 @@ impl SwitcherApp {
 
     fn dismiss_setup_guide(&mut self, return_view: SetupReturnView) {
         self.mark_setup_guide_completed();
+        self.send_setup_reference_command(Command::DiscardReferenceCandidate);
         self.setup_session = None;
         self.setup_reference_capture = SetupReferenceCaptureState::Idle;
         match return_view {
@@ -1872,10 +1992,12 @@ impl SwitcherApp {
         let snapshot = self.snapshot();
         self.update_setup_reference_capture(&snapshot);
         let textures = self.setup_example_textures(context);
+        let next_enabled = step != SetupStep::Reference
+            || !setup_reference_requires_decision(self.setup_reference_capture);
         let mut action = if transition_active {
             None
         } else {
-            setup_guide_keyboard_action(context, step)
+            setup_guide_keyboard_action(context, step, next_enabled)
         };
 
         let full_rect = ui.max_rect();
@@ -2012,7 +2134,7 @@ impl SwitcherApp {
                 .layout(egui::Layout::top_down(egui::Align::Center)),
         );
         progress_ui.set_opacity(entrance);
-        if let Some(destination) = setup_footer_progress(&mut progress_ui, step) {
+        if let Some(destination) = setup_footer_progress(&mut progress_ui, step, next_enabled) {
             action = Some(SetupAction::GoTo(destination));
         }
 
@@ -2054,7 +2176,7 @@ impl SwitcherApp {
             SetupFooterButtonStyle::Primary {
                 icon_after: !step.is_last(),
             },
-            true,
+            next_enabled,
         )
         .clicked()
         {
@@ -2289,232 +2411,407 @@ impl SwitcherApp {
         snapshot: &AppSnapshot,
         textures: &SetupExampleTextures,
     ) -> Option<SetupAction> {
-        let compact = ui.ctx().content_rect().height() <= 620.0;
         let group_width = ui.available_width().min(920.0);
-        let card_gap = if compact { 8.0 } else { 10.0 };
-        let card_width = (group_width - card_gap * 2.0) / 3.0;
-        let card_height = if compact { 280.0 } else { 308.0 };
-        let preview_width = (card_width - 24.0).min(if compact { 174.0 } else { 204.0 });
-        let preview_size = egui::vec2(preview_width, preview_width / WINDOW_ASPECT_RATIO);
-        let screen_selected = snapshot.selected_monitor.is_some();
-        let reference_available = snapshot.previews.reference.is_some();
-        let pending = matches!(
-            self.setup_reference_capture,
-            SetupReferenceCaptureState::Pending { .. }
-        );
-        let capture_failed = matches!(
-            self.setup_reference_capture,
-            SetupReferenceCaptureState::Failed
-        );
-        let capture_succeeded = matches!(
-            self.setup_reference_capture,
-            SetupReferenceCaptureState::Success
-        ) || reference_available;
-        let mut go_to_screen = false;
-
-        let capture_tone = if capture_failed {
-            Some(LIVE_RED)
-        } else if pending {
-            Some(SETTINGS_BLUE)
-        } else if capture_succeeded {
-            Some(ACTIVE_GREEN)
+        let stacked = group_width < SETUP_REFERENCE_STACK_BREAKPOINT;
+        let live_width = if stacked {
+            group_width
         } else {
-            None
+            group_width - SETUP_REFERENCE_COLUMN_GAP - SETUP_REFERENCE_RAIL_WIDTH
         };
+        let rail_width = if stacked {
+            group_width
+        } else {
+            SETUP_REFERENCE_RAIL_WIDTH
+        };
+        let confirmed = matches!(
+            self.setup_reference_capture,
+            SetupReferenceCaptureState::Confirmed
+        ) || matches!(
+            self.setup_reference_capture,
+            SetupReferenceCaptureState::Idle
+        ) && snapshot.previews.reference.is_some();
+        let reviewing = matches!(
+            self.setup_reference_capture,
+            SetupReferenceCaptureState::Review { .. }
+                | SetupReferenceCaptureState::SavingCandidate { .. }
+                | SetupReferenceCaptureState::SaveFailed { .. }
+        );
+        let comparison_visible = reviewing || confirmed;
+        let mut action = None;
 
         ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), card_height),
+            egui::vec2(ui.available_width(), 1.0),
             egui::Layout::top_down(egui::Align::Center),
             |ui| {
                 ui.set_width(group_width);
-                ui.spacing_mut().item_spacing.x = card_gap;
-                ui.horizontal_top(|ui| {
-                    setup_reference_card(
-                        ui,
-                        card_width,
-                        card_height,
-                        None,
-                        compact,
-                        |ui| {
-                            setup_centered_reference_preview(ui, preview_size, |ui| {
-                                setup_reference_example_thumbnail(
-                                    ui,
-                                    textures.reference.id(),
-                                    preview_size,
-                                );
-                            });
-                            ui.add_space(if compact { 7.0 } else { 10.0 });
-                            setup_numbered_card_heading(ui, 1, "Example idle display");
-                            ui.add_space(4.0);
-                            setup_card_help(
-                                ui,
-                                "The real idle display has centered text and a gray square in the corner; this example uses unbranded shapes.",
-                            );
-                        },
-                    );
-
-                    setup_reference_card(
-                        ui,
-                        card_width,
-                        card_height,
-                        (!screen_selected).then_some(TRANSITION_AMBER),
-                        compact,
-                        |ui| {
-                            setup_centered_reference_preview(ui, preview_size, |ui| {
-                                setup_reference_live_thumbnail(
-                                    self,
-                                    ui,
-                                    PreviewKind::Screen,
-                                    snapshot.previews.screen.as_ref(),
-                                    preview_size,
-                                    snapshot.actual_output,
-                                    "No JW Library display frame",
-                                );
-                            });
-                            ui.add_space(if compact { 7.0 } else { 10.0 });
-                            setup_numbered_card_heading(ui, 2, "Prepare JW Library");
-                            ui.add_space(4.0);
-                            setup_card_help(
-                                ui,
-                                "Show the normal JW Library idle display with centered text and a gray square in the corner.",
-                            );
-                            ui.with_layout(
-                                egui::Layout::bottom_up(egui::Align::LEFT),
-                                |ui| {
-                                    let button_width = ui.available_width();
-                                    let response = if screen_selected {
-                                        icon_button(
-                                            ui,
-                                            UiIcon::Monitor,
-                                            "Change display",
-                                            egui::vec2(button_width, 32.0),
-                                            false,
-                                            false,
-                                        )
-                                    } else {
-                                        accent_icon_button(
-                                            ui,
-                                            UiIcon::Monitor,
-                                            "Choose a display",
-                                            egui::vec2(button_width, 32.0),
-                                            SETTINGS_BLUE,
-                                        )
-                                    };
-                                    if response.clicked() {
-                                        go_to_screen = true;
-                                    }
-                                    if !screen_selected {
-                                        ui.add_space(4.0);
-                                        setup_compact_state(
-                                            ui,
-                                            UiIcon::Unavailable,
-                                            "Choose the JW Library display before capturing a reference.",
-                                            TRANSITION_AMBER,
-                                        );
-                                    }
-                                }
-                            );
-                        },
-                    );
-
-                    setup_reference_card(
-                        ui,
-                        card_width,
-                        card_height,
-                        capture_tone,
-                        compact,
-                        |ui| {
-                            setup_centered_reference_preview(ui, preview_size, |ui| {
-                                setup_reference_live_thumbnail(
-                                    self,
-                                    ui,
-                                    PreviewKind::Reference,
-                                    snapshot.previews.reference.as_ref(),
-                                    preview_size,
-                                    snapshot.actual_output,
-                                    "No reference captured yet.",
-                                );
-                            });
-                            ui.add_space(if compact { 7.0 } else { 10.0 });
-                            ui.set_width(ui.available_width());
-                            setup_numbered_card_heading(ui, 3, "Capture the idle display");
-                            ui.add_space(4.0);
-                            setup_card_help(
-                                ui,
-                                "Check the live preview, then capture the idle display as the reference.",
-                            );
-                            ui.with_layout(
-                                egui::Layout::bottom_up(egui::Align::LEFT),
-                                |ui| {
-                                    let button_width = ui.available_width();
-                                    if pending {
-                                        setup_pending_capture_button(
-                                            ui,
-                                            "Capturing…",
-                                            egui::vec2(button_width, 32.0),
-                                        );
-                                    } else {
-                                        let label = if reference_available {
-                                            "Capture again"
-                                        } else {
-                                            "Capture idle display"
-                                        };
-                                        let response = ui
-                                            .add_enabled_ui(screen_selected, |ui| {
-                                                accent_icon_button(
-                                                    ui,
-                                                    UiIcon::Capture,
-                                                    label,
-                                                    egui::vec2(button_width, 32.0),
-                                                    SETTINGS_BLUE,
-                                                )
-                                            })
-                                            .inner;
-                                        if response.clicked() {
-                                            if snapshot.previews.screen.is_none() {
-                                                self.setup_reference_capture =
-                                                    SetupReferenceCaptureState::Failed;
-                                            } else {
-                                                self.setup_reference_capture =
-                                                    SetupReferenceCaptureState::Pending {
-                                                        started_at: Instant::now(),
-                                                        previous_sequence: snapshot
-                                                            .previews
-                                                            .reference
-                                                            .as_ref()
-                                                            .map(|frame| frame.sequence),
-                                                    };
-                                                self.send(Command::CaptureReference);
-                                            }
-                                        }
-                                    }
-                                    if !pending && (capture_failed || capture_succeeded) {
-                                        ui.add_space(4.0);
-                                        if capture_failed {
-                                            setup_compact_state(
-                                                ui,
-                                                UiIcon::Error,
-                                                "StageSwap couldn’t capture the screen. Check the screen preview and try again.",
-                                                LIVE_RED,
-                                            );
-                                        } else {
-                                            setup_compact_state(
-                                                ui,
-                                                UiIcon::CheckCircle,
-                                                "Idle reference captured",
-                                                ACTIVE_GREEN,
-                                            );
-                                        }
-                                    }
-                                }
-                            );
-                        },
-                    );
-                });
+                if stacked {
+                    action = if comparison_visible {
+                        self.setup_reference_review_surface(ui, snapshot, live_width, confirmed)
+                    } else {
+                        self.setup_reference_capture_surface(ui, snapshot, live_width)
+                    };
+                    ui.add_space(SETUP_REFERENCE_COLUMN_GAP);
+                    self.setup_reference_example_rail(ui, textures, rail_width);
+                } else {
+                    ui.spacing_mut().item_spacing.x = SETUP_REFERENCE_COLUMN_GAP;
+                    ui.horizontal_top(|ui| {
+                        let live = ui.allocate_ui_with_layout(
+                            egui::vec2(live_width, 1.0),
+                            egui::Layout::top_down(egui::Align::LEFT),
+                            |ui| {
+                                ui.set_width(live_width);
+                                action = if comparison_visible {
+                                    self.setup_reference_review_surface(
+                                        ui, snapshot, live_width, confirmed,
+                                    )
+                                } else {
+                                    self.setup_reference_capture_surface(ui, snapshot, live_width)
+                                };
+                            },
+                        );
+                        let rail_height = live.response.rect.height();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(rail_width, rail_height),
+                            egui::Layout::top_down(egui::Align::LEFT),
+                            |ui| {
+                                ui.set_width(rail_width);
+                                ui.add_space(setup_reference_card_top_offset(rail_height));
+                                self.setup_reference_example_rail(ui, textures, rail_width);
+                            },
+                        );
+                    });
+                }
             },
         );
 
+        action
+    }
+
+    fn setup_reference_capture_surface(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        width: f32,
+    ) -> Option<SetupAction> {
+        let screen_selected = snapshot.selected_monitor.is_some();
+        let screen_frame = snapshot.previews.screen.as_ref();
+        let reference_frame = snapshot.previews.reference.as_ref();
+        let pending = matches!(
+            self.setup_reference_capture,
+            SetupReferenceCaptureState::CapturingCandidate { .. }
+        );
+        let failed = matches!(
+            self.setup_reference_capture,
+            SetupReferenceCaptureState::CaptureFailed
+        );
+        let display_name = snapshot
+            .selected_monitor
+            .as_ref()
+            .map(|monitor| monitor.label.clone())
+            .unwrap_or_else(|| tr(ui, "No display selected").into_owned());
+        let mut go_to_screen = false;
+
+        ui.set_width(width);
+        ui.horizontal(|ui| {
+            setup_control_label(ui, UiIcon::Monitor, "JW Library display", SETTINGS_BLUE);
+            if screen_selected {
+                setup_live_badge(ui);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_button(
+                        ui,
+                        UiIcon::Monitor,
+                        "Change display",
+                        egui::vec2(132.0, 28.0),
+                        false,
+                        false,
+                    )
+                    .clicked()
+                    {
+                        go_to_screen = true;
+                    }
+                });
+            }
+        });
+        ui.add(
+            egui::Label::new(RichText::new(display_name).size(11.0).color(mix_color(
+                ui.visuals().panel_fill,
+                SETUP_SIGNAL_WHITE,
+                0.58,
+            )))
+            .truncate(),
+        );
+        ui.add_space(6.0);
+
+        let preview_height = width / WINDOW_ASPECT_RATIO;
+        let preview_rect = self.preview(
+            ui,
+            PreviewKind::Screen,
+            screen_frame,
+            [width, preview_height],
+            snapshot.actual_output,
+            PreviewOptions::settings("No JW Library display frame"),
+        );
+        if pending {
+            ui.painter().rect_stroke(
+                preview_rect,
+                8,
+                Stroke::new(3.0, SETTINGS_BLUE),
+                StrokeKind::Inside,
+            );
+        }
+
+        ui.add_space(10.0);
+        if !screen_selected {
+            if accent_icon_button(
+                ui,
+                UiIcon::Monitor,
+                "Choose a display",
+                egui::vec2(width, 40.0),
+                SETTINGS_BLUE,
+            )
+            .clicked()
+            {
+                go_to_screen = true;
+            }
+            ui.add_space(4.0);
+            setup_compact_state(
+                ui,
+                UiIcon::Unavailable,
+                "Choose the JW Library display before capturing a reference.",
+                TRANSITION_AMBER,
+            );
+        } else if pending {
+            setup_pending_capture_button(ui, "Capturing…", egui::vec2(width, 40.0));
+        } else {
+            let label = setup_reference_capture_label(reference_frame.is_some());
+            let response = ui
+                .add_enabled_ui(screen_frame.is_some(), |ui| {
+                    accent_icon_button(
+                        ui,
+                        UiIcon::Capture,
+                        label,
+                        egui::vec2(width, 40.0),
+                        SETTINGS_BLUE,
+                    )
+                })
+                .inner;
+            if response.clicked() {
+                self.setup_reference_capture = SetupReferenceCaptureState::CapturingCandidate {
+                    started_at: Instant::now(),
+                    previous_candidate_sequence: snapshot
+                        .previews
+                        .reference_candidate
+                        .as_ref()
+                        .map(|frame| frame.sequence),
+                };
+                self.send_setup_reference_command(Command::CaptureReferenceCandidate);
+            }
+            if screen_frame.is_none() {
+                ui.add_space(4.0);
+                setup_compact_state(
+                    ui,
+                    UiIcon::Unavailable,
+                    "No live display frame yet. Check the connection or choose another display.",
+                    TRANSITION_AMBER,
+                );
+            } else if failed {
+                ui.add_space(4.0);
+                setup_compact_state(
+                    ui,
+                    UiIcon::Error,
+                    "StageSwap couldn’t capture the screen. Check the screen preview and try again.",
+                    LIVE_RED,
+                );
+            }
+        }
+
         go_to_screen.then_some(SetupAction::GoTo(SetupStep::Screen))
+    }
+
+    fn setup_reference_review_surface(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        width: f32,
+        confirmed: bool,
+    ) -> Option<SetupAction> {
+        let frame = if confirmed {
+            snapshot.previews.reference.as_ref()
+        } else {
+            snapshot.previews.reference_candidate.as_ref()
+        };
+        let tone = if confirmed {
+            ACTIVE_GREEN
+        } else {
+            TRANSITION_AMBER
+        };
+        ui.set_width(width);
+        ui.horizontal(|ui| {
+            setup_control_label(
+                ui,
+                if confirmed {
+                    UiIcon::CheckCircle
+                } else {
+                    UiIcon::Capture
+                },
+                if confirmed {
+                    "Saved idle reference"
+                } else {
+                    "Your captured image"
+                },
+                tone,
+            );
+            setup_reference_state_badge(
+                ui,
+                if confirmed { "CONFIRMED" } else { "TO CONFIRM" },
+                tone,
+            );
+        });
+        ui.add_space(6.0);
+        let preview_height = width / WINDOW_ASPECT_RATIO;
+        let preview_rect = self.preview(
+            ui,
+            if confirmed {
+                PreviewKind::Reference
+            } else {
+                PreviewKind::Screen
+            },
+            frame,
+            [width, preview_height],
+            snapshot.actual_output,
+            PreviewOptions::settings("No captured image available for review."),
+        );
+        ui.painter()
+            .rect_stroke(preview_rect, 8, Stroke::new(3.0, tone), StrokeKind::Inside);
+        let flash_alpha = match self.setup_reference_capture {
+            SetupReferenceCaptureState::Review { captured_at } => setup_reference_flash_alpha(
+                Instant::now().saturating_duration_since(captured_at),
+                self.setup_animations_enabled,
+            ),
+            _ => 0.0,
+        };
+        if flash_alpha > 0.0 {
+            ui.ctx().request_repaint();
+            ui.painter().rect_filled(
+                preview_rect.shrink(3.0),
+                6,
+                SETUP_SIGNAL_WHITE.gamma_multiply(flash_alpha * 0.42),
+            );
+        }
+
+        ui.add_space(10.0);
+        match self.setup_reference_capture {
+            SetupReferenceCaptureState::Review { .. } => {
+                self.setup_reference_review_actions(ui, snapshot, width, false);
+            }
+            SetupReferenceCaptureState::SavingCandidate { .. } => {
+                setup_pending_capture_button(ui, "Saving reference…", egui::vec2(width, 40.0));
+            }
+            SetupReferenceCaptureState::SaveFailed { .. } => {
+                self.setup_reference_review_actions(ui, snapshot, width, true);
+                ui.add_space(4.0);
+                setup_compact_state(
+                    ui,
+                    UiIcon::Error,
+                    "StageSwap couldn’t save this reference. Try again or retake the image.",
+                    LIVE_RED,
+                );
+            }
+            SetupReferenceCaptureState::Confirmed | SetupReferenceCaptureState::Idle
+                if confirmed
+                    && icon_button(
+                        ui,
+                        UiIcon::Refresh,
+                        "Capture again",
+                        egui::vec2(width, 40.0),
+                        false,
+                        false,
+                    )
+                    .clicked() =>
+            {
+                self.setup_reference_capture = SetupReferenceCaptureState::Preparing;
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn setup_reference_review_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        width: f32,
+        retry: bool,
+    ) {
+        let gap = 10.0;
+        let secondary_width = 170.0;
+        let primary_width = (width - secondary_width - gap).max(1.0);
+        ui.horizontal(|ui| {
+            if icon_button(
+                ui,
+                UiIcon::Refresh,
+                "Retake",
+                egui::vec2(secondary_width, 40.0),
+                false,
+                false,
+            )
+            .clicked()
+            {
+                self.send_setup_reference_command(Command::DiscardReferenceCandidate);
+                self.setup_reference_capture = SetupReferenceCaptureState::Preparing;
+            }
+            ui.add_space(gap - ui.spacing().item_spacing.x);
+            if accent_icon_button(
+                ui,
+                if retry {
+                    UiIcon::Refresh
+                } else {
+                    UiIcon::CheckCircle
+                },
+                if retry { "Try again" } else { "Use this image" },
+                egui::vec2(primary_width, 40.0),
+                SETTINGS_BLUE,
+            )
+            .clicked()
+            {
+                self.setup_reference_capture = SetupReferenceCaptureState::SavingCandidate {
+                    started_at: Instant::now(),
+                    previous_reference_sequence: snapshot
+                        .previews
+                        .reference
+                        .as_ref()
+                        .map(|frame| frame.sequence),
+                };
+                self.send_setup_reference_command(Command::ConfirmReferenceCandidate);
+            }
+        });
+    }
+
+    fn setup_reference_example_rail(
+        &mut self,
+        ui: &mut egui::Ui,
+        textures: &SetupExampleTextures,
+        width: f32,
+    ) {
+        egui::Frame::new()
+            .fill(mix_color(SETUP_SIGNAL_DECK, SETTINGS_BLUE, 0.035))
+            .stroke(Stroke::new(1.0, SETTINGS_BLUE.gamma_multiply(0.28)))
+            .corner_radius(10)
+            .inner_margin(14)
+            .show(ui, |ui| {
+                let content_width = (width - 28.0).max(1.0);
+                ui.set_width(content_width);
+                ui.set_height(SETUP_REFERENCE_CARD_HEIGHT - 28.0);
+                setup_control_label(ui, UiIcon::Image, "Example reference image", SETTINGS_BLUE);
+                ui.add_space(10.0);
+                let thumbnail_size = egui::vec2(content_width, content_width / WINDOW_ASPECT_RATIO);
+                setup_reference_example_thumbnail(ui, textures.reference.id(), thumbnail_size);
+                ui.add_space(10.0);
+                setup_capture_help(
+                    ui,
+                    "Your JW Library idle screen should look like this example.",
+                );
+            });
     }
 
     fn setup_ready_step(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
@@ -2611,23 +2908,61 @@ impl SwitcherApp {
     }
 
     fn update_setup_reference_capture(&mut self, snapshot: &AppSnapshot) {
-        let SetupReferenceCaptureState::Pending {
-            started_at,
-            previous_sequence,
-        } = self.setup_reference_capture
-        else {
-            return;
-        };
-        let current_sequence = snapshot
-            .previews
-            .reference
-            .as_ref()
-            .map(|frame| frame.sequence);
-        if current_sequence.is_some() && current_sequence != previous_sequence {
-            self.setup_reference_capture = SetupReferenceCaptureState::Success;
-        } else if Instant::now().saturating_duration_since(started_at) >= REFERENCE_CAPTURE_TIMEOUT
-        {
-            self.setup_reference_capture = SetupReferenceCaptureState::Failed;
+        let now = Instant::now();
+        match self.setup_reference_capture {
+            SetupReferenceCaptureState::CapturingCandidate {
+                started_at,
+                previous_candidate_sequence,
+            } => {
+                let current_sequence = snapshot
+                    .previews
+                    .reference_candidate
+                    .as_ref()
+                    .map(|frame| frame.sequence);
+                if current_sequence.is_some() && current_sequence != previous_candidate_sequence {
+                    self.setup_reference_capture =
+                        SetupReferenceCaptureState::Review { captured_at: now };
+                } else if now.saturating_duration_since(started_at) >= REFERENCE_CAPTURE_TIMEOUT {
+                    self.setup_reference_capture = SetupReferenceCaptureState::CaptureFailed;
+                }
+            }
+            SetupReferenceCaptureState::Review { .. } => {
+                if snapshot.previews.reference_candidate.is_none() {
+                    self.setup_reference_capture = SetupReferenceCaptureState::CaptureFailed;
+                }
+            }
+            SetupReferenceCaptureState::SavingCandidate {
+                started_at,
+                previous_reference_sequence,
+            } => {
+                let current_sequence = snapshot
+                    .previews
+                    .reference
+                    .as_ref()
+                    .map(|frame| frame.sequence);
+                if current_sequence.is_some() && current_sequence != previous_reference_sequence {
+                    self.setup_reference_capture = SetupReferenceCaptureState::Confirmed;
+                } else if now.saturating_duration_since(started_at) >= REFERENCE_CAPTURE_TIMEOUT {
+                    self.setup_reference_capture = SetupReferenceCaptureState::SaveFailed {
+                        previous_reference_sequence,
+                    };
+                }
+            }
+            SetupReferenceCaptureState::SaveFailed {
+                previous_reference_sequence,
+            } => {
+                let current_sequence = snapshot
+                    .previews
+                    .reference
+                    .as_ref()
+                    .map(|frame| frame.sequence);
+                if current_sequence.is_some() && current_sequence != previous_reference_sequence {
+                    self.setup_reference_capture = SetupReferenceCaptureState::Confirmed;
+                } else if snapshot.previews.reference_candidate.is_none() {
+                    self.setup_reference_capture = SetupReferenceCaptureState::CaptureFailed;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -4950,6 +5285,37 @@ fn setup_demo_changed_alpha(elapsed: Duration) -> f32 {
     .clamp(0.0, 1.0)
 }
 
+fn setup_reference_flash_alpha(elapsed: Duration, animations_enabled: bool) -> f32 {
+    if animations_enabled && elapsed < SETUP_REFERENCE_FLASH_DURATION {
+        1.0 - elapsed.as_secs_f32() / SETUP_REFERENCE_FLASH_DURATION.as_secs_f32()
+    } else {
+        0.0
+    }
+    .clamp(0.0, 1.0)
+}
+
+fn setup_reference_card_top_offset(column_height: f32) -> f32 {
+    ((column_height - SETUP_REFERENCE_CARD_HEIGHT) / 2.0).max(0.0)
+}
+
+const fn setup_reference_requires_decision(state: SetupReferenceCaptureState) -> bool {
+    matches!(
+        state,
+        SetupReferenceCaptureState::CapturingCandidate { .. }
+            | SetupReferenceCaptureState::Review { .. }
+            | SetupReferenceCaptureState::SavingCandidate { .. }
+            | SetupReferenceCaptureState::SaveFailed { .. }
+    )
+}
+
+const fn setup_reference_capture_label(reference_available: bool) -> &'static str {
+    if reference_available {
+        "Capture again"
+    } else {
+        "Capture this idle display"
+    }
+}
+
 const fn setup_step_icon(step: SetupStep) -> UiIcon {
     match step {
         SetupStep::HowItWorks => UiIcon::Route,
@@ -4997,7 +5363,11 @@ fn setup_step_title(ui: &mut egui::Ui, step: SetupStep) -> Rect {
     .rect
 }
 
-fn setup_guide_keyboard_action(context: &egui::Context, step: SetupStep) -> Option<SetupAction> {
+fn setup_guide_keyboard_action(
+    context: &egui::Context,
+    step: SetupStep,
+    next_enabled: bool,
+) -> Option<SetupAction> {
     context.input_mut(|input| {
         if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
             return Some(SetupAction::Close);
@@ -5009,7 +5379,7 @@ fn setup_guide_keyboard_action(context: &egui::Context, step: SetupStep) -> Opti
             || input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
             || input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
         {
-            return Some(SetupAction::Next);
+            return next_enabled.then_some(SetupAction::Next);
         }
         None
     })
@@ -5031,7 +5401,11 @@ fn load_embedded_texture(
     )
 }
 
-fn setup_footer_progress(ui: &mut egui::Ui, step: SetupStep) -> Option<SetupStep> {
+fn setup_footer_progress(
+    ui: &mut egui::Ui,
+    step: SetupStep,
+    forward_enabled: bool,
+) -> Option<SetupStep> {
     let background = ui.visuals().panel_fill;
     let step_text = format_text(
         ui_locale(ui),
@@ -5073,6 +5447,7 @@ fn setup_footer_progress(ui: &mut egui::Ui, step: SetupStep) -> Option<SetupStep
     let mut destination = None;
     for (index, candidate) in SetupStep::ALL.into_iter().enumerate() {
         let number = index + 1;
+        let enabled = forward_enabled || number <= step.number();
         let center = Pos2::new(first_x + step_gap * index as f32, center_y);
         let hit_rect = Rect::from_center_size(center, egui::vec2(34.0, 24.0));
         let response = ui.interact(
@@ -5082,11 +5457,13 @@ fn setup_footer_progress(ui: &mut egui::Ui, step: SetupStep) -> Option<SetupStep
         );
         let is_current = candidate == step;
         let is_complete = number < step.number();
-        let hovered = response.hovered() && !is_current;
+        let hovered = enabled && response.hovered() && !is_current;
         let node_fill = if is_current {
             SETTINGS_BLUE
         } else if is_complete {
             mix_color(SETTINGS_BLUE, SETUP_SIGNAL_WHITE, 0.08)
+        } else if !enabled {
+            mix_color(background, SETUP_SIGNAL_WHITE, 0.07)
         } else if hovered {
             mix_color(background, SETUP_SIGNAL_WHITE, 0.2)
         } else {
@@ -5124,15 +5501,18 @@ fn setup_footer_progress(ui: &mut egui::Ui, step: SetupStep) -> Option<SetupStep
         response.widget_info(|| {
             egui::WidgetInfo::selected(
                 egui::WidgetType::Button,
-                ui.is_enabled(),
+                enabled,
                 is_current,
                 label.as_ref(),
             )
         });
-        let response = response
-            .on_hover_text(label)
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
-        if response.clicked() && !is_current {
+        let response = response.on_hover_text(label);
+        let response = if enabled {
+            response.on_hover_cursor(egui::CursorIcon::PointingHand)
+        } else {
+            response
+        };
+        if enabled && response.clicked() && !is_current {
             destination = Some(candidate);
         }
     }
@@ -5696,53 +6076,6 @@ fn setup_footer_button(
     }
 }
 
-fn setup_reference_card<R>(
-    ui: &mut egui::Ui,
-    width: f32,
-    height: f32,
-    tone: Option<Color32>,
-    compact: bool,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
-    let background = ui.visuals().panel_fill;
-    let margin_x = if compact { 9.0 } else { 11.0 };
-    let margin_y = if compact { 7.0 } else { 9.0 };
-    let stroke = tone.map_or_else(
-        || Stroke::new(1.0, mix_color(background, SETUP_SIGNAL_WHITE, 0.12)),
-        |tone| Stroke::new(1.0, tone.gamma_multiply(0.48)),
-    );
-    ui.painter()
-        .rect_filled(rect, 9, mix_color(background, SETUP_SIGNAL_WHITE, 0.035));
-    ui.painter()
-        .rect_stroke(rect, 9, stroke, StrokeKind::Inside);
-    let content_rect = Rect::from_min_max(
-        rect.min + egui::vec2(margin_x, margin_y),
-        rect.max - egui::vec2(margin_x, margin_y),
-    );
-    let mut card_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .id_salt(("setup-reference-card", rect.min.x.to_bits()))
-            .max_rect(content_rect)
-            .layout(egui::Layout::top_down(egui::Align::LEFT)),
-    );
-    card_ui.set_clip_rect(rect.shrink(1.0));
-    add_contents(&mut card_ui)
-}
-
-fn setup_centered_reference_preview<R>(
-    ui: &mut egui::Ui,
-    size: Vec2,
-    add_preview: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), size.y),
-        egui::Layout::top_down(egui::Align::Center),
-        |ui| add_preview(ui),
-    )
-    .inner
-}
-
 fn setup_reference_example_thumbnail(ui: &mut egui::Ui, texture: egui::TextureId, size: Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter()
@@ -5761,51 +6094,25 @@ fn setup_reference_example_thumbnail(ui: &mut egui::Ui, texture: egui::TextureId
     );
 }
 
-fn setup_reference_live_thumbnail(
-    app: &mut SwitcherApp,
-    ui: &mut egui::Ui,
-    kind: PreviewKind,
-    frame: Option<&Arc<Frame>>,
-    size: Vec2,
-    actual_output: Source,
-    empty_message: &'static str,
-) {
-    app.preview(
-        ui,
-        kind,
-        frame,
-        [size.x, size.y],
-        actual_output,
-        PreviewOptions::settings(empty_message),
+fn setup_reference_state_badge(ui: &mut egui::Ui, text: &str, tone: Color32) {
+    let text = tr(ui, text);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.into_owned(), FontId::monospace(9.0), tone);
+    let size = galley.size() + egui::vec2(12.0, 6.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter().rect_filled(rect, 4, tone.gamma_multiply(0.12));
+    ui.painter().rect_stroke(
+        rect,
+        4,
+        Stroke::new(1.0, tone.gamma_multiply(0.38)),
+        StrokeKind::Inside,
     );
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, tone);
 }
 
-fn setup_numbered_card_heading(ui: &mut egui::Ui, number: usize, title: &str) {
-    ui.horizontal(|ui| {
-        let (number_rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
-        ui.painter().circle_filled(
-            number_rect.center(),
-            11.0,
-            SETTINGS_BLUE.gamma_multiply(0.22),
-        );
-        ui.painter().text(
-            number_rect.center(),
-            Align2::CENTER_CENTER,
-            number,
-            FontId::proportional(11.5),
-            mix_color(ui.visuals().panel_fill, SETUP_SIGNAL_WHITE, 0.92),
-        );
-        ui.add_space(1.0);
-        ui.label(
-            RichText::new(tr(ui, title))
-                .size(13.5)
-                .strong()
-                .color(SETUP_SIGNAL_WHITE),
-        );
-    });
-}
-
-fn setup_card_help(ui: &mut egui::Ui, text: &str) {
+fn setup_capture_help(ui: &mut egui::Ui, text: &str) {
     ui.add(
         egui::Label::new(
             RichText::new(tr(ui, text))
@@ -5814,6 +6121,33 @@ fn setup_card_help(ui: &mut egui::Ui, text: &str) {
                 .color(mix_color(ui.visuals().panel_fill, SETUP_SIGNAL_WHITE, 0.66)),
         )
         .wrap(),
+    );
+}
+
+fn setup_live_badge(ui: &mut egui::Ui) {
+    let text = tr(ui, "LIVE");
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.into_owned(), FontId::monospace(9.5), LIVE_RED);
+    let size = galley.size() + egui::vec2(17.0, 6.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 4, LIVE_RED.gamma_multiply(0.12));
+    ui.painter().rect_stroke(
+        rect,
+        4,
+        Stroke::new(1.0, LIVE_RED.gamma_multiply(0.34)),
+        StrokeKind::Inside,
+    );
+    ui.painter().circle_filled(
+        Pos2::new(rect.left() + 7.0, rect.center().y),
+        2.25,
+        LIVE_RED,
+    );
+    ui.painter().galley(
+        Pos2::new(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        LIVE_RED,
     );
 }
 
@@ -8381,6 +8715,7 @@ mod tests {
         for (value, expected) in [
             ("captured", SetupReferencePreviewState::Captured),
             ("empty", SetupReferencePreviewState::Empty),
+            ("review", SetupReferencePreviewState::Review),
             ("missing-screen", SetupReferencePreviewState::MissingScreen),
         ] {
             assert_eq!(
@@ -8477,6 +8812,95 @@ mod tests {
         assert_eq!(alpha(7.8), 0.0);
     }
 
+    #[test]
+    fn setup_reference_review_flashes_once_and_respects_reduced_motion() {
+        assert_eq!(setup_reference_flash_alpha(Duration::ZERO, true), 1.0);
+        assert!((setup_reference_flash_alpha(Duration::from_millis(60), true) - 0.5).abs() < 0.001);
+        assert_eq!(
+            setup_reference_flash_alpha(SETUP_REFERENCE_FLASH_DURATION, true),
+            0.0
+        );
+        assert_eq!(setup_reference_flash_alpha(Duration::ZERO, false), 0.0);
+    }
+
+    #[test]
+    fn setup_reference_card_is_vertically_centered_without_negative_spacing() {
+        assert_eq!(
+            setup_reference_card_top_offset(SETUP_REFERENCE_CARD_HEIGHT),
+            0.0
+        );
+        assert_eq!(setup_reference_card_top_offset(446.0), 92.0);
+        assert_eq!(setup_reference_card_top_offset(200.0), 0.0);
+    }
+
+    #[test]
+    fn setup_reference_requires_a_decision_only_for_unresolved_candidates() {
+        let now = Instant::now();
+        assert!(!setup_reference_requires_decision(
+            SetupReferenceCaptureState::Idle
+        ));
+        assert!(!setup_reference_requires_decision(
+            SetupReferenceCaptureState::Preparing
+        ));
+        assert!(setup_reference_requires_decision(
+            SetupReferenceCaptureState::CapturingCandidate {
+                started_at: now,
+                previous_candidate_sequence: None,
+            }
+        ));
+        assert!(setup_reference_requires_decision(
+            SetupReferenceCaptureState::Review { captured_at: now }
+        ));
+        assert!(setup_reference_requires_decision(
+            SetupReferenceCaptureState::SavingCandidate {
+                started_at: now,
+                previous_reference_sequence: None,
+            }
+        ));
+        assert!(setup_reference_requires_decision(
+            SetupReferenceCaptureState::SaveFailed {
+                previous_reference_sequence: None,
+            }
+        ));
+        assert!(!setup_reference_requires_decision(
+            SetupReferenceCaptureState::Confirmed
+        ));
+    }
+
+    #[test]
+    fn setup_reference_capture_action_distinguishes_first_capture_from_retry() {
+        assert_eq!(
+            setup_reference_capture_label(false),
+            "Capture this idle display"
+        );
+        assert_eq!(setup_reference_capture_label(true), "Capture again");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn ui_preview_frame_decodes_embedded_images_as_bgra() {
+        let bytes = include_bytes!("../assets/setup-webcam-example.png");
+        let source = image::load_from_memory(bytes).unwrap().to_rgba8();
+        let frame = ui_preview_frame(7, "setup-webcam-example", bytes);
+
+        assert_eq!(
+            frame.size,
+            stageswap_core::Size::new(source.width(), source.height())
+        );
+        assert_eq!(frame.stride, source.width() * 4);
+        assert_eq!(frame.sequence, 7);
+        let source_pixel = &source.as_raw()[..4];
+        assert_eq!(
+            &frame.pixels()[..4],
+            &[
+                source_pixel[2],
+                source_pixel[1],
+                source_pixel[0],
+                source_pixel[3]
+            ]
+        );
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn ui_preview_snapshot_has_realistic_ready_inputs_and_frames() {
@@ -8493,11 +8917,19 @@ mod tests {
         assert!(snapshot.previews.final_output.is_some());
         assert_eq!(snapshot.video_devices.len(), 2);
         assert_eq!(snapshot.monitors.len(), 2);
+        let webcam = snapshot.previews.webcam.as_ref().unwrap();
+        let screen = snapshot.previews.screen.as_ref().unwrap();
+        let reference = snapshot.previews.reference.as_ref().unwrap();
+        let output = snapshot.previews.final_output.as_ref().unwrap();
+        assert_eq!(webcam.size, stageswap_core::Size::new(1672, 941));
+        assert_eq!(screen.size, stageswap_core::Size::new(1672, 941));
+        assert!(Arc::ptr_eq(webcam, output));
+        assert!(Arc::ptr_eq(screen, reference));
     }
 
     #[cfg(not(windows))]
     #[test]
-    fn setup_reference_preview_states_cover_captured_empty_and_missing_screen() {
+    fn setup_reference_preview_states_cover_captured_empty_review_and_missing_screen() {
         let build = |state| {
             let directory = tempfile::tempdir().unwrap();
             SwitcherApp::new(
@@ -8518,6 +8950,14 @@ mod tests {
         assert!(empty.snapshot().previews.screen.is_some());
         assert!(empty.snapshot().previews.reference.is_none());
 
+        let review = build(SetupReferencePreviewState::Review);
+        assert!(review.snapshot().previews.reference.is_none());
+        assert!(review.snapshot().previews.reference_candidate.is_some());
+        assert!(matches!(
+            review.setup_reference_capture,
+            SetupReferenceCaptureState::Review { .. }
+        ));
+
         let missing = build(SetupReferencePreviewState::MissingScreen);
         let snapshot = missing.snapshot();
         assert!(snapshot.previews.screen.is_none());
@@ -8525,6 +8965,70 @@ mod tests {
         assert!(snapshot.selected_monitor.is_none());
         assert!(snapshot.monitors.is_empty());
         assert_eq!(snapshot.screen_state, DeviceState::Unavailable);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn ui_preview_reference_commands_exercise_capture_retake_and_confirmation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            ui_preview_config(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        )
+        .with_ui_preview(UiPreviewRequest {
+            target: UiPreviewTarget::Setup(SetupStep::Reference),
+        });
+        let original = app.snapshot().previews.reference.unwrap();
+
+        app.setup_reference_capture = SetupReferenceCaptureState::CapturingCandidate {
+            started_at: Instant::now(),
+            previous_candidate_sequence: None,
+        };
+        app.send_setup_reference_command(Command::CaptureReferenceCandidate);
+        let captured = app.snapshot();
+        let first_candidate = captured.previews.reference_candidate.as_ref().unwrap();
+        assert!(Arc::ptr_eq(
+            captured.previews.reference.as_ref().unwrap(),
+            &original
+        ));
+        assert_eq!(
+            first_candidate.pixels(),
+            captured.previews.screen.as_ref().unwrap().pixels()
+        );
+        assert_ne!(first_candidate.sequence, original.sequence);
+        app.update_setup_reference_capture(&captured);
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::Review { .. }
+        ));
+
+        app.send_setup_reference_command(Command::DiscardReferenceCandidate);
+        let discarded = app.snapshot();
+        assert!(discarded.previews.reference_candidate.is_none());
+        assert!(Arc::ptr_eq(
+            discarded.previews.reference.as_ref().unwrap(),
+            &original
+        ));
+
+        app.send_setup_reference_command(Command::CaptureReferenceCandidate);
+        let candidate = app.snapshot().previews.reference_candidate.unwrap();
+        app.setup_reference_capture = SetupReferenceCaptureState::SavingCandidate {
+            started_at: Instant::now(),
+            previous_reference_sequence: Some(original.sequence),
+        };
+        app.send_setup_reference_command(Command::ConfirmReferenceCandidate);
+        let confirmed = app.snapshot();
+        assert!(confirmed.previews.reference_candidate.is_none());
+        assert!(Arc::ptr_eq(
+            confirmed.previews.reference.as_ref().unwrap(),
+            &candidate
+        ));
+        app.update_setup_reference_capture(&confirmed);
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::Confirmed
+        ));
     }
 
     #[cfg(not(windows))]
@@ -9418,11 +9922,36 @@ mod tests {
             app.setup_session.map(|session| session.step),
             Some(SetupStep::Reference)
         );
+        app.setup_reference_capture = SetupReferenceCaptureState::Review {
+            captured_at: Instant::now(),
+        };
+        app.apply_setup_action(SetupAction::Next);
+        assert_eq!(
+            app.setup_session.map(|session| session.step),
+            Some(SetupStep::Reference)
+        );
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::Review { .. }
+        ));
+        app.apply_setup_action(SetupAction::GoTo(SetupStep::Ready));
+        assert_eq!(
+            app.setup_session.map(|session| session.step),
+            Some(SetupStep::Reference)
+        );
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::Review { .. }
+        ));
         app.apply_setup_action(SetupAction::GoTo(SetupStep::Screen));
         assert_eq!(
             app.setup_session.map(|session| session.step),
             Some(SetupStep::Screen)
         );
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::Idle
+        ));
         app.apply_setup_action(SetupAction::Close);
 
         assert!(app.setup_session.is_none());
@@ -9437,7 +9966,7 @@ mod tests {
 
     #[test]
     fn setup_guide_keyboard_navigation_matches_the_visible_actions() {
-        fn action_for(key: egui::Key, step: SetupStep) -> Option<SetupAction> {
+        fn action_for(key: egui::Key, step: SetupStep, next_enabled: bool) -> Option<SetupAction> {
             let context = egui::Context::default();
             let input = egui::RawInput {
                 events: vec![egui::Event::Key {
@@ -9451,34 +9980,42 @@ mod tests {
             };
             let mut action = None;
             let _ = context.run_ui(input, |_ui| {
-                action = setup_guide_keyboard_action(&context, step);
+                action = setup_guide_keyboard_action(&context, step, next_enabled);
             });
             action
         }
 
         assert_eq!(
-            action_for(egui::Key::Escape, SetupStep::Webcam),
+            action_for(egui::Key::Escape, SetupStep::Webcam, true),
             Some(SetupAction::Close)
         );
         assert_eq!(
-            action_for(egui::Key::ArrowLeft, SetupStep::Webcam),
+            action_for(egui::Key::ArrowLeft, SetupStep::Webcam, true),
             Some(SetupAction::Previous)
         );
         assert_eq!(
-            action_for(egui::Key::ArrowLeft, SetupStep::HowItWorks),
+            action_for(egui::Key::ArrowLeft, SetupStep::HowItWorks, true),
             None
         );
         assert_eq!(
-            action_for(egui::Key::ArrowRight, SetupStep::Ready),
+            action_for(egui::Key::ArrowRight, SetupStep::Ready, true),
             Some(SetupAction::Next)
         );
         assert_eq!(
-            action_for(egui::Key::Enter, SetupStep::Screen),
+            action_for(egui::Key::Enter, SetupStep::Screen, true),
             Some(SetupAction::Next)
         );
         assert_eq!(
-            action_for(egui::Key::Space, SetupStep::Reference),
+            action_for(egui::Key::Space, SetupStep::Reference, true),
             Some(SetupAction::Next)
+        );
+        assert_eq!(
+            action_for(egui::Key::Enter, SetupStep::Reference, false),
+            None
+        );
+        assert_eq!(
+            action_for(egui::Key::ArrowLeft, SetupStep::Reference, false),
+            Some(SetupAction::Previous)
         );
     }
 
@@ -9587,7 +10124,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn setup_reference_capture_states_render_at_the_minimum_window_size() {
+    fn setup_reference_capture_states_render_responsively_in_every_locale() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
             ui_preview_config(),
@@ -9599,75 +10136,172 @@ mod tests {
         });
         let context = egui::Context::default();
         ui_icon::install_fonts(&context);
-        set_ui_locale(&context, Locale::English);
-        let captured_frame = app.snapshot().previews.reference.clone();
-
-        for (state, reference) in [
-            (SetupReferenceCaptureState::Idle, None),
+        let cases = [
+            ("empty", SetupReferenceCaptureState::Idle),
             (
-                SetupReferenceCaptureState::Pending {
+                "capturing",
+                SetupReferenceCaptureState::CapturingCandidate {
                     started_at: Instant::now(),
-                    previous_sequence: None,
+                    previous_candidate_sequence: None,
                 },
-                None,
             ),
-            (SetupReferenceCaptureState::Success, captured_frame.clone()),
-            (SetupReferenceCaptureState::Failed, None),
-        ] {
-            app.setup_reference_capture = state;
-            app.ui_preview.as_mut().unwrap().snapshot.previews.reference = reference;
-            app.setup_session = Some(SetupSession::preview(SetupStep::Reference));
-            let output = context.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(
-                        Pos2::ZERO,
-                        egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
-                    )),
-                    ..egui::RawInput::default()
+            (
+                "review",
+                SetupReferenceCaptureState::Review {
+                    captured_at: Instant::now() - SETUP_REFERENCE_FLASH_DURATION,
                 },
-                |ui| {
-                    let content = app.root_ui(ui);
-                    assert!(ui.max_rect().contains_rect(content));
+            ),
+            (
+                "saving",
+                SetupReferenceCaptureState::SavingCandidate {
+                    started_at: Instant::now(),
+                    previous_reference_sequence: None,
                 },
-            );
-            assert!(output.shapes.len() > 20);
-            assert_eq!(
-                app.setup_session.map(|session| session.step),
-                Some(SetupStep::Reference)
-            );
+            ),
+            ("confirmed", SetupReferenceCaptureState::Confirmed),
+            ("capture-failed", SetupReferenceCaptureState::CaptureFailed),
+            (
+                "save-failed",
+                SetupReferenceCaptureState::SaveFailed {
+                    previous_reference_sequence: None,
+                },
+            ),
+            ("existing", SetupReferenceCaptureState::Idle),
+            ("missing-frame", SetupReferenceCaptureState::Idle),
+            ("missing-display", SetupReferenceCaptureState::Idle),
+        ];
+
+        for locale in Locale::ALL {
+            app.config.interface_language = locale.tag().into();
+            set_ui_locale(&context, locale);
+            for viewport in [
+                egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
+                egui::vec2(1280.0, 720.0),
+            ] {
+                for dpi_scale in [1.0, 1.5] {
+                    for (name, state) in cases {
+                        let mut snapshot = ui_preview_snapshot();
+                        match name {
+                            "empty" | "capturing" | "capture-failed" => {
+                                snapshot.previews.reference = None;
+                                snapshot.previews.reference_candidate = None;
+                            }
+                            "review" | "saving" | "save-failed" => {
+                                snapshot.previews.reference = None;
+                                snapshot.previews.reference_candidate =
+                                    snapshot.previews.screen.clone();
+                            }
+                            "missing-frame" => {
+                                snapshot.previews.reference = None;
+                                snapshot.previews.reference_candidate = None;
+                                snapshot.previews.screen = None;
+                            }
+                            "missing-display" => {
+                                snapshot.previews.reference = None;
+                                snapshot.previews.reference_candidate = None;
+                                snapshot.previews.screen = None;
+                                snapshot.selected_monitor = None;
+                                snapshot.monitors = Vec::new().into();
+                                snapshot.screen_state = DeviceState::Unavailable;
+                            }
+                            "confirmed" | "existing" => {
+                                snapshot.previews.reference_candidate = None;
+                            }
+                            _ => unreachable!(),
+                        }
+                        app.config.selected_monitor_label = snapshot
+                            .selected_monitor
+                            .as_ref()
+                            .map(|monitor| monitor.label.clone())
+                            .unwrap_or_default();
+                        app.ui_preview.as_mut().unwrap().snapshot = snapshot;
+                        app.setup_reference_capture = state;
+                        app.setup_session = Some(SetupSession::preview(SetupStep::Reference));
+                        let mut input = egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
+                            ..egui::RawInput::default()
+                        };
+                        input
+                            .viewports
+                            .get_mut(&egui::ViewportId::ROOT)
+                            .unwrap()
+                            .native_pixels_per_point = Some(dpi_scale);
+                        let output = context.run_ui(input, |ui| {
+                            let content = app.root_ui(ui);
+                            assert!(ui.max_rect().contains_rect(content));
+                        });
+                        assert!(
+                            output.shapes.len() > 20,
+                            "{name} did not render at {locale:?}, {viewport:?}, {dpi_scale}"
+                        );
+                        assert_eq!(
+                            app.setup_session.map(|session| session.step),
+                            Some(SetupStep::Reference)
+                        );
+                    }
+                }
+            }
         }
     }
 
     #[cfg(not(windows))]
     #[test]
-    fn setup_reference_capture_tracks_success_and_timeout() {
+    fn setup_reference_candidate_tracks_capture_review_save_and_timeouts() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
             AppConfig::default(),
             Vec::new(),
             ConfigStore::new(directory.path()),
         );
-        let snapshot = ui_preview_snapshot();
-        let sequence = snapshot.previews.reference.as_ref().unwrap().sequence;
+        let mut snapshot = ui_preview_snapshot();
+        let reference_sequence = snapshot.previews.reference.as_ref().unwrap().sequence;
+        let candidate = snapshot.previews.screen.clone();
+        snapshot.previews.reference = None;
+        snapshot.previews.reference_candidate = candidate.clone();
 
-        app.setup_reference_capture = SetupReferenceCaptureState::Pending {
+        app.setup_reference_capture = SetupReferenceCaptureState::CapturingCandidate {
             started_at: Instant::now(),
-            previous_sequence: Some(sequence.wrapping_sub(1)),
+            previous_candidate_sequence: candidate
+                .as_ref()
+                .map(|frame| frame.sequence.wrapping_sub(1)),
         };
         app.update_setup_reference_capture(&snapshot);
         assert!(matches!(
             app.setup_reference_capture,
-            SetupReferenceCaptureState::Success
+            SetupReferenceCaptureState::Review { .. }
         ));
 
-        app.setup_reference_capture = SetupReferenceCaptureState::Pending {
+        snapshot.previews.reference_candidate = None;
+        app.setup_reference_capture = SetupReferenceCaptureState::CapturingCandidate {
             started_at: Instant::now() - REFERENCE_CAPTURE_TIMEOUT,
-            previous_sequence: Some(sequence),
+            previous_candidate_sequence: None,
         };
         app.update_setup_reference_capture(&snapshot);
         assert!(matches!(
             app.setup_reference_capture,
-            SetupReferenceCaptureState::Failed
+            SetupReferenceCaptureState::CaptureFailed
+        ));
+
+        snapshot.previews.reference = ui_preview_snapshot().previews.reference;
+        app.setup_reference_capture = SetupReferenceCaptureState::SavingCandidate {
+            started_at: Instant::now(),
+            previous_reference_sequence: Some(reference_sequence.wrapping_sub(1)),
+        };
+        app.update_setup_reference_capture(&snapshot);
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::Confirmed
+        ));
+
+        snapshot.previews.reference_candidate = candidate;
+        app.setup_reference_capture = SetupReferenceCaptureState::SavingCandidate {
+            started_at: Instant::now() - REFERENCE_CAPTURE_TIMEOUT,
+            previous_reference_sequence: Some(reference_sequence),
+        };
+        app.update_setup_reference_capture(&snapshot);
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::SaveFailed { .. }
         ));
     }
 

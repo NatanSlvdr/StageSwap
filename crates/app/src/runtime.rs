@@ -507,6 +507,40 @@ impl RuntimeState {
         self.snapshot.recent_activity = self.activity.iter().cloned().collect::<Vec<_>>().into();
     }
 
+    #[cfg(any(windows, test))]
+    fn stage_reference_candidate(&mut self, frame: Arc<Frame>) {
+        self.snapshot.previews.reference_candidate = Some(frame);
+    }
+
+    #[cfg(any(windows, test))]
+    fn take_reference_candidate(&mut self) -> Option<Arc<Frame>> {
+        self.snapshot.previews.reference_candidate.take()
+    }
+
+    #[cfg(any(windows, test))]
+    fn confirm_reference_candidate(&mut self) -> Result<(), String> {
+        let frame = self
+            .snapshot
+            .previews
+            .reference_candidate
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "no reference candidate".to_owned())?;
+        let reference = gray_thumbnail(&frame)
+            .ok_or_else(|| "reference candidate is not a valid screen frame".to_owned())?;
+
+        // Persist first so a failed save leaves both the candidate and the active
+        // reference untouched. The UI can then offer an exact retry or retake.
+        save_reference(&frame, &self.config.reference_image_path)?;
+        self.take_reference_candidate();
+        self.install_reference(reference, &frame, Instant::now());
+        Ok(())
+    }
+
+    fn discard_reference_candidate(&mut self) {
+        self.snapshot.previews.reference_candidate = None;
+    }
+
     fn command(&mut self, command: Command) -> bool {
         match command {
             Command::Start => {
@@ -545,14 +579,29 @@ impl RuntimeState {
                     });
                 self.reference = reference;
                 self.snapshot.previews.reference = preview;
+                self.discard_reference_candidate();
                 self.detector = DebouncedDetector::new(DetectorSettings {
                     threshold: self.config.similarity_threshold,
                     ..DetectorSettings::default()
                 });
                 self.record("Settings updated");
             }
-            Command::CaptureReference => self.record("Reference capture requested"),
+            Command::CaptureReference => {
+                self.discard_reference_candidate();
+                self.record("Reference capture requested");
+            }
+            Command::CaptureReferenceCandidate => {
+                self.record("Reference candidate capture requested")
+            }
+            Command::ConfirmReferenceCandidate => {
+                self.record("Reference candidate confirmation requested")
+            }
+            Command::DiscardReferenceCandidate => {
+                self.discard_reference_candidate();
+                self.record("Reference candidate discarded")
+            }
             Command::ImportReference(path) => {
+                self.discard_reference_candidate();
                 let _ = path;
                 self.record("Reference import requested");
             }
@@ -616,7 +665,7 @@ impl RuntimeState {
         self.snapshot.previews.final_output = Some(Arc::new(output));
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     fn install_reference(&mut self, reference: GrayImage, preview: &Frame, now: Instant) {
         self.sequence = self.sequence.wrapping_add(1).max(1);
         self.reference = Some(reference);
@@ -775,7 +824,7 @@ fn load_reference(path: &str) -> Option<(GrayImage, Arc<Frame>)> {
     Some((reference, Arc::new(preview)))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn save_reference(frame: &Frame, path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("reference image path is empty".into());
@@ -1245,24 +1294,34 @@ impl Platform {
             }
             Command::CaptureReference => {
                 if let Some(frame) = self.screen.latest_frame() {
-                    if let Some(reference) = gray_thumbnail(&frame) {
-                        state.install_reference(reference, &frame, Instant::now());
-                        match save_reference(&frame, &state.config.reference_image_path) {
-                            Ok(()) => state.record("Reference captured"),
-                            Err(error) => state.record(format!(
-                                "Reference captured for this session but could not be saved: {error}"
-                            )),
-                        }
-                        self.invalidate_monitor_scans(state.config.similarity_threshold);
-                        if state.config.automatic_monitor_rescans {
-                            self.request_monitor_scan(state, state.config.cursor_visible);
-                        }
-                    } else {
-                        state.record("Reference capture failed: invalid screen frame");
-                    }
+                    self.commit_reference(state, frame, "Reference captured");
                 } else {
                     state.record("Reference capture failed: no screen frame");
                 }
+            }
+            Command::CaptureReferenceCandidate => {
+                if let Some(frame) = self.screen.latest_frame() {
+                    state.stage_reference_candidate(frame);
+                    state.record("Reference candidate captured for review");
+                } else {
+                    state.record("Reference candidate capture failed: no screen frame");
+                }
+            }
+            Command::ConfirmReferenceCandidate => match state.confirm_reference_candidate() {
+                Ok(()) => {
+                    state.record("Reference candidate confirmed");
+                    self.invalidate_monitor_scans(state.config.similarity_threshold);
+                    if state.config.automatic_monitor_rescans {
+                        self.request_monitor_scan(state, state.config.cursor_visible);
+                    }
+                }
+                Err(error) => {
+                    state.record(format!("Reference candidate confirmation failed: {error}"));
+                }
+            },
+            Command::DiscardReferenceCandidate => {
+                state.discard_reference_candidate();
+                state.record("Reference candidate discarded");
             }
             Command::ImportReference(path) => {
                 match import_reference(path, &state.config.reference_image_path) {
@@ -1332,6 +1391,29 @@ impl Platform {
         if matches!(command, Command::Restart(RestartTarget::All)) {
             self.restart_webcam(state);
             self.restart_screen(state);
+        }
+    }
+
+    fn commit_reference(
+        &mut self,
+        state: &mut RuntimeState,
+        frame: Arc<Frame>,
+        success_message: &str,
+    ) {
+        let Some(reference) = gray_thumbnail(&frame) else {
+            state.record("Reference capture failed: invalid screen frame");
+            return;
+        };
+        state.install_reference(reference, &frame, Instant::now());
+        match save_reference(&frame, &state.config.reference_image_path) {
+            Ok(()) => state.record(success_message),
+            Err(error) => state.record(format!(
+                "Reference captured for this session but could not be saved: {error}"
+            )),
+        }
+        self.invalidate_monitor_scans(state.config.similarity_threshold);
+        if state.config.automatic_monitor_rescans {
+            self.request_monitor_scan(state, state.config.cursor_visible);
         }
     }
 
@@ -1952,6 +2034,84 @@ mod tests {
         assert_eq!(reference.size, Size::new(160, 90));
         assert_eq!(preview.size, Size::new(2, 1));
         assert_eq!(preview.pixels(), &[0, 0, 255, 255, 255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn reference_candidate_is_isolated_discardable_and_committed_exactly() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reference.png");
+        let config = AppConfig {
+            reference_image_path: path.display().to_string(),
+            ..AppConfig::default()
+        };
+        let mut state = RuntimeState::new(config);
+        let original = Arc::new(solid_frame(32));
+        state.snapshot.previews.reference = Some(Arc::clone(&original));
+        let candidate = Arc::new(solid_frame(176));
+
+        state.stage_reference_candidate(Arc::clone(&candidate));
+        assert!(Arc::ptr_eq(
+            state.snapshot.previews.reference.as_ref().unwrap(),
+            &original
+        ));
+        assert!(Arc::ptr_eq(
+            state
+                .snapshot
+                .previews
+                .reference_candidate
+                .as_ref()
+                .unwrap(),
+            &candidate
+        ));
+
+        state.discard_reference_candidate();
+        assert!(state.snapshot.previews.reference_candidate.is_none());
+        assert!(Arc::ptr_eq(
+            state.snapshot.previews.reference.as_ref().unwrap(),
+            &original
+        ));
+
+        state.stage_reference_candidate(Arc::clone(&candidate));
+        state.confirm_reference_candidate().unwrap();
+
+        assert!(state.snapshot.previews.reference_candidate.is_none());
+        assert_eq!(
+            state.snapshot.previews.reference.as_ref().unwrap().pixels(),
+            candidate.pixels()
+        );
+        let (_, loaded) = load_reference(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.pixels(), candidate.pixels());
+    }
+
+    #[test]
+    fn failed_candidate_save_keeps_candidate_and_active_reference_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let invalid_path = directory.path().join("reference-target-is-a-directory");
+        std::fs::create_dir(&invalid_path).unwrap();
+        let config = AppConfig {
+            reference_image_path: invalid_path.display().to_string(),
+            ..AppConfig::default()
+        };
+        let mut state = RuntimeState::new(config);
+        let original = Arc::new(solid_frame(32));
+        let candidate = Arc::new(solid_frame(176));
+        state.snapshot.previews.reference = Some(Arc::clone(&original));
+        state.stage_reference_candidate(Arc::clone(&candidate));
+
+        assert!(state.confirm_reference_candidate().is_err());
+        assert!(Arc::ptr_eq(
+            state.snapshot.previews.reference.as_ref().unwrap(),
+            &original
+        ));
+        assert!(Arc::ptr_eq(
+            state
+                .snapshot
+                .previews
+                .reference_candidate
+                .as_ref()
+                .unwrap(),
+            &candidate
+        ));
     }
 
     #[test]

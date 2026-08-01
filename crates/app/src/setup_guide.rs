@@ -74,7 +74,9 @@ impl SetupStep {
             }
             Self::Webcam => "Choose the webcam Zoom should show while JW Library is idle.",
             Self::Screen => "Choose the second display JW Library uses for presentations.",
-            Self::Reference => "Capture the normal JW Library idle display as the reference.",
+            Self::Reference => {
+                "Return JW Library to its normal idle display, then capture the live frame below."
+            }
             Self::Ready => {
                 "Open the JW Library presentation, choose StageSwap in Zoom, and start automation."
             }
