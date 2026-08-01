@@ -3649,12 +3649,10 @@ impl SwitcherApp {
     fn general_settings(&mut self, ui: &mut egui::Ui) {
         settings_info_card(
             ui,
-            "StageSwap automates Zoom retransmission using JW Library. While the selected JW Library display matches the saved idle reference, Zoom sees the webcam. When JW Library shows media, Zoom sees the display. When JW Library returns to idle, Zoom returns to the webcam.",
-        );
-        ui.add_space(10.0);
-        settings_info_card(
-            ui,
-            "StageSwap is an independent, unofficial project and is not affiliated with or endorsed by the publisher of JW Library. The name JW Library is used only to describe compatibility.",
+            &[
+                "StageSwap automates Zoom retransmission using JW Library. While the selected JW Library display matches the saved idle reference, Zoom sees the webcam. When JW Library shows media, Zoom sees the display. When JW Library returns to idle, Zoom returns to the webcam.",
+                "StageSwap is an independent, unofficial project and is not affiliated with or endorsed by the publisher of JW Library. The name JW Library is used only to describe compatibility.",
+            ],
         );
         ui.add_space(12.0);
         let mut open_setup_guide = false;
@@ -3676,19 +3674,34 @@ impl SwitcherApp {
 
         let current_locale = self.locale();
         let mut selected_locale = current_locale;
-        settings_control_row(
+        settings_fixed_control_row(
             ui,
             "Interface language",
             "Changes apply immediately.",
+            152.0,
             |ui| {
-                egui::ComboBox::from_id_salt("interface-language")
+                let combo = egui::ComboBox::from_id_salt("interface-language")
                     .width(152.0)
-                    .selected_text(selected_locale.native_name())
+                    .selected_text(language_selector_text(selected_locale))
                     .show_ui(ui, |ui| {
                         for locale in Locale::ALL {
-                            ui.selectable_value(&mut selected_locale, locale, locale.native_name());
+                            let option = ui.selectable_value(
+                                &mut selected_locale,
+                                locale,
+                                language_selector_text(locale),
+                            );
+                            paint_language_flag(
+                                ui.painter(),
+                                language_flag_rect(option.rect),
+                                locale,
+                            );
                         }
                     });
+                paint_language_flag(
+                    ui.painter(),
+                    language_flag_rect(combo.response.rect),
+                    selected_locale,
+                );
             },
         );
         if selected_locale != current_locale {
@@ -6407,8 +6420,11 @@ fn settings_section_heading(
     .rect
 }
 
-fn settings_info_card(ui: &mut egui::Ui, text: &str) -> Rect {
-    let text = tr(ui, text);
+fn settings_info_card(ui: &mut egui::Ui, paragraphs: &[&str]) -> Rect {
+    let paragraphs = paragraphs
+        .iter()
+        .map(|paragraph| tr(ui, paragraph))
+        .collect::<Vec<_>>();
     egui::Frame::new()
         .fill(Color32::from_rgb(27, 31, 39))
         .stroke(Stroke::new(1.0, Color32::from_rgb(52, 61, 76)))
@@ -6423,19 +6439,111 @@ fn settings_info_card(ui: &mut egui::Ui, text: &str) -> Rect {
                     UiIcon::Info,
                     Color32::from_rgb(119, 164, 247),
                 );
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(text.as_ref())
-                            .size(11.5)
-                            .line_height(Some(17.0))
-                            .color(Color32::from_rgb(174, 182, 196)),
-                    )
-                    .wrap(),
-                );
+                ui.vertical(|ui| {
+                    for (index, paragraph) in paragraphs.iter().enumerate() {
+                        if index > 0 {
+                            ui.add_space(6.0);
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(paragraph.as_ref())
+                                    .size(11.5)
+                                    .line_height(Some(17.0))
+                                    .color(Color32::from_rgb(174, 182, 196)),
+                            )
+                            .wrap(),
+                        );
+                    }
+                });
             });
         })
         .response
         .rect
+}
+
+fn language_selector_text(locale: Locale) -> String {
+    format!("      {}", locale.native_name())
+}
+
+fn language_flag_rect(container: Rect) -> Rect {
+    Rect::from_center_size(
+        Pos2::new(container.left() + 17.0, container.center().y),
+        egui::vec2(18.0, 12.0),
+    )
+}
+
+fn paint_language_flag(painter: &egui::Painter, rect: Rect, locale: Locale) {
+    painter.rect_filled(rect, 1.5, Color32::WHITE);
+    match locale {
+        Locale::English => {
+            let stripe_height = rect.height() / 7.0;
+            for stripe in [0, 2, 4, 6] {
+                let stripe_rect = Rect::from_min_max(
+                    Pos2::new(rect.left(), rect.top() + stripe as f32 * stripe_height),
+                    Pos2::new(
+                        rect.right(),
+                        rect.top() + (stripe + 1) as f32 * stripe_height,
+                    ),
+                );
+                painter.rect_filled(stripe_rect, 0.0, Color32::from_rgb(190, 45, 55));
+            }
+            painter.rect_filled(
+                Rect::from_min_max(
+                    rect.min,
+                    Pos2::new(
+                        rect.left() + rect.width() * 0.44,
+                        rect.top() + stripe_height * 4.0,
+                    ),
+                ),
+                0.0,
+                Color32::from_rgb(48, 70, 130),
+            );
+        }
+        Locale::French => {
+            let third = rect.width() / 3.0;
+            painter.rect_filled(
+                Rect::from_min_max(rect.min, Pos2::new(rect.left() + third, rect.bottom())),
+                0.0,
+                Color32::from_rgb(35, 73, 155),
+            );
+            painter.rect_filled(
+                Rect::from_min_max(Pos2::new(rect.left() + third * 2.0, rect.top()), rect.max),
+                0.0,
+                Color32::from_rgb(220, 45, 55),
+            );
+        }
+        Locale::Spanish => {
+            let band_height = rect.height() * 0.25;
+            let red = Color32::from_rgb(190, 35, 45);
+            painter.rect_filled(
+                Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.top() + band_height)),
+                0.0,
+                red,
+            );
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(rect.left(), rect.bottom() - band_height),
+                    rect.max,
+                ),
+                0.0,
+                red,
+            );
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(rect.left(), rect.top() + band_height),
+                    Pos2::new(rect.right(), rect.bottom() - band_height),
+                ),
+                0.0,
+                Color32::from_rgb(245, 198, 40),
+            );
+        }
+    }
+    painter.rect_stroke(
+        rect,
+        1.5,
+        Stroke::new(0.75, Color32::from_black_alpha(110)),
+        StrokeKind::Inside,
+    );
 }
 
 fn settings_section_gap(ui: &mut egui::Ui) {
@@ -6887,6 +6995,56 @@ fn settings_action_row(
     add_action: impl FnOnce(&mut egui::Ui),
 ) {
     settings_control_row(ui, title, description, add_action);
+}
+
+fn settings_fixed_control_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    description: &str,
+    control_width: f32,
+    add_control: impl FnOnce(&mut egui::Ui),
+) -> Rect {
+    let stable_title = title.to_owned();
+    let title = tr(ui, title);
+    let description = tr(ui, description);
+    let width = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(egui::vec2(width, 54.0), Sense::hover());
+    let control_size = egui::vec2(control_width.min(width).max(1.0), 32.0);
+    let control_rect = Rect::from_center_size(
+        Pos2::new(row.right() - control_size.x / 2.0, row.center().y),
+        control_size,
+    );
+    let label_rect = Rect::from_min_max(
+        row.min,
+        Pos2::new((control_rect.left() - 12.0).max(row.left()), row.bottom()),
+    );
+    let mut label_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("settings-fixed-control-label", stable_title.clone()))
+            .max_rect(label_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    label_ui.add_space(4.0);
+    label_ui.label(
+        RichText::new(title.as_ref())
+            .size(13.0)
+            .color(Color32::from_rgb(224, 228, 235)),
+    );
+    label_ui.label(
+        RichText::new(description.as_ref())
+            .size(10.5)
+            .color(Color32::from_rgb(126, 134, 148)),
+    );
+
+    let mut control_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("settings-fixed-control", stable_title))
+            .max_rect(control_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    add_control(&mut control_ui);
+    ui.separator();
+    control_rect
 }
 
 fn settings_single_button_row(
@@ -9115,6 +9273,40 @@ mod tests {
             (button_rect.right() - row_right).abs() <= 2.0,
             "setup guide button should align with the full settings row: \
              button={button_rect:?}, row_right={row_right}"
+        );
+    }
+
+    #[test]
+    fn language_selector_is_flush_with_the_right_control_edge() {
+        let context = egui::Context::default();
+        let mut selector_rect = Rect::NOTHING;
+        let mut row_right = 0.0;
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 80.0))),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                ui.set_width(960.0);
+                row_right = ui.available_rect_before_wrap().right();
+                selector_rect = settings_fixed_control_row(
+                    ui,
+                    "Interface language",
+                    "Changes apply immediately.",
+                    152.0,
+                    |ui| {
+                        egui::ComboBox::from_id_salt("language-selector-alignment-test")
+                            .width(152.0)
+                            .selected_text("English")
+                            .show_ui(ui, |_| {});
+                    },
+                );
+            },
+        );
+        assert!(
+            (selector_rect.right() - row_right).abs() <= 2.0,
+            "language selector should align with the full settings row: \
+             selector={selector_rect:?}, row_right={row_right}"
         );
     }
 
