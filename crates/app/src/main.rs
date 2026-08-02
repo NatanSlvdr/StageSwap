@@ -441,18 +441,14 @@ impl SettingsTab {
         localized_text(
             locale,
             match self {
-                Self::General => {
-                    "Set up automatic switching between your webcam and secondary screen in Zoom."
-                }
-                Self::Webcam => {
-                    "Choose the webcam Zoom shows when JW Library is not playing media."
-                }
+                Self::General => "Choose how StageSwap starts, stays open, and alerts you.",
+                Self::Webcam => "Choose the webcam Zoom sees when JW Library is not playing media.",
                 Self::Screen => "Choose the secondary screen JW Library uses for presentations.",
                 Self::Matching => {
-                    "Capture the reference image StageSwap uses for automatic switching."
+                    "Capture the screen JW Library shows when no media is playing. StageSwap compares the live screen with it to detect media."
                 }
                 Self::Diagnostics => {
-                    "Inspect component status, technical details, logs, and tools."
+                    "Check video connections, troubleshoot problems, and view logs."
                 }
             },
         )
@@ -2739,7 +2735,7 @@ impl SwitcherApp {
                 ui.add_space(10.0);
                 setup_capture_help(
                     ui,
-                    "Your JW Library screen with no media playing should look like this example.",
+                    "The screen JW Library shows when no media is playing should look like this example.",
                 );
             });
     }
@@ -2826,6 +2822,13 @@ impl SwitcherApp {
                         }
                     });
             },
+        );
+        ui.add_space(18.0);
+        setup_warning_callout(
+            ui,
+            width,
+            "IMPORTANT",
+            "In Zoom, select StageSwap (the virtual camera) as your camera before the meeting.",
         );
         if !(webcam_ready && screen_ready && reference_ready) {
             ui.add_space(18.0);
@@ -3587,7 +3590,7 @@ impl SwitcherApp {
         settings_info_card(
             ui,
             &[
-                "StageSwap automatically switches what Zoom shows. When the secondary screen matches the reference image, Zoom shows the webcam. When media is detected, Zoom shows the secondary screen. When no media is detected again, Zoom returns to the webcam.",
+                "StageSwap automatically switches what Zoom sees between the webcam and JW Library presentations. When the secondary screen matches the reference image, Zoom sees the webcam. When media is detected, Zoom sees the secondary screen. When no media is detected again, Zoom returns to the webcam.",
                 "StageSwap is an independent, unofficial project and is not affiliated with or endorsed by the publisher of JW Library. The name JW Library is used only to describe compatibility.",
             ],
         );
@@ -3596,7 +3599,7 @@ impl SwitcherApp {
         if settings_single_button_row(
             ui,
             "Guided setup",
-            "Set up the webcam, secondary screen, reference image, and Zoom output.",
+            "Choose the webcam and secondary screen, then capture the screen JW Library shows when no media is playing.",
             "Open guided setup",
             206.0,
         )
@@ -3651,7 +3654,7 @@ impl SwitcherApp {
             ui,
             UiIcon::Play,
             "Startup",
-            "Applied the next time StageSwap starts.",
+            "Choose what StageSwap does after you sign in to Windows.",
         );
         #[cfg(windows)]
         if self.portable_mode == stageswap_windows::PortableMode::RunOnce {
@@ -3711,7 +3714,7 @@ impl SwitcherApp {
             ui,
             UiIcon::Window,
             "Window behavior",
-            "Choose what closing StageSwap does.",
+            "Choose what happens when you close the StageSwap window.",
         );
         settings_toggle_row(
             ui,
@@ -3737,7 +3740,7 @@ impl SwitcherApp {
             ui,
             UiIcon::Bell,
             "Notifications",
-            "Important Windows warnings.",
+            "Choose whether StageSwap alerts you when something needs attention.",
         );
         settings_toggle_row(
             ui,
@@ -3766,7 +3769,7 @@ impl SwitcherApp {
             SettingsSection {
                 icon: UiIcon::Camera,
                 title: "Camera input",
-                description: "Used by Camera mode and whenever Automatic selects Camera. Output is always 16:9.",
+                description: "This is the webcam StageSwap sends when JW Library is not playing media. Output is always 16:9.",
             },
             SettingsPreview {
                 kind: PreviewKind::Webcam,
@@ -3840,7 +3843,7 @@ impl SwitcherApp {
             SettingsSection {
                 icon: UiIcon::Monitor,
                 title: "Secondary screen",
-                description: "This is the secondary screen JW Library uses for presentations. Auto mode watches it for media changes.",
+                description: "This is the secondary screen JW Library uses for presentations. StageSwap watches it for media.",
             },
             SettingsPreview {
                 kind: PreviewKind::Screen,
@@ -3916,14 +3919,14 @@ impl SwitcherApp {
             SettingsSection {
                 icon: UiIcon::Target,
                 title: "Reference image",
-                description: "No media: Camera. Media detected: Screen. Without a reference image, Auto mode stays on Camera.",
+                description: "StageSwap compares the live secondary screen with this image. A match means no media is playing.",
             },
             SettingsPreview {
                 kind: PreviewKind::Reference,
                 frame: snapshot.previews.reference.as_ref(),
                 label: "Reference image",
                 empty_message:
-                    "No reference image — show JW Library with no media playing, then capture it.",
+                    "No reference image — show the screen JW Library shows when no media is playing, then capture it.",
                 actual_output: snapshot.actual_output,
             },
             |app, ui| {
@@ -4018,7 +4021,7 @@ impl SwitcherApp {
             ui,
             UiIcon::Check,
             "Component health",
-            "Current status of each video component.",
+            "Check whether each video component and media detection are working.",
         );
         settings_device_status(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state);
         settings_device_status(ui, UiIcon::Monitor, "Screen capture", snapshot.screen_state);
@@ -4045,7 +4048,7 @@ impl SwitcherApp {
             ui,
             UiIcon::Wrench,
             "Tools",
-            "Rescan finds the secondary screen. Restart buttons reconnect only the named component.",
+            "Rescan for the JW Library screen or restart a video component.",
         );
         ui.horizontal_wrapped(|ui| {
             if icon_button(
@@ -4071,7 +4074,7 @@ impl SwitcherApp {
             ui,
             UiIcon::Info,
             "Technical details",
-            "Identifiers, formats, and timing used by the active video output.",
+            "View the devices, formats, and timing StageSwap is currently using.",
         );
         settings_info_row(
             ui,
@@ -4123,7 +4126,7 @@ impl SwitcherApp {
             ui,
             UiIcon::Folder,
             "Storage and logs",
-            "Settings, references, and 14-day logs stay on this computer.",
+            "Find saved settings and logs, or export logs for troubleshooting.",
         );
         settings_info_row(
             ui,
@@ -4413,7 +4416,7 @@ impl SwitcherApp {
         ui.label(
             RichText::new(tr(
                 ui,
-                "Make sure this image shows JW Library with no media playing.",
+                "Make sure this image is the screen JW Library shows when no media is playing.",
             ))
             .size(14.0)
             .line_height(Some(21.0))
@@ -4780,7 +4783,7 @@ fn compact_reference_example_card(ui: &mut egui::Ui, textures: &SetupExampleText
                     ui.add_space(6.0);
                     setup_capture_help(
                         ui,
-                        "Your JW Library screen with no media playing should look like this example.",
+                        "The screen JW Library shows when no media is playing should look like this example.",
                     );
                 });
             });
@@ -6128,8 +6131,8 @@ fn setup_demo_rule(ui: &mut egui::Ui, width: f32, blend: f32, background: Color3
     paint_setup_crossfade_text(
         ui,
         rect,
-        "No media in JW Library → Zoom shows the webcam",
-        "Media detected in JW Library → Zoom shows the secondary screen",
+        "No media in JW Library → Zoom sees the webcam",
+        "Media detected in JW Library → Zoom sees the secondary screen",
         blend,
         FontId::proportional(13.0),
         mix_color(background, SETUP_SIGNAL_WHITE, 0.82),
@@ -6139,7 +6142,10 @@ fn setup_demo_rule(ui: &mut egui::Ui, width: f32, blend: f32, background: Color3
 fn setup_plain_zoom_reminder(ui: &mut egui::Ui, width: f32, background: Color32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 28.0), Sense::hover());
     let color = mix_color(background, SETUP_SIGNAL_WHITE, 0.76);
-    let text = tr(ui, "Choose StageSwap as your camera in Zoom.");
+    let text = tr(
+        ui,
+        "StageSwap sends the webcam or JW Library screen to Zoom through one virtual camera.",
+    );
     let galley = ui
         .painter()
         .layout_no_wrap(text.into_owned(), FontId::proportional(12.5), color);
@@ -6175,7 +6181,7 @@ fn setup_static_switching_demo(
         ui,
         width,
         row_height,
-        "No media in JW Library → Zoom shows the webcam",
+        "No media in JW Library → Zoom sees the webcam",
         textures,
         false,
         background,
@@ -6185,7 +6191,7 @@ fn setup_static_switching_demo(
         ui,
         width,
         row_height,
-        "Media detected in JW Library → Zoom shows the secondary screen",
+        "Media detected in JW Library → Zoom sees the secondary screen",
         textures,
         true,
         background,
@@ -6585,6 +6591,50 @@ fn setup_message(ui: &mut egui::Ui, text: &str, color: Color32) {
         ),
     );
     ui.painter().rect_filled(stripe, 2, color);
+}
+
+fn setup_warning_callout(ui: &mut egui::Ui, width: f32, title: &str, text: &str) {
+    let title = tr(ui, title);
+    let text = tr(ui, text);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 1.0),
+        egui::Layout::top_down(egui::Align::Center),
+        |ui| {
+            egui::Frame::new()
+                .fill(mix_color(SETUP_SIGNAL_DECK, TRANSITION_AMBER, 0.14))
+                .stroke(Stroke::new(1.5, TRANSITION_AMBER.gamma_multiply(0.72)))
+                .corner_radius(10)
+                .inner_margin(egui::Margin::symmetric(16, 14))
+                .show(ui, |ui| {
+                    ui.set_width((width - 32.0).max(1.0));
+                    ui.horizontal_top(|ui| {
+                        let (icon_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
+                        ui_icon::paint(ui.painter(), icon_rect, UiIcon::Warning, TRANSITION_AMBER);
+                        ui.add_space(6.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(title.as_ref())
+                                    .size(11.0)
+                                    .strong()
+                                    .color(TRANSITION_AMBER),
+                            );
+                            ui.add_space(3.0);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(text.as_ref())
+                                        .size(13.0)
+                                        .strong()
+                                        .line_height(Some(19.0))
+                                        .color(SETUP_SIGNAL_WHITE),
+                                )
+                                .wrap(),
+                            );
+                        });
+                    });
+                });
+        },
+    );
 }
 
 fn controls_section_heading(ui: &mut egui::Ui, icon: UiIcon, title: &str) -> Rect {
@@ -9629,7 +9679,7 @@ mod tests {
         assert!(
             SettingsTab::Matching
                 .description(Locale::English)
-                .contains("reference image")
+                .contains("compares the live screen")
         );
         assert_ne!(SettingsTab::Screen, SettingsTab::Matching);
     }
@@ -9669,7 +9719,7 @@ mod tests {
                 button_rect = settings_single_button_row(
                     ui,
                     "Guided setup",
-                    "Set up the webcam, secondary screen, reference image, and Zoom output.",
+                    "Choose the webcam and secondary screen, then capture the screen JW Library shows when no media is playing.",
                     "Open guided setup",
                     206.0,
                 )

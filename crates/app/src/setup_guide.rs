@@ -70,18 +70,16 @@ impl SetupStep {
     pub(crate) const fn explanation(self) -> &'static str {
         match self {
             Self::HowItWorks => {
-                "Automatically switch Zoom between the webcam and JW Library presentations."
+                "Automatically switch what Zoom sees between the webcam and JW Library presentations."
             }
             Self::Webcam => {
-                "Choose the webcam Zoom should show when JW Library is not playing media."
+                "Choose the webcam Zoom should see when JW Library is not playing media."
             }
             Self::Screen => "Choose the secondary screen JW Library uses for presentations.",
             Self::Reference => {
-                "Return JW Library to the screen shown when no media is playing, then capture the live image below."
+                "Show the screen JW Library shows when no media is playing, then capture the live image below."
             }
-            Self::Ready => {
-                "Open the JW Library presentation, choose StageSwap in Zoom, and start automatic switching."
-            }
+            Self::Ready => "Review the setup status below, then start automatic switching.",
         }
     }
 }

@@ -27,7 +27,8 @@ StageSwap uses clear, natural product language in English, French, and neutral i
 
 - Use **Secondary screen** in page titles and explanations. Use **Screen** only in compact mode controls where it appears beside **Auto** and **Camera**.
 - Use **Webcam** for the physical device. Use **Camera** only for the compact forced-output mode.
-- Describe the reference condition directly: “JW Library is not playing media,” “aucun média n’est affiché dans JW Library,” and “JW Library no reproduce contenido multimedia.”
+- Describe the reference condition as “the screen JW Library shows when no media is playing.” Translate the idea naturally as “l’écran affiché par JW Library lorsqu’aucun média n’est en cours de lecture” and “la pantalla que muestra JW Library cuando no se reproduce contenido multimedia.”
+- Use “Zoom sees” only when English copy describes the virtual-camera output. Copy about the secondary screen must describe it as the screen StageSwap watches.
 - In short French states, prefer **Aucun média** and **Média détecté**. In standalone explanatory labels, **Aucun média affiché** is also approved. Do not force *contenu* into French when *média* is sufficient.
 - Adapt verbs to the language instead of concatenating glossary entries. The automatic-switching actions are **Start/Stop automatic switching**, **Activer/Désactiver le changement automatique**, and **Activar/Desactivar el cambio automático**.
 - Keep **StageSwap**, **JW Library**, and **Zoom** unchanged.

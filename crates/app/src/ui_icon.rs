@@ -36,13 +36,14 @@ pub(crate) enum UiIcon {
     Target,
     Trash,
     Unavailable,
+    Warning,
     Window,
     Wrench,
 }
 
 impl UiIcon {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 31] = [
+    pub(crate) const ALL: [Self; 32] = [
         Self::Back,
         Self::ArrowRight,
         Self::Bell,
@@ -72,6 +73,7 @@ impl UiIcon {
         Self::Target,
         Self::Trash,
         Self::Unavailable,
+        Self::Warning,
         Self::Window,
         Self::Wrench,
     ];
@@ -107,6 +109,7 @@ impl UiIcon {
             Self::Target => regular::TARGET,
             Self::Trash => regular::TRASH,
             Self::Unavailable => regular::PROHIBIT,
+            Self::Warning => regular::WARNING,
             Self::Window => regular::APP_WINDOW,
             Self::Wrench => regular::WRENCH,
         }
