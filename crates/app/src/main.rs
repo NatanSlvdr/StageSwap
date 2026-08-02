@@ -430,8 +430,8 @@ impl SettingsTab {
             match self {
                 Self::General => "General",
                 Self::Webcam => "Webcam",
-                Self::Screen => "Screen",
-                Self::Matching => "Matching",
+                Self::Screen => "Secondary screen",
+                Self::Matching => "Reference image",
                 Self::Diagnostics => "Diagnostics",
             },
         )
@@ -442,15 +442,17 @@ impl SettingsTab {
             locale,
             match self {
                 Self::General => {
-                    "Configure StageSwap for automatic Zoom retransmission using JW Library."
+                    "Set up automatic switching between your webcam and secondary screen in Zoom."
                 }
-                Self::Webcam => "Choose the webcam Zoom shows while JW Library is idle.",
-                Self::Screen => "Choose the second display JW Library uses for presentations.",
+                Self::Webcam => {
+                    "Choose the webcam Zoom shows when JW Library is not playing media."
+                }
+                Self::Screen => "Choose the secondary screen JW Library uses for presentations.",
                 Self::Matching => {
-                    "Capture and tune the JW Library idle reference used for automatic switching."
+                    "Capture the reference image StageSwap uses for automatic switching."
                 }
                 Self::Diagnostics => {
-                    "Inspect component health, technical details, logs, and recovery tools."
+                    "Inspect component status, technical details, logs, and tools."
                 }
             },
         )
@@ -851,7 +853,7 @@ impl PreviewKind {
         match self {
             Self::Webcam => "WEBCAM",
             Self::Screen => "SECONDARY SCREEN",
-            Self::Reference => "IDLE REFERENCE",
+            Self::Reference => "REFERENCE IMAGE",
             Self::Output => "ZOOM OUTPUT",
         }
     }
@@ -882,7 +884,7 @@ impl PreviewKind {
         match self {
             Self::Webcam => "No webcam frame",
             Self::Screen => "No secondary screen frame",
-            Self::Reference => "No idle reference",
+            Self::Reference => "No reference image",
             Self::Output => "No Zoom output frame",
         }
     }
@@ -2390,9 +2392,9 @@ impl SwitcherApp {
             .iter()
             .any(|monitor| monitor.label == self.config.selected_monitor_label);
         let empty_message = if !self.config.selected_monitor_label.is_empty() && !saved_available {
-            "This JW Library display is unavailable. Choose another one or rescan."
+            "This secondary screen is unavailable. Choose another one or rescan."
         } else {
-            "No display found. Connect the JW Library presentation display, then rescan."
+            "No screen found. Connect the secondary screen used by JW Library, then rescan."
         };
         let selected_name = snapshot
             .selected_monitor
@@ -2409,14 +2411,14 @@ impl SwitcherApp {
                     SettingsPreview {
                         kind: PreviewKind::Screen,
                         frame: snapshot.previews.screen.as_ref(),
-                        label: "JW Library display preview",
+                        label: "Secondary screen preview",
                         empty_message,
                         actual_output: snapshot.actual_output,
                     },
                     SETUP_HARDWARE_PREVIEW_WIDTH,
                 );
                 ui.add_space(13.0);
-                setup_control_label(ui, UiIcon::Monitor, "JW Library display", SETTINGS_BLUE);
+                setup_control_label(ui, UiIcon::Monitor, "Secondary screen", SETTINGS_BLUE);
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let geometry = selector_utility_geometry(
@@ -2566,7 +2568,7 @@ impl SwitcherApp {
 
         ui.set_width(width);
         ui.horizontal(|ui| {
-            setup_control_label(ui, UiIcon::Monitor, "JW Library display", SETTINGS_BLUE);
+            setup_control_label(ui, UiIcon::Monitor, "Secondary screen", SETTINGS_BLUE);
             if screen_selected {
                 setup_live_badge(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2602,7 +2604,7 @@ impl SwitcherApp {
             screen_frame,
             [width, preview_height],
             snapshot.actual_output,
-            PreviewOptions::settings("No JW Library display frame"),
+            PreviewOptions::settings("No secondary screen frame"),
         );
         if pending {
             ui.painter().rect_stroke(
@@ -2630,7 +2632,7 @@ impl SwitcherApp {
             setup_compact_state(
                 ui,
                 UiIcon::Unavailable,
-                "Choose the JW Library display before capturing a reference.",
+                "Choose the secondary screen before capturing a reference image.",
                 TRANSITION_AMBER,
             );
         } else if pending {
@@ -2683,7 +2685,7 @@ impl SwitcherApp {
         let tone = ACTIVE_GREEN;
         ui.set_width(width);
         ui.horizontal(|ui| {
-            setup_control_label(ui, UiIcon::CheckCircle, "Saved idle reference", tone);
+            setup_control_label(ui, UiIcon::CheckCircle, "Saved reference image", tone);
             setup_reference_state_badge(ui, "CONFIRMED", tone);
         });
         ui.add_space(6.0);
@@ -2737,7 +2739,7 @@ impl SwitcherApp {
                 ui.add_space(10.0);
                 setup_capture_help(
                     ui,
-                    "Your JW Library idle screen should look like this example.",
+                    "Your JW Library screen with no media playing should look like this example.",
                 );
             });
     }
@@ -2760,14 +2762,14 @@ impl SwitcherApp {
             (
                 UiIcon::Monitor,
                 screen_ready,
-                "JW Library display ready",
-                "JW Library display not selected",
+                "Secondary screen ready",
+                "Secondary screen not selected",
             ),
             (
                 UiIcon::Image,
                 reference_ready,
-                "Idle reference ready",
-                "Idle reference not captured",
+                "Reference image ready",
+                "Reference image not captured",
             ),
         ];
         let width = ui.available_width().min(620.0);
@@ -2829,7 +2831,7 @@ impl SwitcherApp {
             ui.add_space(18.0);
             setup_message(
                 ui,
-                "Some setup is missing. StageSwap will start, but Automatic mode may not work as expected. You can finish setup later in Settings.",
+                "Some setup is missing. StageSwap will start, but Auto mode may not work as expected. You can finish the guided setup later in Settings.",
                 TRANSITION_AMBER,
             );
         }
@@ -3142,9 +3144,9 @@ impl SwitcherApp {
         let automation_running =
             matches!(snapshot.run_state, RunState::Running | RunState::Starting);
         let (run_icon, run_label, run_accent) = if automation_running {
-            (UiIcon::Stop, "Stop automation", LIVE_RED)
+            (UiIcon::Stop, "Stop automatic switching", LIVE_RED)
         } else {
-            (UiIcon::Play, "Start automation", ACTIVE_GREEN)
+            (UiIcon::Play, "Start automatic switching", ACTIVE_GREEN)
         };
         let automation = accent_icon_button(
             ui,
@@ -3585,7 +3587,7 @@ impl SwitcherApp {
         settings_info_card(
             ui,
             &[
-                "StageSwap automates Zoom retransmission using JW Library. While the selected JW Library display matches the saved idle reference, Zoom sees the webcam. When JW Library shows media, Zoom sees the display. When JW Library returns to idle, Zoom returns to the webcam.",
+                "StageSwap automatically switches what Zoom shows. When the secondary screen matches the reference image, Zoom shows the webcam. When media is detected, Zoom shows the secondary screen. When no media is detected again, Zoom returns to the webcam.",
                 "StageSwap is an independent, unofficial project and is not affiliated with or endorsed by the publisher of JW Library. The name JW Library is used only to describe compatibility.",
             ],
         );
@@ -3593,9 +3595,9 @@ impl SwitcherApp {
         let mut open_setup_guide = false;
         if settings_single_button_row(
             ui,
-            "Setup guide",
-            "Set up the webcam, JW Library display, idle reference, and Zoom output.",
-            "Open setup guide",
+            "Guided setup",
+            "Set up the webcam, secondary screen, reference image, and Zoom output.",
+            "Open guided setup",
             206.0,
         )
         .clicked()
@@ -3700,7 +3702,7 @@ impl SwitcherApp {
         settings_conditional_toggle_row(
             ui,
             &mut self.config.start_automatically,
-            "Start automation on launch",
+            "Start automatic switching on launch",
             &automatic_result,
         );
 
@@ -3714,8 +3716,8 @@ impl SwitcherApp {
         settings_toggle_row(
             ui,
             &mut self.config.close_to_tray,
-            "Close window to tray",
-            "Keep StageSwap running after closing the window.",
+            "Keep running in system tray",
+            "Hide the window while StageSwap keeps running.",
         );
         settings_toggle_row_without_separator(
             ui,
@@ -3837,15 +3839,15 @@ impl SwitcherApp {
             ui,
             SettingsSection {
                 icon: UiIcon::Monitor,
-                title: "JW Library display",
-                description: "This is the second display JW Library uses for presentations. Automatic mode watches it for media changes.",
+                title: "Secondary screen",
+                description: "This is the secondary screen JW Library uses for presentations. Auto mode watches it for media changes.",
             },
             SettingsPreview {
                 kind: PreviewKind::Screen,
                 frame: snapshot.previews.screen.as_ref(),
-                label: "Live JW Library display",
+                label: "Live secondary screen",
                 empty_message:
-                    "No JW Library display frame — choose a display or use Recovery in Diagnostics.",
+                    "No secondary screen image — choose a screen or use Tools in Diagnostics.",
                 actual_output: snapshot.actual_output,
             },
             |app, ui| {
@@ -3881,17 +3883,17 @@ impl SwitcherApp {
                     ui,
                     &mut app.config.cursor_visible,
                     "Include mouse cursor",
-                    "New references follow this choice; existing and imported references do not change.",
+                    "New reference images use this setting; existing and imported images do not change.",
                 );
 
                 ui.add_space(12.0);
-                settings_group_label(ui, "Automatic discovery and recovery");
+                settings_group_label(ui, "Automatic screen tools");
                 let discovery_result =
                     automatic_display_discovery_result(app.config.automatic_monitor_rescans);
                 settings_conditional_toggle_row(
                     ui,
                     &mut app.config.automatic_monitor_rescans,
-                    "Find reference display automatically",
+                    "Find secondary screen automatically",
                     discovery_result,
                 );
                 let recovery_result = automatic_screen_recovery_result(
@@ -3900,7 +3902,7 @@ impl SwitcherApp {
                 settings_conditional_toggle_row(
                     ui,
                     &mut app.config.automatic_screen_capture_recovery,
-                    "Recover black screen capture automatically",
+                    "Restart capture automatically after a black screen",
                     recovery_result,
                 );
             },
@@ -3913,21 +3915,21 @@ impl SwitcherApp {
             ui,
             SettingsSection {
                 icon: UiIcon::Target,
-                title: "Idle reference",
-                description: "JW Library is idle: Webcam. JW Library shows media: Display. Without a usable idle reference, Automatic mode stays on Webcam.",
+                title: "Reference image",
+                description: "No media: Camera. Media detected: Screen. Without a reference image, Auto mode stays on Camera.",
             },
             SettingsPreview {
                 kind: PreviewKind::Reference,
                 frame: snapshot.previews.reference.as_ref(),
-                label: "Idle reference",
+                label: "Reference image",
                 empty_message:
-                    "No idle reference — show the JW Library idle display and capture it.",
+                    "No reference image — show JW Library with no media playing, then capture it.",
                 actual_output: snapshot.actual_output,
             },
             |app, ui| {
-                ui.horizontal_wrapped(|ui| {
+                ui.vertical(|ui| {
                     settings_reference_status(ui, snapshot.previews.reference.is_some());
-                    ui.add_space(8.0);
+                    ui.add_space(3.0);
                     settings_detection_status(ui, snapshot.detection);
                 });
                 ui.add_space(7.0);
@@ -3935,7 +3937,7 @@ impl SwitcherApp {
                     egui::Label::new(
                         RichText::new(tr(
                             ui,
-                            "Checks 4×/s · 5 matches or 3 mismatches · 0.5s fade",
+                            "Checks 4×/s · confirms after 5 matches or 3 differences · 0.5s fade",
                         ))
                         .size(10.0)
                         .color(Color32::from_rgb(126, 134, 148)),
@@ -3977,7 +3979,7 @@ impl SwitcherApp {
                 let strictness = format!("{:.0}%", app.config.similarity_threshold * 100.0);
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new(tr(ui, "Match strictness"))
+                        RichText::new(tr(ui, "Required similarity"))
                             .size(12.0)
                             .color(Color32::from_rgb(224, 228, 235)),
                     );
@@ -4016,7 +4018,7 @@ impl SwitcherApp {
             ui,
             UiIcon::Check,
             "Component health",
-            "Current pipeline state.",
+            "Current status of each video component.",
         );
         settings_device_status(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state);
         settings_device_status(ui, UiIcon::Monitor, "Screen capture", snapshot.screen_state);
@@ -4042,8 +4044,8 @@ impl SwitcherApp {
         settings_section_heading(
             ui,
             UiIcon::Wrench,
-            "Recovery",
-            "Rescan finds the reference display. Restart buttons reconnect only the named component.",
+            "Tools",
+            "Rescan finds the secondary screen. Restart buttons reconnect only the named component.",
         );
         ui.horizontal_wrapped(|ui| {
             if icon_button(
@@ -4069,7 +4071,7 @@ impl SwitcherApp {
             ui,
             UiIcon::Info,
             "Technical details",
-            "Identifiers, formats, and timing used by the active pipeline.",
+            "Identifiers, formats, and timing used by the active video output.",
         );
         settings_info_row(
             ui,
@@ -4102,7 +4104,7 @@ impl SwitcherApp {
         );
         settings_info_row(
             ui,
-            "Output pipeline",
+            "Video output",
             "CPU BGRA 1280×720 at 30 fps · aspect fit · black letterboxing",
         );
         settings_info_row(
@@ -4411,7 +4413,7 @@ impl SwitcherApp {
         ui.label(
             RichText::new(tr(
                 ui,
-                "Make sure this image shows the normal JW Library idle display.",
+                "Make sure this image shows JW Library with no media playing.",
             ))
             .size(14.0)
             .line_height(Some(21.0))
@@ -4437,8 +4439,11 @@ impl SwitcherApp {
                     candidate_preview =
                         self.reference_capture_candidate_surface(ui, snapshot, candidate_width);
                 });
-                allocate_reference_dialog_column(ui, rail_width, |ui| {
+                let rail_height =
+                    (candidate_preview.bottom() - row_top).max(SETUP_REFERENCE_CARD_HEIGHT);
+                allocate_reference_dialog_sized_column(ui, rail_width, rail_height, |ui| {
                     ui.set_width(rail_width);
+                    ui.set_height(rail_height);
                     ui.add_space(reference_dialog_example_top_offset(
                         row_top,
                         candidate_preview,
@@ -4733,6 +4738,18 @@ fn allocate_reference_dialog_column(
     .rect
 }
 
+fn allocate_reference_dialog_sized_column(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    content: impl FnOnce(&mut egui::Ui),
+) -> Rect {
+    allocate_reference_dialog_column(ui, width, |ui| {
+        ui.set_height(height);
+        content(ui);
+    })
+}
+
 fn reference_dialog_example_top_offset(row_top: f32, preview_rect: Rect) -> f32 {
     (preview_rect.center().y - row_top - SETUP_REFERENCE_CARD_HEIGHT / 2.0).max(0.0)
 }
@@ -4763,7 +4780,7 @@ fn compact_reference_example_card(ui: &mut egui::Ui, textures: &SetupExampleText
                     ui.add_space(6.0);
                     setup_capture_help(
                         ui,
-                        "Your JW Library idle screen should look like this example.",
+                        "Your JW Library screen with no media playing should look like this example.",
                     );
                 });
             });
@@ -6111,8 +6128,8 @@ fn setup_demo_rule(ui: &mut egui::Ui, width: f32, blend: f32, background: Color3
     paint_setup_crossfade_text(
         ui,
         rect,
-        "JW Library is idle → Zoom sees the webcam",
-        "JW Library shows media → Zoom sees the display",
+        "No media in JW Library → Zoom shows the webcam",
+        "Media detected in JW Library → Zoom shows the secondary screen",
         blend,
         FontId::proportional(13.0),
         mix_color(background, SETUP_SIGNAL_WHITE, 0.82),
@@ -6158,7 +6175,7 @@ fn setup_static_switching_demo(
         ui,
         width,
         row_height,
-        "JW Library is idle → Zoom sees the webcam",
+        "No media in JW Library → Zoom shows the webcam",
         textures,
         false,
         background,
@@ -6168,7 +6185,7 @@ fn setup_static_switching_demo(
         ui,
         width,
         row_height,
-        "JW Library shows media → Zoom sees the display",
+        "Media detected in JW Library → Zoom shows the secondary screen",
         textures,
         true,
         background,
@@ -6871,9 +6888,9 @@ fn output_mode_name(locale: Locale, mode: OutputMode) -> std::borrow::Cow<'stati
     localized_text(
         locale,
         match mode {
-            OutputMode::Automatic => "Automatic",
+            OutputMode::Automatic => "Auto",
             OutputMode::ForceCamera => "Camera",
-            OutputMode::ForceScreen => "Display",
+            OutputMode::ForceScreen => "Screen",
         },
     )
 }
@@ -6889,20 +6906,20 @@ fn start_automatically_result(
         let destination = localized_text(
             locale,
             if start_minimized {
-                "in the tray"
+                "in the system tray"
             } else {
                 "after the dashboard opens"
             },
         );
         format_text(
             locale,
-            "On — Starts in {0} mode {1}.",
+            "On — Starts automatic switching in {0} mode {1}.",
             &[mode.as_ref(), destination.as_ref()],
         )
     } else {
         localized_text(
             locale,
-            "Off — Shows the StageSwap off screen until automation starts.",
+            "Off — Shows the StageSwap off screen until automatic switching starts.",
         )
         .into_owned()
     }
@@ -6910,9 +6927,11 @@ fn start_automatically_result(
 
 const fn window_behavior_result(close_to_tray: bool, confirm_exit: bool) -> &'static str {
     match (close_to_tray, confirm_exit) {
-        (true, true) => "Closing hides the window; Exit from the tray asks for confirmation.",
+        (true, true) => {
+            "Closing hides the window; Exit from the system tray asks for confirmation."
+        }
         (true, false) => {
-            "Closing hides the window; Exit from the tray stops StageSwap immediately."
+            "Closing hides the window; Exit from the system tray stops StageSwap immediately."
         }
         (false, true) => "Closing the window or choosing Exit asks before StageSwap stops.",
         (false, false) => "Closing the window or choosing Exit stops StageSwap immediately.",
@@ -6921,15 +6940,15 @@ const fn window_behavior_result(close_to_tray: bool, confirm_exit: bool) -> &'st
 
 const fn automatic_display_discovery_result(enabled: bool) -> &'static str {
     if enabled {
-        "On — Searches at launch, Settings open, reference changes, and every 30 seconds; confirms the same display twice."
+        "On — Searches at launch, when Settings opens, after the reference image changes, and every 30 seconds; confirms the same screen twice."
     } else {
-        "Off — Choose a display manually or use Rescan displays."
+        "Off — Choose a screen manually or use Rescan displays."
     }
 }
 
 const fn automatic_screen_recovery_result(enabled: bool) -> &'static str {
     if enabled {
-        "On — Checks the selected display every 30 seconds and restarts after two black results. Black content can trigger recovery."
+        "On — Checks the selected screen every 30 seconds and restarts capture after two black results. Black content can trigger a restart."
     } else {
         "Off — Use Restart screen capture in Diagnostics."
     }
@@ -6945,23 +6964,23 @@ fn match_strictness_explanation(value: f64) -> MatchStrictnessExplanation {
     let percentage = (value * 100.0).round();
     if percentage >= 99.0 {
         MatchStrictnessExplanation {
-            level: "Very strict",
-            effect: "Small visual changes can switch Automatic mode to Display.",
+            level: "Very high",
+            effect: "Small visual changes may count as media.",
         }
     } else if percentage >= 97.0 {
         MatchStrictnessExplanation {
-            level: "Balanced",
-            effect: "Minor rendering or cursor differences can still match the reference.",
+            level: "High",
+            effect: "Minor rendering or cursor differences are ignored.",
         }
     } else if percentage >= 90.0 {
         MatchStrictnessExplanation {
-            level: "Forgiving",
-            effect: "Larger differences may still count as the reference.",
+            level: "Moderate",
+            effect: "Larger visual differences may still count as no media.",
         }
     } else {
         MatchStrictnessExplanation {
-            level: "Very forgiving",
-            effect: "Meaningful changes may still be treated as a match.",
+            level: "Low",
+            effect: "Significant changes may still count as no media.",
         }
     }
 }
@@ -6985,14 +7004,14 @@ const fn component_health_guidance(
         || matches!(screen, DeviceState::Initializing)
         || matches!(virtual_camera, DeviceState::Initializing)
     {
-        "One or more components are still starting. Wait briefly before using a recovery action."
+        "One or more components are still starting. Wait briefly before using a tool."
     } else {
         match detection {
             DetectionState::ReferenceMissing => {
-                "The pipeline is ready, but Automatic mode needs a captured or imported reference."
+                "The video components are ready, but Auto mode needs a captured or imported reference image."
             }
             DetectionState::Unknown => {
-                "The components are ready; StageSwap is waiting for enough reference checks to decide."
+                "The components are ready; StageSwap is checking the reference image."
             }
             DetectionState::Matching => "Everything is ready.",
             DetectionState::NotMatching => "Everything is ready.",
@@ -7426,20 +7445,22 @@ fn settings_reference_status(ui: &mut egui::Ui, available: bool) {
     } else {
         (UiIcon::Unavailable, "Missing", LIVE_RED)
     };
-    settings_status_item(ui, UiIcon::Image, "Reference", icon, status, color);
+    settings_status_item(ui, UiIcon::Image, "Reference image", icon, status, color);
 }
 
 fn settings_detection_status(ui: &mut egui::Ui, state: DetectionState) {
     let (icon, status, color) = settings_detection_style(state);
-    settings_status_item(ui, UiIcon::Target, "Detection", icon, status, color);
+    settings_status_item(ui, UiIcon::Target, "Media detection", icon, status, color);
 }
 
 fn settings_detection_style(state: DetectionState) -> (UiIcon, &'static str, Color32) {
     match state {
-        DetectionState::Unknown => (UiIcon::Question, "Waiting", TRANSITION_AMBER),
-        DetectionState::Matching => (UiIcon::Check, "Matching", ACTIVE_GREEN),
-        DetectionState::NotMatching => (UiIcon::Error, "Not matching", TRANSITION_AMBER),
-        DetectionState::ReferenceMissing => (UiIcon::Unavailable, "Reference missing", LIVE_RED),
+        DetectionState::Unknown => (UiIcon::Question, "Checking", TRANSITION_AMBER),
+        DetectionState::Matching => (UiIcon::Check, "No media", ACTIVE_GREEN),
+        DetectionState::NotMatching => (UiIcon::Error, "Media detected", TRANSITION_AMBER),
+        DetectionState::ReferenceMissing => {
+            (UiIcon::Unavailable, "Reference image missing", LIVE_RED)
+        }
     }
 }
 
@@ -7512,34 +7533,34 @@ fn detection_state_group(ui: &mut egui::Ui, current: DetectionState) -> Rect {
     let choices = [
         IndicatorChoice {
             icon: UiIcon::Question,
-            label: "Unknown",
+            label: "Checking",
             current: current == DetectionState::Unknown,
             tone: detection_indicator_tone(DetectionState::Unknown),
             span: 1,
         },
         IndicatorChoice {
             icon: UiIcon::Check,
-            label: "Matching",
+            label: "No media",
             current: current == DetectionState::Matching,
             tone: detection_indicator_tone(DetectionState::Matching),
             span: 1,
         },
         IndicatorChoice {
             icon: UiIcon::Error,
-            label: "Not matching",
+            label: "Media detected",
             current: current == DetectionState::NotMatching,
             tone: detection_indicator_tone(DetectionState::NotMatching),
             span: 1,
         },
         IndicatorChoice {
             icon: UiIcon::Unavailable,
-            label: "Reference missing",
+            label: "Reference image missing",
             current: current == DetectionState::ReferenceMissing,
             tone: detection_indicator_tone(DetectionState::ReferenceMissing),
             span: 1,
         },
     ];
-    indicator_group(ui, UiIcon::Target, "Detection", &choices, None)
+    indicator_group(ui, UiIcon::Target, "Media detection", &choices, None)
 }
 
 fn detection_indicator_tone(state: DetectionState) -> IndicatorTone {
@@ -9591,18 +9612,24 @@ mod tests {
     }
 
     #[test]
-    fn screen_and_matching_are_separate_settings_pages() {
-        assert_eq!(SettingsTab::Screen.title(Locale::English), "Screen");
-        assert_eq!(SettingsTab::Matching.title(Locale::English), "Matching");
+    fn screen_and_reference_image_are_separate_settings_pages() {
+        assert_eq!(
+            SettingsTab::Screen.title(Locale::English),
+            "Secondary screen"
+        );
+        assert_eq!(
+            SettingsTab::Matching.title(Locale::English),
+            "Reference image"
+        );
         assert!(
             SettingsTab::Screen
                 .description(Locale::English)
-                .contains("display")
+                .contains("secondary screen")
         );
         assert!(
             SettingsTab::Matching
                 .description(Locale::English)
-                .contains("JW Library")
+                .contains("reference image")
         );
         assert_ne!(SettingsTab::Screen, SettingsTab::Matching);
     }
@@ -9627,7 +9654,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_guide_settings_action_is_flush_with_the_right_control_edge() {
+    fn guided_setup_settings_action_is_flush_with_the_right_control_edge() {
         let context = egui::Context::default();
         let mut button_rect = Rect::NOTHING;
         let mut row_right = 0.0;
@@ -9641,9 +9668,9 @@ mod tests {
                 row_right = ui.available_rect_before_wrap().right();
                 button_rect = settings_single_button_row(
                     ui,
-                    "Setup guide",
-                    "Set up the webcam, JW Library display, idle reference, and Zoom output.",
-                    "Open setup guide",
+                    "Guided setup",
+                    "Set up the webcam, secondary screen, reference image, and Zoom output.",
+                    "Open guided setup",
                     206.0,
                 )
                 .rect;
@@ -9651,7 +9678,7 @@ mod tests {
         );
         assert!(
             (button_rect.right() - row_right).abs() <= 2.0,
-            "setup guide button should align with the full settings row: \
+            "guided setup button should align with the full settings row: \
              button={button_rect:?}, row_right={row_right}"
         );
     }
@@ -9705,7 +9732,7 @@ mod tests {
             layout = Some(settings_conditional_toggle_row(
                 ui,
                 &mut enabled,
-                "Recover black screen capture automatically",
+                "Restart capture automatically after a black screen",
                 result,
             ));
         });
@@ -9725,7 +9752,7 @@ mod tests {
         let automatic =
             start_automatically_result(Locale::English, true, true, OutputMode::ForceScreen);
         assert!(automatic.starts_with("On —"));
-        assert!(automatic.contains("Display mode in the tray"));
+        assert!(automatic.contains("Screen mode in the system tray"));
         let stopped =
             start_automatically_result(Locale::English, false, false, OutputMode::Automatic);
         assert!(stopped.starts_with("Off —"));
@@ -9764,15 +9791,15 @@ mod tests {
     }
 
     #[test]
-    fn match_strictness_explanations_use_documented_boundaries() {
-        assert_eq!(match_strictness_explanation(1.0).level, "Very strict");
-        assert_eq!(match_strictness_explanation(0.99).level, "Very strict");
-        assert_eq!(match_strictness_explanation(0.98).level, "Balanced");
-        assert_eq!(match_strictness_explanation(0.97).level, "Balanced");
-        assert_eq!(match_strictness_explanation(0.96).level, "Forgiving");
-        assert_eq!(match_strictness_explanation(0.90).level, "Forgiving");
-        assert_eq!(match_strictness_explanation(0.89).level, "Very forgiving");
-        assert_eq!(match_strictness_explanation(0.50).level, "Very forgiving");
+    fn required_similarity_explanations_use_documented_boundaries() {
+        assert_eq!(match_strictness_explanation(1.0).level, "Very high");
+        assert_eq!(match_strictness_explanation(0.99).level, "Very high");
+        assert_eq!(match_strictness_explanation(0.98).level, "High");
+        assert_eq!(match_strictness_explanation(0.97).level, "High");
+        assert_eq!(match_strictness_explanation(0.96).level, "Moderate");
+        assert_eq!(match_strictness_explanation(0.90).level, "Moderate");
+        assert_eq!(match_strictness_explanation(0.89).level, "Low");
+        assert_eq!(match_strictness_explanation(0.50).level, "Low");
     }
 
     #[test]
@@ -10139,7 +10166,7 @@ mod tests {
                     ui.set_width(484.0);
                     ui.label("Candidate");
                 });
-                columns[1] = allocate_reference_dialog_column(ui, 220.0, |ui| {
+                columns[1] = allocate_reference_dialog_sized_column(ui, 220.0, 262.0, |ui| {
                     ui.set_width(220.0);
                     ui.label("Example reference image");
                 });
@@ -10148,6 +10175,7 @@ mod tests {
 
         assert!(columns[0].width() >= 484.0);
         assert!(columns[1].width() >= 220.0);
+        assert!(columns[1].height() >= 262.0);
         assert!(columns[1].left() >= columns[0].right() + SETUP_REFERENCE_COLUMN_GAP - 0.01);
     }
 

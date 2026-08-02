@@ -47,14 +47,14 @@ impl Tray {
         let start_icon = action_menu_icon(UiIcon::Play, [48, 174, 105, 255])?;
         let stop_icon = action_menu_icon(UiIcon::Stop, [220, 76, 76, 255])?;
         let automation = IconMenuItem::new(
-            text(locale, "Start automation"),
+            text(locale, "Start automatic switching"),
             true,
             Some(start_icon.clone()),
             None,
         );
         let automatic = CheckMenuItem::new(text(locale, "Automatic"), true, true, None);
         let camera = CheckMenuItem::new(text(locale, "Webcam only"), true, false, None);
-        let screen = CheckMenuItem::new(text(locale, "JW Library display only"), true, false, None);
+        let screen = CheckMenuItem::new(text(locale, "Screen only"), true, false, None);
         let output_mode = Submenu::with_items(
             text(locale, "Output mode"),
             true,
@@ -121,8 +121,7 @@ impl Tray {
             self.show.set_text(text(locale, "Open StageSwap"));
             self.automatic.set_text(text(locale, "Automatic"));
             self.camera.set_text(text(locale, "Webcam only"));
-            self.screen
-                .set_text(text(locale, "JW Library display only"));
+            self.screen.set_text(text(locale, "Screen only"));
             self.output_mode.set_text(text(locale, "Output mode"));
             self.settings.set_text(text(locale, "Settings"));
             self.exit.set_text(text(locale, "Exit"));
@@ -193,9 +192,9 @@ fn action_menu_icon(icon: UiIcon, color: [u8; 4]) -> Result<MenuIcon, String> {
 
 fn automation_menu_state(run_state: RunState, locale: Locale) -> (String, bool) {
     let (label, enabled) = match run_state {
-        RunState::Running | RunState::Starting => ("Stop automation", true),
-        RunState::Stopping => ("Stopping automation…", false),
-        RunState::Stopped | RunState::Error => ("Start automation", true),
+        RunState::Running | RunState::Starting => ("Stop automatic switching", true),
+        RunState::Stopping => ("Stopping automatic switching…", false),
+        RunState::Stopped | RunState::Error => ("Start automatic switching", true),
     };
     (text(locale, label).into_owned(), enabled)
 }
@@ -214,23 +213,23 @@ mod tests {
     fn automation_menu_tracks_run_state() {
         assert_eq!(
             automation_menu_state(RunState::Starting, Locale::English),
-            ("Stop automation".into(), true)
+            ("Stop automatic switching".into(), true)
         );
         assert_eq!(
             automation_menu_state(RunState::Running, Locale::English),
-            ("Stop automation".into(), true)
+            ("Stop automatic switching".into(), true)
         );
         assert_eq!(
             automation_menu_state(RunState::Stopping, Locale::English),
-            ("Stopping automation…".into(), false)
+            ("Stopping automatic switching…".into(), false)
         );
         assert_eq!(
             automation_menu_state(RunState::Stopped, Locale::English),
-            ("Start automation".into(), true)
+            ("Start automatic switching".into(), true)
         );
         assert_eq!(
             automation_menu_state(RunState::Error, Locale::English),
-            ("Start automation".into(), true)
+            ("Start automatic switching".into(), true)
         );
     }
 
