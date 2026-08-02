@@ -63,10 +63,13 @@ if ($artifact.Extension -eq '.zip') {
     }
     if (-not $metadataEntry) { throw 'Release ZIP does not contain release-metadata.json.' }
 } elseif ($artifact.Extension -eq '.exe') {
-    foreach ($requiredKey in @('applicationVersion', 'sourceRevision', 'architecture', 'configuration', 'windowsSdk')) {
+    foreach ($requiredKey in @('applicationVersion', 'releaseVersion', 'sourceRevision', 'architecture', 'configuration', 'windowsSdk')) {
         if (-not $checksumMetadata.ContainsKey($requiredKey) -or -not $checksumMetadata[$requiredKey]) {
             throw "Executable checksum sidecar is missing metadata key '$requiredKey'."
         }
+    }
+    if ($checksumMetadata.releaseVersion -ne $checksumMetadata.applicationVersion) {
+        throw "Checksum applicationVersion '$($checksumMetadata.applicationVersion)' does not match releaseVersion '$($checksumMetadata.releaseVersion)'."
     }
     $artifactVersion = $checksumMetadata.applicationVersion
     $artifactSourceRevision = $checksumMetadata.sourceRevision

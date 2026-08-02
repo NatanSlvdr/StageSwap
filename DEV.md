@@ -107,7 +107,7 @@ Then run:
 
 The wrapper cross-compiles with the x64 Windows MSVC target, pins the Windows SDK, embeds the matching Media Foundation DLL and Windows resources, validates the generated PE files and payload, and writes the versioned executable and checksum to `dist/`.
 
-If the checksum differs from the latest versioned artifact in `dist/`, the patch number is incremented. Rebuilding identical bytes keeps the existing version. Rust and SDK caches make later builds faster. GitHub Actions remains the authoritative release builder.
+If the optimized release build differs from the latest versioned artifact in `dist/`, the patch number is incremented and the selected version is persisted to `Cargo.toml` and `Cargo.lock` before the final DLL and EXE are rebuilt. Rebuilding identical bytes with an already synchronized workspace keeps the existing version. The filename, application UI, Windows version resources, and checksum metadata therefore use one version. Rust and SDK caches make later builds faster. GitHub Actions remains the authoritative release builder.
 
 ## Native Windows build and package
 
@@ -124,10 +124,10 @@ rustup target add x86_64-pc-windows-msvc
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo test --workspace --all-targets --target x86_64-pc-windows-msvc
-cargo run -p xtask -- package x64 dist
+cargo run --release -p xtask -- package x64 dist
 ```
 
-`xtask` builds and validates the x64 DLL first, embeds it into the EXE, validates the PE machine type and embedded payload, and emits the EXE with a SHA-256 sidecar. Windows builds also embed an `asInvoker`, Per-Monitor-V2 manifest and executable version metadata.
+`xtask` builds and validates the x64 DLL first, embeds it into the EXE, validates the PE machine type and embedded payload, and emits the EXE with a SHA-256 sidecar. Packaging and both Windows payloads use Cargo's optimized release profile. Windows builds also embed an `asInvoker`, Per-Monitor-V2 manifest and executable version metadata.
 
 ## Packaging and deployment model
 

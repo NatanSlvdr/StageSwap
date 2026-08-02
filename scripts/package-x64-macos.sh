@@ -32,4 +32,4 @@ export XWIN_ARCH=x86_64
 export XWIN_SDK_VERSION=10.0.22621
 export RC_PATH="$resource_compiler"
 
-cargo run -p xtask -- package x64 "$output_directory"
+cargo run --release -p xtask -- package x64 "$output_directory"

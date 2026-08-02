@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 const WINDOW_ASPECT_RATIO: f32 = 16.0 / 9.0;
 const MIN_WINDOW_HEIGHT: f32 = 600.0;
 const WINDOW_TITLE: &str = concat!("StageSwap - v", env!("CARGO_PKG_VERSION"));
+const APP_VERSION_LABEL: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const LIVE_RED: Color32 = Color32::from_rgb(235, 90, 90);
 const ACTIVE_GREEN: Color32 = Color32::from_rgb(76, 205, 132);
 const TRANSITION_AMBER: Color32 = Color32::from_rgb(245, 190, 75);
@@ -1039,6 +1040,7 @@ struct SettingsPreviewControls {
 struct SettingsSidebarLayout {
     brand_icon: Rect,
     brand_title: Rect,
+    brand_version: Rect,
     brand_separator: Rect,
     back: Rect,
     primary_navigation: Vec<Rect>,
@@ -3306,6 +3308,7 @@ impl SwitcherApp {
             );
             debug_assert!(sidebar.inner.brand_icon.is_positive());
             debug_assert!(sidebar.inner.brand_title.is_positive());
+            debug_assert!(sidebar.inner.brand_version.is_positive());
             debug_assert!(sidebar.inner.brand_separator.is_positive());
             debug_assert!(sidebar.inner.back.is_positive());
             debug_assert_eq!(
@@ -3398,7 +3401,22 @@ impl SwitcherApp {
                         },
                     )
                     .inner;
-                ui.add_space(10.0);
+                ui.add_space(1.0);
+                let brand_version = ui
+                    .allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 16.0),
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| {
+                            ui.label(
+                                RichText::new(APP_VERSION_LABEL)
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(132, 140, 154)),
+                            )
+                            .rect
+                        },
+                    )
+                    .inner;
+                ui.add_space(8.0);
                 let brand_separator = ui.separator().rect;
                 ui.add_space(8.0);
                 let back = settings_back_button(ui);
@@ -3475,6 +3493,7 @@ impl SwitcherApp {
                 SettingsSidebarLayout {
                     brand_icon,
                     brand_title,
+                    brand_version,
                     brand_separator,
                     back: back.rect,
                     primary_navigation,
@@ -8692,6 +8711,7 @@ mod tests {
             WINDOW_TITLE,
             format!("StageSwap - v{}", env!("CARGO_PKG_VERSION"))
         );
+        assert_eq!(APP_VERSION_LABEL, format!("v{}", env!("CARGO_PKG_VERSION")));
     }
 
     #[test]
@@ -9052,6 +9072,7 @@ mod tests {
             for rect in [
                 sidebar_layout.brand_icon,
                 sidebar_layout.brand_title,
+                sidebar_layout.brand_version,
                 sidebar_layout.brand_separator,
                 sidebar_layout.back,
             ] {
@@ -9061,7 +9082,8 @@ mod tests {
             assert!((sidebar_layout.brand_icon.width() - 96.0).abs() < 0.01);
             assert!((sidebar_layout.brand_icon.height() - 96.0).abs() < 0.01);
             assert!(sidebar_layout.brand_icon.bottom() < sidebar_layout.brand_title.top());
-            assert!(sidebar_layout.brand_title.bottom() < sidebar_layout.brand_separator.top());
+            assert!(sidebar_layout.brand_title.bottom() < sidebar_layout.brand_version.top());
+            assert!(sidebar_layout.brand_version.bottom() < sidebar_layout.brand_separator.top());
             assert!(sidebar_layout.brand_separator.bottom() < sidebar_layout.back.top());
             assert_eq!(
                 sidebar_layout.primary_navigation.len(),

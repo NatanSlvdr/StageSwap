@@ -1,6 +1,6 @@
 # Release gates
 
-A release contains exactly `StageSwap_win64_vX.Y.Z.exe` plus its SHA-256 sidecar. A checksum change increments `Z`; identical bytes retain their existing release version. It must be built and tested from the release commit with Windows SDK 10.0.22621.0. CI restores the newest release sidecar before packaging, selects that SDK explicitly, and `xtask` refuses packaging when the selected SDK is missing or different; the new sidecar records the application version, release version, and normalized SDK value.
+A release contains exactly `StageSwap_win64_vX.Y.Z.exe` plus its SHA-256 sidecar. A checksum change increments `Z`; identical bytes with an already synchronized workspace retain their existing release version. Packaging persists the selected version to `Cargo.toml` and `Cargo.lock`, rebuilds the production DLL and EXE, and requires that the filename, UI, Windows version resources, `applicationVersion`, and `releaseVersion` all agree. It must be built and tested from the release commit with Windows SDK 10.0.22621.0. CI restores the newest release sidecar before packaging, selects that SDK explicitly, and `xtask` refuses packaging when the selected SDK is missing or different.
 
 Before publication:
 

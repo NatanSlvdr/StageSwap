@@ -3,8 +3,9 @@ use std::cmp::max;
 use std::env;
 use std::fmt;
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const REQUIRED_WINDOWS_SDK: &str = "10.0.22621.0";
 const APP_PACKAGE: &str = "stageswap";
@@ -31,55 +32,121 @@ fn main() -> Result<()> {
 }
 
 fn package(architecture: String, output: Option<PathBuf>) -> Result<()> {
+    let workspace = workspace_root();
     let windows_sdk = selected_windows_sdk()?;
     let target = match architecture.as_str() {
         "x64" => "x86_64-pc-windows-msvc",
         _ => bail!("architecture must be x64"),
     };
-    run(&mut cargo_build(MEDIA_SOURCE_PACKAGE, target, None))?;
-    let dll = PathBuf::from("target")
-        .join(target)
-        .join("release")
-        .join(MEDIA_SOURCE_DLL);
-    if !dll.is_file() {
-        bail!("media-source build did not produce {}", dll.display());
-    }
-    validate_pe_path(&dll, &architecture)?;
-    let embedded_dll = dll
-        .canonicalize()
-        .context("canonicalize media-source DLL")?;
-    run(&mut cargo_build(APP_PACKAGE, target, Some(&embedded_dll)))?;
-    let executable = PathBuf::from("target")
-        .join(target)
-        .join("release")
-        .join(APP_EXECUTABLE);
-    validate_pe_path(&executable, &architecture)?;
-    validate_embedded_payload(&executable, &dll)?;
     let output = output.unwrap_or_else(|| PathBuf::from("dist"));
-    fs::create_dir_all(&output).context("create dist directory")?;
-    let digest = sha256(&fs::read(&executable)?);
     let history = env::var_os("STAGESWAP_RELEASE_HISTORY")
         .map(PathBuf::from)
         .unwrap_or_else(|| output.clone());
-    let release_version = select_release_version(&history, &digest)?;
-    let artifact = format!("{RELEASE_PREFIX}{release_version}.exe");
-    let destination = output.join(&artifact);
-    fs::copy(&executable, &destination).with_context(|| {
-        format!(
-            "copy executable from {} to {}",
-            executable.display(),
-            destination.display()
-        )
-    })?;
-    let revision = env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".into());
-    let checksum = format!(
-        "# applicationVersion={}\n# releaseVersion={release_version}\n# sourceRevision={revision}\n# architecture={architecture}\n# configuration=Release\n# windowsSdk={windows_sdk}\n{} *{artifact}\n",
-        env!("CARGO_PKG_VERSION"),
-        hex(&digest)
-    );
-    fs::write(output.join(format!("{artifact}.sha256")), checksum)?;
-    println!("packaged {}", destination.display());
-    Ok(())
+    let manifest = workspace.join("Cargo.toml");
+    let lockfile = workspace.join("Cargo.lock");
+    let application_version = read_workspace_version(&manifest)?;
+    let mut version_transaction = None;
+
+    let outcome = (|| -> Result<PathBuf> {
+        let (_, mut executable) = build_release_pair(&workspace, target, &architecture)?;
+        let candidate_digest = sha256(&fs::read(&executable)?);
+        let latest = latest_release(&history)?;
+        let release_version =
+            select_release_version(application_version, latest.as_ref(), &candidate_digest)?;
+
+        if release_version != application_version {
+            version_transaction = Some(VersionTransaction::begin(
+                &manifest,
+                &lockfile,
+                release_version,
+            )?);
+            run(&mut cargo_metadata(&workspace))?;
+            (_, executable) = build_release_pair(&workspace, target, &architecture)?;
+        }
+
+        let persisted_version = read_workspace_version(&manifest)?;
+        if persisted_version != release_version {
+            bail!(
+                "workspace version {persisted_version} does not match release version {release_version}"
+            );
+        }
+        let executable_bytes = fs::read(&executable)
+            .with_context(|| format!("could not read {}", executable.display()))?;
+        let digest = sha256(&executable_bytes);
+        let artifact = format!("{RELEASE_PREFIX}{release_version}.exe");
+        let revision = env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".into());
+        let checksum = format!(
+            "# applicationVersion={release_version}\n# releaseVersion={release_version}\n# sourceRevision={revision}\n# architecture={architecture}\n# configuration=Release\n# windowsSdk={windows_sdk}\n{} *{artifact}\n",
+            hex(&digest)
+        );
+        publish_release(&output, &artifact, &executable_bytes, checksum.as_bytes())
+    })();
+
+    match outcome {
+        Ok(destination) => {
+            if let Some(transaction) = version_transaction.as_mut() {
+                transaction.commit();
+            }
+            println!("packaged {}", destination.display());
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(transaction) = version_transaction.as_mut()
+                && let Err(rollback_error) = transaction.rollback()
+            {
+                return Err(error.context(format!(
+                    "packaging also failed to restore the workspace version: {rollback_error:#}"
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask is inside the workspace")
+        .to_owned()
+}
+
+fn build_release_pair(
+    workspace: &Path,
+    target: &str,
+    architecture: &str,
+) -> Result<(PathBuf, PathBuf)> {
+    run(&mut cargo_build(
+        workspace,
+        MEDIA_SOURCE_PACKAGE,
+        target,
+        None,
+    ))?;
+    let dll = release_artifact(workspace, target, MEDIA_SOURCE_DLL);
+    if !dll.is_file() {
+        bail!("media-source build did not produce {}", dll.display());
+    }
+    validate_pe_path(&dll, architecture)?;
+    let embedded_dll = dll
+        .canonicalize()
+        .context("canonicalize media-source DLL")?;
+    run(&mut cargo_build(
+        workspace,
+        APP_PACKAGE,
+        target,
+        Some(&embedded_dll),
+    ))?;
+    let executable = release_artifact(workspace, target, APP_EXECUTABLE);
+    validate_pe_path(&executable, architecture)?;
+    validate_embedded_payload(&executable, &dll)?;
+    Ok((dll, executable))
+}
+
+fn release_artifact(workspace: &Path, target: &str, name: &str) -> PathBuf {
+    workspace
+        .join("target")
+        .join(target)
+        .join("release")
+        .join(name)
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -120,13 +187,16 @@ impl fmt::Display for ReleaseVersion {
     }
 }
 
-fn select_release_version(output: &Path, digest: &[u8; 32]) -> Result<ReleaseVersion> {
-    let application_version = ReleaseVersion::parse(env!("CARGO_PKG_VERSION"))?;
-    let Some((latest_version, latest_digest)) = latest_release(output)? else {
+fn select_release_version(
+    application_version: ReleaseVersion,
+    latest: Option<&(ReleaseVersion, String)>,
+    digest: &[u8; 32],
+) -> Result<ReleaseVersion> {
+    let Some((latest_version, latest_digest)) = latest else {
         return Ok(application_version);
     };
-    if latest_digest == hex(digest) {
-        return Ok(latest_version);
+    if *latest_version == application_version && *latest_digest == hex(digest) {
+        return Ok(application_version);
     }
     Ok(max(latest_version.increment_patch()?, application_version))
 }
@@ -170,8 +240,14 @@ fn latest_release(output: &Path) -> Result<Option<(ReleaseVersion, String)>> {
     Ok(latest)
 }
 
-fn cargo_build(package: &str, target: &str, embedded_dll: Option<&Path>) -> Command {
+fn cargo_build(
+    workspace: &Path,
+    package: &str,
+    target: &str,
+    embedded_dll: Option<&Path>,
+) -> Command {
     let mut command = Command::new("cargo");
+    command.current_dir(workspace);
     if env::var_os("STAGESWAP_USE_CARGO_XWIN").is_some() {
         command.args(["xwin", "build"]);
     } else {
@@ -182,6 +258,183 @@ fn cargo_build(package: &str, target: &str, embedded_dll: Option<&Path>) -> Comm
         command.env("STAGESWAP_MEDIA_SOURCE_DLL", dll);
     }
     command
+}
+
+fn cargo_metadata(workspace: &Path) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(workspace)
+        .args(["metadata", "--format-version", "1"])
+        .stdout(Stdio::null());
+    command
+}
+
+fn read_workspace_version(manifest: &Path) -> Result<ReleaseVersion> {
+    let contents = fs::read_to_string(manifest)
+        .with_context(|| format!("read workspace manifest {}", manifest.display()))?;
+    let (version, _) = workspace_version_range(&contents)?;
+    Ok(version)
+}
+
+fn workspace_version_range(contents: &str) -> Result<(ReleaseVersion, Range<usize>)> {
+    let mut in_workspace_package = false;
+    let mut offset = 0;
+    for line in contents.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_workspace_package = trimmed == "[workspace.package]";
+        } else if in_workspace_package
+            && let Some((key, value)) = trimmed.split_once('=')
+            && key.trim() == "version"
+        {
+            let value = value
+                .split('#')
+                .next()
+                .expect("split always returns one item")
+                .trim();
+            let unquoted = value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .context("workspace package version must be a quoted string")?;
+            let version = ReleaseVersion::parse(unquoted)?;
+            let value_offset = line
+                .find(unquoted)
+                .context("could not locate workspace version value")?;
+            let start = offset + value_offset;
+            return Ok((version, start..start + unquoted.len()));
+        }
+        offset += line.len();
+    }
+    bail!("workspace manifest has no [workspace.package] version")
+}
+
+fn replace_workspace_version(contents: &str, version: ReleaseVersion) -> Result<String> {
+    let (_, range) = workspace_version_range(contents)?;
+    let mut updated = contents.to_owned();
+    updated.replace_range(range, &version.to_string());
+    Ok(updated)
+}
+
+struct VersionTransaction {
+    manifest: PathBuf,
+    manifest_contents: Vec<u8>,
+    lockfile: PathBuf,
+    lockfile_contents: Option<Vec<u8>>,
+    active: bool,
+}
+
+impl VersionTransaction {
+    fn begin(manifest: &Path, lockfile: &Path, version: ReleaseVersion) -> Result<Self> {
+        let manifest_contents = fs::read(manifest)
+            .with_context(|| format!("read workspace manifest {}", manifest.display()))?;
+        let manifest_text = std::str::from_utf8(&manifest_contents)
+            .context("workspace manifest is not valid UTF-8")?;
+        let updated = replace_workspace_version(manifest_text, version)?;
+        let lockfile_contents = match fs::read(lockfile) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("read lockfile {}", lockfile.display()));
+            }
+        };
+        fs::write(manifest, updated)
+            .with_context(|| format!("update workspace version in {}", manifest.display()))?;
+        Ok(Self {
+            manifest: manifest.to_owned(),
+            manifest_contents,
+            lockfile: lockfile.to_owned(),
+            lockfile_contents,
+            active: true,
+        })
+    }
+
+    fn commit(&mut self) {
+        self.active = false;
+    }
+
+    fn rollback(&mut self) -> Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        fs::write(&self.manifest, &self.manifest_contents)
+            .with_context(|| format!("restore workspace manifest {}", self.manifest.display()))?;
+        match &self.lockfile_contents {
+            Some(contents) => fs::write(&self.lockfile, contents)
+                .with_context(|| format!("restore lockfile {}", self.lockfile.display()))?,
+            None if self.lockfile.exists() => {
+                fs::remove_file(&self.lockfile).with_context(|| {
+                    format!("remove generated lockfile {}", self.lockfile.display())
+                })?
+            }
+            None => {}
+        }
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for VersionTransaction {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.rollback();
+        }
+    }
+}
+
+fn publish_release(
+    output: &Path,
+    artifact: &str,
+    executable: &[u8],
+    checksum: &[u8],
+) -> Result<PathBuf> {
+    fs::create_dir_all(output).context("create dist directory")?;
+    let checksum_name = format!("{artifact}.sha256");
+    let destination = output.join(artifact);
+    let checksum_destination = output.join(&checksum_name);
+    ensure_existing_output_matches(&destination, executable)?;
+    ensure_existing_output_matches(&checksum_destination, checksum)?;
+
+    let staging = tempfile::tempdir_in(output).context("create release staging directory")?;
+    let staged_artifact = staging.path().join(artifact);
+    let staged_checksum = staging.path().join(&checksum_name);
+    fs::write(&staged_artifact, executable).context("stage release executable")?;
+    fs::write(&staged_checksum, checksum).context("stage release checksum")?;
+
+    let artifact_created = if destination.exists() {
+        false
+    } else {
+        fs::rename(&staged_artifact, &destination)
+            .with_context(|| format!("publish release executable {}", destination.display()))?;
+        true
+    };
+    if !checksum_destination.exists()
+        && let Err(error) = fs::rename(&staged_checksum, &checksum_destination)
+    {
+        if artifact_created {
+            let _ = fs::remove_file(&destination);
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "publish release checksum {}",
+                checksum_destination.display()
+            )
+        });
+    }
+    Ok(destination)
+}
+
+fn ensure_existing_output_matches(path: &Path, expected: &[u8]) -> Result<()> {
+    if path.exists() {
+        let existing = fs::read(path)
+            .with_context(|| format!("read existing release output {}", path.display()))?;
+        if existing != expected {
+            bail!(
+                "release output {} already exists with different contents",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn selected_windows_sdk() -> Result<String> {
@@ -399,19 +652,39 @@ mod tests {
     }
 
     #[test]
-    fn release_version_reuses_matching_checksum_and_increments_changed_checksum() {
-        let directory = tempfile::tempdir().unwrap();
+    fn release_version_reuses_only_matching_current_version_and_checksum() {
         let digest = sha256(b"current build");
-        let sidecar = directory.path().join("StageSwap_win64_v1.2.22.exe.sha256");
-        fs::write(&sidecar, format!("{} *artifact.exe\n", hex(&digest))).unwrap();
+        let current = ReleaseVersion::parse("1.2.22").unwrap();
+        let latest = (current, hex(&digest));
 
         assert_eq!(
-            select_release_version(directory.path(), &digest).unwrap(),
-            ReleaseVersion::parse("1.2.22").unwrap()
+            select_release_version(current, Some(&latest), &digest).unwrap(),
+            current
         );
         assert_eq!(
-            select_release_version(directory.path(), &sha256(b"changed build")).unwrap(),
+            select_release_version(current, Some(&latest), &sha256(b"changed build")).unwrap(),
             ReleaseVersion::parse("1.2.23").unwrap()
+        );
+    }
+
+    #[test]
+    fn release_version_never_moves_behind_source_or_release_history() {
+        let digest = sha256(b"current build");
+        let history_ahead = (ReleaseVersion::parse("1.2.22").unwrap(), hex(&digest));
+        assert_eq!(
+            select_release_version(
+                ReleaseVersion::parse("1.2.20").unwrap(),
+                Some(&history_ahead),
+                &digest,
+            )
+            .unwrap(),
+            ReleaseVersion::parse("1.2.23").unwrap()
+        );
+
+        let source_ahead = ReleaseVersion::parse("2.0.0").unwrap();
+        assert_eq!(
+            select_release_version(source_ahead, Some(&history_ahead), &digest).unwrap(),
+            source_ahead
         );
     }
 
@@ -427,10 +700,10 @@ mod tests {
 
     #[test]
     fn release_version_starts_at_application_version() {
-        let directory = tempfile::tempdir().unwrap();
+        let current = ReleaseVersion::parse(env!("CARGO_PKG_VERSION")).unwrap();
         assert_eq!(
-            select_release_version(directory.path(), &sha256(b"first build")).unwrap(),
-            ReleaseVersion::parse(env!("CARGO_PKG_VERSION")).unwrap()
+            select_release_version(current, None, &sha256(b"first build")).unwrap(),
+            current
         );
     }
 
@@ -444,9 +717,107 @@ mod tests {
             format!("{} *legacy.exe\n", hex(&sha256(b"legacy"))),
         )
         .unwrap();
+        let latest = latest_release(directory.path()).unwrap();
         assert_eq!(
-            select_release_version(directory.path(), &sha256(b"first StageSwap build")).unwrap(),
+            select_release_version(
+                ReleaseVersion::parse("0.2.0").unwrap(),
+                latest.as_ref(),
+                &sha256(b"first StageSwap build"),
+            )
+            .unwrap(),
             ReleaseVersion::parse("0.2.0").unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_release_sidecars_remain_valid_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let digest = sha256(b"legacy metadata shape");
+        fs::write(
+            directory.path().join("StageSwap_win64_v3.4.5.exe.sha256"),
+            format!("{} *StageSwap_win64_v3.4.5.exe\n", hex(&digest)),
+        )
+        .unwrap();
+        assert_eq!(
+            latest_release(directory.path()).unwrap(),
+            Some((ReleaseVersion::parse("3.4.5").unwrap(), hex(&digest)))
+        );
+    }
+
+    #[test]
+    fn workspace_version_update_preserves_manifest_and_rolls_back_lockfile() {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = directory.path().join("Cargo.toml");
+        let lockfile = directory.path().join("Cargo.lock");
+        let original_manifest = "[workspace]\nresolver = \"3\"\n\n[workspace.package]\nversion = \"0.2.0\" # release\nedition = \"2024\"\n";
+        let original_lock = b"original lock";
+        fs::write(&manifest, original_manifest).unwrap();
+        fs::write(&lockfile, original_lock).unwrap();
+
+        {
+            let _transaction = VersionTransaction::begin(
+                &manifest,
+                &lockfile,
+                ReleaseVersion::parse("0.2.11").unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                read_workspace_version(&manifest).unwrap(),
+                ReleaseVersion::parse("0.2.11").unwrap()
+            );
+            fs::write(&lockfile, "regenerated lock").unwrap();
+        }
+
+        assert_eq!(fs::read_to_string(&manifest).unwrap(), original_manifest);
+        assert_eq!(fs::read(&lockfile).unwrap(), original_lock);
+    }
+
+    #[test]
+    fn committed_workspace_version_and_regenerated_lockfile_are_retained() {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = directory.path().join("Cargo.toml");
+        let lockfile = directory.path().join("Cargo.lock");
+        fs::write(&manifest, "[workspace.package]\nversion = \"0.2.0\"\n").unwrap();
+        fs::write(&lockfile, "original lock").unwrap();
+        let mut transaction = VersionTransaction::begin(
+            &manifest,
+            &lockfile,
+            ReleaseVersion::parse("0.2.11").unwrap(),
+        )
+        .unwrap();
+        fs::write(&lockfile, "regenerated lock").unwrap();
+        transaction.commit();
+        drop(transaction);
+
+        assert_eq!(
+            read_workspace_version(&manifest).unwrap(),
+            ReleaseVersion::parse("0.2.11").unwrap()
+        );
+        assert_eq!(fs::read_to_string(&lockfile).unwrap(), "regenerated lock");
+    }
+
+    #[test]
+    fn release_publication_refuses_to_replace_different_existing_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let artifact = "StageSwap_win64_v1.0.0.exe";
+        fs::write(directory.path().join(artifact), b"existing").unwrap();
+        assert!(publish_release(directory.path(), artifact, b"new", b"checksum").is_err());
+        assert_eq!(
+            fs::read(directory.path().join(artifact)).unwrap(),
+            b"existing"
+        );
+        assert!(!directory.path().join(format!("{artifact}.sha256")).exists());
+    }
+
+    #[test]
+    fn production_build_commands_and_artifact_paths_are_release_only() {
+        let workspace = Path::new("workspace");
+        let command = cargo_build(workspace, APP_PACKAGE, "test-target", None);
+        let description = format!("{command:?}");
+        assert!(description.contains("--release"));
+        assert!(
+            release_artifact(workspace, "test-target", APP_EXECUTABLE)
+                .ends_with("target/test-target/release/StageSwap.exe")
         );
     }
 }
