@@ -7815,26 +7815,14 @@ fn paint_fps_overlay(ui: &egui::Ui, preview_rect: Rect, fps: Option<u32>) {
 fn app_title(ui: &mut egui::Ui, texture: egui::TextureId) {
     const ICON_SIZE: f32 = 22.0;
     const GAP: f32 = 7.0;
-    const ROUTE_ICON_SIZE: f32 = 13.0;
-    const ROUTE_GAP: f32 = 5.0;
     let color = Color32::from_rgb(205, 211, 222);
     let font = FontId::proportional(14.0);
-    let secondary_screen = tr(ui, "Secondary screen");
-    let route = ui.painter().layout_no_wrap(
-        format!("StageSwap · {secondary_screen}"),
-        font.clone(),
-        color,
-    );
-    let destination = ui.painter().layout_no_wrap("Zoom".to_owned(), font, color);
+    let title = ui
+        .painter()
+        .layout_no_wrap("StageSwap".to_owned(), font, color);
     let size = egui::vec2(
-        ICON_SIZE
-            + GAP
-            + route.size().x
-            + ROUTE_GAP
-            + ROUTE_ICON_SIZE
-            + ROUTE_GAP
-            + destination.size().x,
-        route.size().y.max(destination.size().y).max(ICON_SIZE),
+        ICON_SIZE + GAP + title.size().x,
+        title.size().y.max(ICON_SIZE),
     );
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let icon_rect = Rect::from_min_size(
@@ -7847,27 +7835,11 @@ fn app_title(ui: &mut egui::Ui, texture: egui::TextureId) {
         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
         Color32::WHITE,
     );
-    let route_pos = Pos2::new(
+    let title_pos = Pos2::new(
         icon_rect.right() + GAP,
-        rect.center().y - route.size().y / 2.0,
+        rect.center().y - title.size().y / 2.0,
     );
-    ui.painter().galley(route_pos, route.clone(), color);
-    let route_icon = Rect::from_min_size(
-        Pos2::new(
-            route_pos.x + route.size().x + ROUTE_GAP,
-            rect.center().y - ROUTE_ICON_SIZE / 2.0,
-        ),
-        egui::vec2(ROUTE_ICON_SIZE, ROUTE_ICON_SIZE),
-    );
-    ui_icon::paint(ui.painter(), route_icon, UiIcon::ArrowRight, SETTINGS_BLUE);
-    ui.painter().galley(
-        Pos2::new(
-            route_icon.right() + ROUTE_GAP,
-            rect.center().y - destination.size().y / 2.0,
-        ),
-        destination,
-        color,
-    );
+    ui.painter().galley(title_pos, title, color);
 }
 
 fn icon_text(ui: &mut egui::Ui, icon: UiIcon, text: &str, color: Color32, strong: bool) {
