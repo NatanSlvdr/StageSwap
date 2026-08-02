@@ -62,7 +62,7 @@ impl SetupStep {
             Self::HowItWorks => "JW Library to Zoom",
             Self::Webcam => "Choose your webcam",
             Self::Screen => "Choose the JW Library display",
-            Self::Reference => "Capture the idle display",
+            Self::Reference => "Capture reference image",
             Self::Ready => "Ready for the meeting",
         }
     }

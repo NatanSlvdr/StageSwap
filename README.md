@@ -60,7 +60,7 @@ StageSwap requires a 64-bit Windows 11 computer, a webcam, a second display conf
 </p>
 <p align="center"><em>The dashboard shows the four previews, component status, output mode, and automation controls.</em></p>
 
-6. Open the JW Library presentation on the second display. Leave it on the normal idle view with centered text and the gray square in the corner, then select **Capture idle display**. An existing reference image can also be imported.
+6. Open the JW Library presentation on the second display. Leave it on the normal idle view with centered text and the gray square in the corner, then select **Capture reference image** and confirm the captured frame. An existing reference image can also be imported.
 
 <p align="center">
   <img src="docs/images/readme/matching-settings.svg" width="760" alt="Placeholder for the StageSwap reference-matching settings">
@@ -95,7 +95,7 @@ StageSwap can include or hide the mouse cursor, intelligently crop non-16:9 came
 - **Start automation** makes the selected output mode live.
 - **Stop automation** shows the StageSwap off screen without removing the virtual camera.
 - **Camera**, **Display**, and **Automatic** can be selected from the dashboard or tray menu.
-- **Capture idle display** saves the current JW Library idle view as the reference.
+- **Capture reference image** captures the current JW Library idle view for review and saves it only after confirmation.
 - **Rescan screens** searches the connected displays for the saved reference. It does not restart screen capture.
 - **Open setup guide** under General Settings repeats the interactive webcam, JW Library display, idle-reference, and Zoom setup at any time.
 - Closing the dashboard to the tray keeps capture and output running. Fully exiting stops capture; camera apps receive the StageSwap off screen.

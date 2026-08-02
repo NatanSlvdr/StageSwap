@@ -51,6 +51,8 @@ const SETUP_REFERENCE_RAIL_WIDTH: f32 = 280.0;
 const SETUP_REFERENCE_CARD_HEIGHT: f32 = 262.0;
 const SETUP_REFERENCE_COLUMN_GAP: f32 = 16.0;
 const SETUP_REFERENCE_STACK_BREAKPOINT: f32 = 760.0;
+const REFERENCE_DIALOG_WIDTH: f32 = 720.0;
+const REFERENCE_DIALOG_STACK_BREAKPOINT: f32 = 600.0;
 const DISCO_GESTURE_WINDOW: Duration = Duration::from_secs(3);
 const SETTINGS_SIDEBAR_WIDTH: f32 = 228.0;
 const SETTINGS_CONTENT_WIDTH: f32 = 960.0;
@@ -527,6 +529,9 @@ fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>,
         Some("dialog-remove-baseline") => {
             UiPreviewTarget::Dialog(AppDialogKind::RemoveAdminBaseline)
         }
+        Some("dialog-reference-capture") => {
+            UiPreviewTarget::Dialog(AppDialogKind::ReferenceCapture)
+        }
         Some(value) if value.starts_with("setup-") => {
             let number = value
                 .strip_prefix("setup-")
@@ -633,6 +638,7 @@ enum AppView {
 enum AppDialogKind {
     Exit,
     ClearLogs,
+    ReferenceCapture,
     Admin,
     ReplaceAdminBaseline,
     LoadAdminConfig,
@@ -649,6 +655,9 @@ struct ActiveDialog {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DialogAction {
     Dismiss,
+    CancelReferenceCapture,
+    RetakeReferenceCapture,
+    ConfirmReferenceCandidate,
     Exit,
     ClearLogs,
     SaveAdminBaseline,
@@ -1072,7 +1081,9 @@ enum SetupAction {
 #[derive(Clone, Copy, Debug)]
 enum SetupReferenceCaptureState {
     Idle,
-    Preparing,
+    PreparingCandidate {
+        started_at: Instant,
+    },
     CapturingCandidate {
         started_at: Instant,
         previous_candidate_sequence: Option<u64>,
@@ -1342,10 +1353,10 @@ impl SwitcherApp {
             }
             UiPreviewTarget::Dialog(kind) => {
                 self.view = AppView::Settings;
-                self.settings_tab = if kind == AppDialogKind::ClearLogs {
-                    SettingsTab::Diagnostics
-                } else {
-                    SettingsTab::General
+                self.settings_tab = match kind {
+                    AppDialogKind::ClearLogs => SettingsTab::Diagnostics,
+                    AppDialogKind::ReferenceCapture => SettingsTab::Matching,
+                    _ => SettingsTab::General,
                 };
                 if matches!(
                     kind,
@@ -1704,6 +1715,56 @@ impl SwitcherApp {
         self.active_dialog
             .as_ref()
             .is_some_and(|dialog| dialog.kind == kind)
+    }
+
+    fn begin_reference_capture(&mut self) {
+        self.prepare_reference_capture();
+        self.open_dialog(AppDialogKind::ReferenceCapture);
+    }
+
+    fn prepare_reference_capture(&mut self) {
+        self.setup_reference_capture = SetupReferenceCaptureState::PreparingCandidate {
+            started_at: Instant::now(),
+        };
+        self.send_setup_reference_command(Command::DiscardReferenceCandidate);
+    }
+
+    fn capture_reference_candidate(&mut self) {
+        let snapshot = self.snapshot();
+        self.setup_reference_capture = SetupReferenceCaptureState::CapturingCandidate {
+            started_at: Instant::now(),
+            previous_candidate_sequence: snapshot
+                .previews
+                .reference_candidate
+                .as_ref()
+                .map(|frame| frame.sequence),
+        };
+        self.send_setup_reference_command(Command::CaptureReferenceCandidate);
+    }
+
+    fn cancel_reference_capture(&mut self) {
+        if matches!(
+            self.setup_reference_capture,
+            SetupReferenceCaptureState::SavingCandidate { .. }
+        ) {
+            return;
+        }
+        self.send_setup_reference_command(Command::DiscardReferenceCandidate);
+        self.setup_reference_capture = SetupReferenceCaptureState::Idle;
+        self.dismiss_dialog();
+    }
+
+    fn confirm_reference_candidate(&mut self) {
+        let snapshot = self.snapshot();
+        self.setup_reference_capture = SetupReferenceCaptureState::SavingCandidate {
+            started_at: Instant::now(),
+            previous_reference_sequence: snapshot
+                .previews
+                .reference
+                .as_ref()
+                .map(|frame| frame.sequence),
+        };
+        self.send_setup_reference_command(Command::ConfirmReferenceCandidate);
     }
 
     fn open_admin_configuration(&mut self) {
@@ -2430,13 +2491,7 @@ impl SwitcherApp {
             self.setup_reference_capture,
             SetupReferenceCaptureState::Idle
         ) && snapshot.previews.reference.is_some();
-        let reviewing = matches!(
-            self.setup_reference_capture,
-            SetupReferenceCaptureState::Review { .. }
-                | SetupReferenceCaptureState::SavingCandidate { .. }
-                | SetupReferenceCaptureState::SaveFailed { .. }
-        );
-        let comparison_visible = reviewing || confirmed;
+        let comparison_visible = confirmed;
         let mut action = None;
 
         ui.allocate_ui_with_layout(
@@ -2446,7 +2501,7 @@ impl SwitcherApp {
                 ui.set_width(group_width);
                 if stacked {
                     action = if comparison_visible {
-                        self.setup_reference_review_surface(ui, snapshot, live_width, confirmed)
+                        self.setup_reference_review_surface(ui, snapshot, live_width)
                     } else {
                         self.setup_reference_capture_surface(ui, snapshot, live_width)
                     };
@@ -2461,9 +2516,7 @@ impl SwitcherApp {
                             |ui| {
                                 ui.set_width(live_width);
                                 action = if comparison_visible {
-                                    self.setup_reference_review_surface(
-                                        ui, snapshot, live_width, confirmed,
-                                    )
+                                    self.setup_reference_review_surface(ui, snapshot, live_width)
                                 } else {
                                     self.setup_reference_capture_surface(ui, snapshot, live_width)
                                 };
@@ -2596,15 +2649,7 @@ impl SwitcherApp {
                 })
                 .inner;
             if response.clicked() {
-                self.setup_reference_capture = SetupReferenceCaptureState::CapturingCandidate {
-                    started_at: Instant::now(),
-                    previous_candidate_sequence: snapshot
-                        .previews
-                        .reference_candidate
-                        .as_ref()
-                        .map(|frame| frame.sequence),
-                };
-                self.send_setup_reference_command(Command::CaptureReferenceCandidate);
+                self.begin_reference_capture();
             }
             if screen_frame.is_none() {
                 ui.add_space(4.0);
@@ -2633,49 +2678,19 @@ impl SwitcherApp {
         ui: &mut egui::Ui,
         snapshot: &AppSnapshot,
         width: f32,
-        confirmed: bool,
     ) -> Option<SetupAction> {
-        let frame = if confirmed {
-            snapshot.previews.reference.as_ref()
-        } else {
-            snapshot.previews.reference_candidate.as_ref()
-        };
-        let tone = if confirmed {
-            ACTIVE_GREEN
-        } else {
-            TRANSITION_AMBER
-        };
+        let frame = snapshot.previews.reference.as_ref();
+        let tone = ACTIVE_GREEN;
         ui.set_width(width);
         ui.horizontal(|ui| {
-            setup_control_label(
-                ui,
-                if confirmed {
-                    UiIcon::CheckCircle
-                } else {
-                    UiIcon::Capture
-                },
-                if confirmed {
-                    "Saved idle reference"
-                } else {
-                    "Your captured image"
-                },
-                tone,
-            );
-            setup_reference_state_badge(
-                ui,
-                if confirmed { "CONFIRMED" } else { "TO CONFIRM" },
-                tone,
-            );
+            setup_control_label(ui, UiIcon::CheckCircle, "Saved idle reference", tone);
+            setup_reference_state_badge(ui, "CONFIRMED", tone);
         });
         ui.add_space(6.0);
         let preview_height = width / WINDOW_ASPECT_RATIO;
         let preview_rect = self.preview(
             ui,
-            if confirmed {
-                PreviewKind::Reference
-            } else {
-                PreviewKind::Screen
-            },
+            PreviewKind::Reference,
             frame,
             [width, preview_height],
             snapshot.actual_output,
@@ -2683,108 +2698,21 @@ impl SwitcherApp {
         );
         ui.painter()
             .rect_stroke(preview_rect, 8, Stroke::new(3.0, tone), StrokeKind::Inside);
-        let flash_alpha = match self.setup_reference_capture {
-            SetupReferenceCaptureState::Review { captured_at } => setup_reference_flash_alpha(
-                Instant::now().saturating_duration_since(captured_at),
-                self.setup_animations_enabled,
-            ),
-            _ => 0.0,
-        };
-        if flash_alpha > 0.0 {
-            ui.ctx().request_repaint();
-            ui.painter().rect_filled(
-                preview_rect.shrink(3.0),
-                6,
-                SETUP_SIGNAL_WHITE.gamma_multiply(flash_alpha * 0.42),
-            );
-        }
 
         ui.add_space(10.0);
-        match self.setup_reference_capture {
-            SetupReferenceCaptureState::Review { .. } => {
-                self.setup_reference_review_actions(ui, snapshot, width, false);
-            }
-            SetupReferenceCaptureState::SavingCandidate { .. } => {
-                setup_pending_capture_button(ui, "Saving reference…", egui::vec2(width, 40.0));
-            }
-            SetupReferenceCaptureState::SaveFailed { .. } => {
-                self.setup_reference_review_actions(ui, snapshot, width, true);
-                ui.add_space(4.0);
-                setup_compact_state(
-                    ui,
-                    UiIcon::Error,
-                    "StageSwap couldn’t save this reference. Try again or retake the image.",
-                    LIVE_RED,
-                );
-            }
-            SetupReferenceCaptureState::Confirmed | SetupReferenceCaptureState::Idle
-                if confirmed
-                    && icon_button(
-                        ui,
-                        UiIcon::Refresh,
-                        "Capture again",
-                        egui::vec2(width, 40.0),
-                        false,
-                        false,
-                    )
-                    .clicked() =>
-            {
-                self.setup_reference_capture = SetupReferenceCaptureState::Preparing;
-            }
-            _ => {}
+        if icon_button(
+            ui,
+            UiIcon::Refresh,
+            "Capture again",
+            egui::vec2(width, 40.0),
+            false,
+            false,
+        )
+        .clicked()
+        {
+            self.begin_reference_capture();
         }
         None
-    }
-
-    fn setup_reference_review_actions(
-        &mut self,
-        ui: &mut egui::Ui,
-        snapshot: &AppSnapshot,
-        width: f32,
-        retry: bool,
-    ) {
-        let gap = 10.0;
-        let secondary_width = 170.0;
-        let primary_width = (width - secondary_width - gap).max(1.0);
-        ui.horizontal(|ui| {
-            if icon_button(
-                ui,
-                UiIcon::Refresh,
-                "Retake",
-                egui::vec2(secondary_width, 40.0),
-                false,
-                false,
-            )
-            .clicked()
-            {
-                self.send_setup_reference_command(Command::DiscardReferenceCandidate);
-                self.setup_reference_capture = SetupReferenceCaptureState::Preparing;
-            }
-            ui.add_space(gap - ui.spacing().item_spacing.x);
-            if accent_icon_button(
-                ui,
-                if retry {
-                    UiIcon::Refresh
-                } else {
-                    UiIcon::CheckCircle
-                },
-                if retry { "Try again" } else { "Use this image" },
-                egui::vec2(primary_width, 40.0),
-                SETTINGS_BLUE,
-            )
-            .clicked()
-            {
-                self.setup_reference_capture = SetupReferenceCaptureState::SavingCandidate {
-                    started_at: Instant::now(),
-                    previous_reference_sequence: snapshot
-                        .previews
-                        .reference
-                        .as_ref()
-                        .map(|frame| frame.sequence),
-                };
-                self.send_setup_reference_command(Command::ConfirmReferenceCandidate);
-            }
-        });
     }
 
     fn setup_reference_example_rail(
@@ -2910,6 +2838,13 @@ impl SwitcherApp {
     fn update_setup_reference_capture(&mut self, snapshot: &AppSnapshot) {
         let now = Instant::now();
         match self.setup_reference_capture {
+            SetupReferenceCaptureState::PreparingCandidate { started_at } => {
+                if snapshot.previews.reference_candidate.is_none() {
+                    self.capture_reference_candidate();
+                } else if now.saturating_duration_since(started_at) >= REFERENCE_CAPTURE_TIMEOUT {
+                    self.setup_reference_capture = SetupReferenceCaptureState::CaptureFailed;
+                }
+            }
             SetupReferenceCaptureState::CapturingCandidate {
                 started_at,
                 previous_candidate_sequence,
@@ -3295,13 +3230,13 @@ impl SwitcherApp {
         let capture = icon_button(
             ui,
             UiIcon::Capture,
-            "Capture idle display",
+            "Capture reference image",
             egui::vec2(ui.available_width(), 32.0),
             false,
             false,
         );
         if capture.clicked() {
-            self.send(Command::CaptureReference);
+            self.begin_reference_capture();
         }
         let rescan = icon_button(
             ui,
@@ -4016,14 +3951,14 @@ impl SwitcherApp {
                     if icon_button(
                         ui,
                         UiIcon::Capture,
-                        "Capture idle display",
+                        "Capture reference image",
                         egui::vec2(geometry.action_width, 32.0),
                         false,
                         false,
                     )
                     .clicked()
                     {
-                        app.send(Command::CaptureReference);
+                        app.begin_reference_capture();
                     }
                     if icon_button(
                         ui,
@@ -4340,6 +4275,25 @@ impl SwitcherApp {
         let Some(active) = self.active_dialog else {
             return;
         };
+        let reference_snapshot = if active.kind == AppDialogKind::ReferenceCapture {
+            let snapshot = self.snapshot();
+            self.update_setup_reference_capture(&snapshot);
+            if matches!(
+                self.setup_reference_capture,
+                SetupReferenceCaptureState::Confirmed
+            ) {
+                self.dismiss_dialog();
+                return;
+            }
+            Some(snapshot)
+        } else {
+            None
+        };
+        let reference_textures = if active.kind == AppDialogKind::ReferenceCapture {
+            Some(self.setup_example_textures(context))
+        } else {
+            None
+        };
         let progress = animation_progress(Some(active.opened_at), DIALOG_ENTRANCE_DURATION);
         if progress < 1.0 {
             context.request_repaint();
@@ -4373,7 +4327,20 @@ impl SwitcherApp {
             .show(context, |ui| {
                 ui.set_width(width);
                 ui.set_opacity(0.72 + progress * 0.28);
-                dialog_content(ui, active.kind, status, active.focus_safe_action)
+                if active.kind == AppDialogKind::ReferenceCapture {
+                    self.reference_capture_dialog_content(
+                        ui,
+                        reference_snapshot
+                            .as_ref()
+                            .expect("reference snapshot exists"),
+                        reference_textures
+                            .as_ref()
+                            .expect("reference textures exist"),
+                        active.focus_safe_action,
+                    )
+                } else {
+                    dialog_content(ui, active.kind, status, active.focus_safe_action)
+                }
             });
         if let Some(dialog) = self
             .active_dialog
@@ -4388,7 +4355,20 @@ impl SwitcherApp {
             .or_else(|| response.should_close().then_some(DialogAction::Dismiss));
         match action {
             None => {}
-            Some(DialogAction::Dismiss) => self.dismiss_dialog(),
+            Some(DialogAction::Dismiss) => {
+                if active.kind == AppDialogKind::ReferenceCapture {
+                    self.cancel_reference_capture();
+                } else {
+                    self.dismiss_dialog();
+                }
+            }
+            Some(DialogAction::CancelReferenceCapture) => self.cancel_reference_capture(),
+            Some(DialogAction::RetakeReferenceCapture) => {
+                self.prepare_reference_capture();
+            }
+            Some(DialogAction::ConfirmReferenceCandidate) => {
+                self.confirm_reference_candidate();
+            }
             Some(DialogAction::Exit) => {
                 self.exit_requested = true;
                 self.dismiss_dialog();
@@ -4417,6 +4397,179 @@ impl SwitcherApp {
                 self.set_admin_auto_restore(enabled);
             }
         }
+    }
+
+    fn reference_capture_dialog_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        textures: &SetupExampleTextures,
+        focus_safe_action: bool,
+    ) -> Option<DialogAction> {
+        dialog_header(ui, AppDialogKind::ReferenceCapture);
+        ui.add_space(12.0);
+        ui.label(
+            RichText::new(tr(
+                ui,
+                "Make sure this image shows the normal JW Library idle display.",
+            ))
+            .size(14.0)
+            .line_height(Some(21.0))
+            .color(Color32::from_rgb(184, 191, 203)),
+        );
+        ui.add_space(16.0);
+
+        let stacked = ui.available_width() < REFERENCE_DIALOG_STACK_BREAKPOINT;
+        if stacked {
+            self.reference_capture_candidate_surface(ui, snapshot, ui.available_width());
+            ui.add_space(12.0);
+            compact_reference_example_card(ui, textures, ui.available_width());
+        } else {
+            let rail_width = 220.0;
+            let candidate_width =
+                (ui.available_width() - SETUP_REFERENCE_COLUMN_GAP - rail_width).max(1.0);
+            ui.spacing_mut().item_spacing.x = SETUP_REFERENCE_COLUMN_GAP;
+            let row_top = ui.available_rect_before_wrap().top();
+            let mut candidate_preview = Rect::NOTHING;
+            ui.horizontal_top(|ui| {
+                allocate_reference_dialog_column(ui, candidate_width, |ui| {
+                    ui.set_width(candidate_width);
+                    candidate_preview =
+                        self.reference_capture_candidate_surface(ui, snapshot, candidate_width);
+                });
+                allocate_reference_dialog_column(ui, rail_width, |ui| {
+                    ui.set_width(rail_width);
+                    ui.add_space(reference_dialog_example_top_offset(
+                        row_top,
+                        candidate_preview,
+                    ));
+                    self.setup_reference_example_rail(ui, textures, rail_width);
+                });
+            });
+        }
+
+        match self.setup_reference_capture {
+            SetupReferenceCaptureState::CaptureFailed => {
+                ui.add_space(10.0);
+                setup_compact_state(
+                    ui,
+                    UiIcon::Error,
+                    "StageSwap couldn’t capture the screen. Check the screen preview and try again.",
+                    LIVE_RED,
+                );
+            }
+            SetupReferenceCaptureState::SaveFailed { .. } => {
+                ui.add_space(10.0);
+                setup_compact_state(
+                    ui,
+                    UiIcon::Error,
+                    "StageSwap couldn’t save this reference. Try again or retake the image.",
+                    LIVE_RED,
+                );
+            }
+            _ => {}
+        }
+        ui.add_space(18.0);
+
+        match self.setup_reference_capture {
+            SetupReferenceCaptureState::CapturingCandidate { .. }
+            | SetupReferenceCaptureState::PreparingCandidate { .. }
+            | SetupReferenceCaptureState::Idle => {
+                reference_dialog_actions(ui, focus_safe_action, false, None)
+            }
+            SetupReferenceCaptureState::Review { .. } => reference_dialog_actions(
+                ui,
+                focus_safe_action,
+                true,
+                Some(("Use this image", DialogAction::ConfirmReferenceCandidate)),
+            ),
+            SetupReferenceCaptureState::SavingCandidate { .. } => {
+                setup_pending_capture_button(
+                    ui,
+                    "Saving reference…",
+                    egui::vec2(ui.available_width(), 40.0),
+                );
+                None
+            }
+            SetupReferenceCaptureState::CaptureFailed => reference_dialog_actions(
+                ui,
+                focus_safe_action,
+                false,
+                Some(("Try again", DialogAction::RetakeReferenceCapture)),
+            ),
+            SetupReferenceCaptureState::SaveFailed { .. } => reference_dialog_actions(
+                ui,
+                focus_safe_action,
+                true,
+                Some(("Try again", DialogAction::ConfirmReferenceCandidate)),
+            ),
+            SetupReferenceCaptureState::Confirmed => None,
+        }
+    }
+
+    fn reference_capture_candidate_surface(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        width: f32,
+    ) -> Rect {
+        let candidate_visible = matches!(
+            self.setup_reference_capture,
+            SetupReferenceCaptureState::Review { .. }
+                | SetupReferenceCaptureState::SavingCandidate { .. }
+                | SetupReferenceCaptureState::SaveFailed { .. }
+        );
+        let tone = if candidate_visible {
+            TRANSITION_AMBER
+        } else {
+            SETTINGS_BLUE
+        };
+        ui.set_width(width);
+        ui.horizontal(|ui| {
+            setup_control_label(ui, UiIcon::Capture, "Your captured image", tone);
+            if candidate_visible {
+                setup_reference_state_badge(ui, "TO CONFIRM", tone);
+            }
+        });
+        ui.add_space(6.0);
+        let preview_height = (width / WINDOW_ASPECT_RATIO).min(260.0);
+        let preview_rect = self.preview(
+            ui,
+            PreviewKind::Screen,
+            candidate_visible
+                .then_some(snapshot.previews.reference_candidate.as_ref())
+                .flatten(),
+            [width, preview_height],
+            snapshot.actual_output,
+            PreviewOptions::settings(
+                if matches!(
+                    self.setup_reference_capture,
+                    SetupReferenceCaptureState::CapturingCandidate { .. }
+                ) {
+                    "Capturing the current frame…"
+                } else {
+                    "No captured image available for review."
+                },
+            ),
+        );
+        ui.painter()
+            .rect_stroke(preview_rect, 8, Stroke::new(3.0, tone), StrokeKind::Inside);
+        let flash_alpha = match self.setup_reference_capture {
+            SetupReferenceCaptureState::Review { captured_at } => setup_reference_flash_alpha(
+                Instant::now().saturating_duration_since(captured_at),
+                self.setup_animations_enabled,
+            ),
+            _ => 0.0,
+        };
+        if flash_alpha > 0.0 {
+            ui.ctx().request_repaint();
+            ui.painter().rect_filled(
+                preview_rect.shrink(3.0),
+                6,
+                SETUP_SIGNAL_WHITE.gamma_multiply(flash_alpha * 0.42),
+            );
+        }
+        preview_rect
     }
 
     fn preview_cell(
@@ -4566,9 +4719,130 @@ impl SwitcherApp {
     }
 }
 
+fn allocate_reference_dialog_column(
+    ui: &mut egui::Ui,
+    width: f32,
+    content: impl FnOnce(&mut egui::Ui),
+) -> Rect {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 1.0),
+        egui::Layout::top_down(egui::Align::LEFT),
+        content,
+    )
+    .response
+    .rect
+}
+
+fn reference_dialog_example_top_offset(row_top: f32, preview_rect: Rect) -> f32 {
+    (preview_rect.center().y - row_top - SETUP_REFERENCE_CARD_HEIGHT / 2.0).max(0.0)
+}
+
+fn compact_reference_example_card(ui: &mut egui::Ui, textures: &SetupExampleTextures, width: f32) {
+    egui::Frame::new()
+        .fill(mix_color(SETUP_SIGNAL_DECK, SETTINGS_BLUE, 0.035))
+        .stroke(Stroke::new(1.0, SETTINGS_BLUE.gamma_multiply(0.28)))
+        .corner_radius(10)
+        .inner_margin(12)
+        .show(ui, |ui| {
+            let content_width = (width - 24.0).max(1.0);
+            ui.set_width(content_width);
+            let thumbnail_width = content_width.min(132.0);
+            ui.horizontal_top(|ui| {
+                setup_reference_example_thumbnail(
+                    ui,
+                    textures.reference.id(),
+                    egui::vec2(thumbnail_width, thumbnail_width / WINDOW_ASPECT_RATIO),
+                );
+                ui.vertical(|ui| {
+                    setup_control_label(
+                        ui,
+                        UiIcon::Image,
+                        "Example reference image",
+                        SETTINGS_BLUE,
+                    );
+                    ui.add_space(6.0);
+                    setup_capture_help(
+                        ui,
+                        "Your JW Library idle screen should look like this example.",
+                    );
+                });
+            });
+        });
+}
+
+fn reference_dialog_actions(
+    ui: &mut egui::Ui,
+    focus_safe_action: bool,
+    show_retake: bool,
+    primary: Option<(&'static str, DialogAction)>,
+) -> Option<DialogAction> {
+    let mut action = None;
+    let action_count = 1 + usize::from(show_retake) + usize::from(primary.is_some());
+    let stacked = ui.available_width() < 480.0;
+    let button_width = if stacked {
+        ui.available_width()
+    } else {
+        dialog_action_width(
+            ui.available_width(),
+            ui.spacing().item_spacing.x,
+            action_count,
+        )
+    };
+    let mut draw = |ui: &mut egui::Ui| {
+        let cancel = dialog_button(
+            ui,
+            UiIcon::Trash,
+            "Cancel",
+            DialogButtonTone::DangerOutline,
+            button_width,
+        );
+        if focus_safe_action {
+            cancel.request_focus();
+        }
+        if cancel.clicked() {
+            action = Some(DialogAction::CancelReferenceCapture);
+        }
+        if show_retake
+            && dialog_button(
+                ui,
+                UiIcon::Refresh,
+                "Retake",
+                DialogButtonTone::Secondary,
+                button_width,
+            )
+            .clicked()
+        {
+            action = Some(DialogAction::RetakeReferenceCapture);
+        }
+        if let Some((label, primary_action)) = primary
+            && dialog_button(
+                ui,
+                if primary_action == DialogAction::ConfirmReferenceCandidate {
+                    UiIcon::CheckCircle
+                } else {
+                    UiIcon::Refresh
+                },
+                label,
+                DialogButtonTone::Primary,
+                button_width,
+            )
+            .clicked()
+        {
+            action = Some(primary_action);
+        }
+    };
+    if stacked {
+        ui.vertical(|ui| draw(ui));
+    } else {
+        ui.horizontal(|ui| draw(ui));
+    }
+    action
+}
+
 impl AppDialogKind {
     const fn preferred_width(self) -> f32 {
         match self {
+            Self::ReferenceCapture => REFERENCE_DIALOG_WIDTH,
             Self::Admin => 500.0,
             Self::Exit | Self::ClearLogs => 440.0,
             Self::ReplaceAdminBaseline | Self::LoadAdminConfig | Self::RemoveAdminBaseline => 560.0,
@@ -4579,6 +4853,7 @@ impl AppDialogKind {
         match self {
             Self::Exit => "Exit StageSwap?",
             Self::ClearLogs => "Clear diagnostic logs?",
+            Self::ReferenceCapture => "Confirm reference image",
             Self::Admin => "Admin configuration",
             Self::ReplaceAdminBaseline => "Replace saved configuration?",
             Self::LoadAdminConfig => "Load saved configuration?",
@@ -4590,6 +4865,7 @@ impl AppDialogKind {
         match self {
             Self::Exit => UiIcon::SignOut,
             Self::ClearLogs => UiIcon::Trash,
+            Self::ReferenceCapture => UiIcon::Capture,
             Self::Admin => UiIcon::Wrench,
             Self::ReplaceAdminBaseline => UiIcon::Save,
             Self::LoadAdminConfig => UiIcon::Load,
@@ -4599,7 +4875,10 @@ impl AppDialogKind {
 
     const fn accent(self) -> Color32 {
         match self {
-            Self::Admin | Self::ReplaceAdminBaseline | Self::LoadAdminConfig => SETTINGS_BLUE,
+            Self::ReferenceCapture
+            | Self::Admin
+            | Self::ReplaceAdminBaseline
+            | Self::LoadAdminConfig => SETTINGS_BLUE,
             Self::Exit | Self::ClearLogs | Self::RemoveAdminBaseline => {
                 Color32::from_rgb(222, 90, 98)
             }
@@ -4612,6 +4891,7 @@ enum DialogButtonTone {
     Secondary,
     Primary,
     Danger,
+    DangerOutline,
 }
 
 fn dialog_content(
@@ -4625,6 +4905,7 @@ fn dialog_content(
     if kind == AppDialogKind::Admin {
         return admin_dialog_content(ui, admin_status, focus_safe_action);
     }
+    debug_assert_ne!(kind, AppDialogKind::ReferenceCapture);
 
     let body = match kind {
         AppDialogKind::Exit => {
@@ -4633,6 +4914,7 @@ fn dialog_content(
         AppDialogKind::ClearLogs => {
             "This permanently removes locally stored diagnostic logs. New logs will continue to be recorded."
         }
+        AppDialogKind::ReferenceCapture => unreachable!(),
         AppDialogKind::ReplaceAdminBaseline => {
             "Replace the saved admin config with the setup currently shown in Settings?"
         }
@@ -4670,6 +4952,7 @@ fn dialog_content(
                 DialogAction::ClearLogs,
                 DialogButtonTone::Danger,
             ),
+            AppDialogKind::ReferenceCapture => unreachable!(),
             AppDialogKind::ReplaceAdminBaseline => (
                 UiIcon::Check,
                 "Keep saved configuration",
@@ -4884,6 +5167,11 @@ fn dialog_button(
         ),
         DialogButtonTone::Primary => (SETTINGS_BLUE, Stroke::NONE, Color32::WHITE),
         DialogButtonTone::Danger => (Color32::from_rgb(174, 58, 69), Stroke::NONE, Color32::WHITE),
+        DialogButtonTone::DangerOutline => (
+            Color32::from_rgb(24, 27, 33),
+            Stroke::new(1.0, LIVE_RED),
+            LIVE_RED,
+        ),
     };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 38.0), Sense::click());
     let interaction = if response.is_pointer_button_down_on() {
@@ -4895,7 +5183,11 @@ fn dialog_button(
     };
     let fill = mix_color(base_fill, Color32::WHITE, interaction);
     let stroke = if response.has_focus() {
-        Stroke::new(1.5, Color32::from_rgb(225, 232, 245))
+        if matches!(tone, DialogButtonTone::DangerOutline) {
+            Stroke::new(2.0, LIVE_RED)
+        } else {
+            Stroke::new(1.5, Color32::from_rgb(225, 232, 245))
+        }
     } else {
         base_stroke
     };
@@ -5314,7 +5606,8 @@ fn setup_reference_card_top_offset(column_height: f32) -> f32 {
 const fn setup_reference_requires_decision(state: SetupReferenceCaptureState) -> bool {
     matches!(
         state,
-        SetupReferenceCaptureState::CapturingCandidate { .. }
+        SetupReferenceCaptureState::PreparingCandidate { .. }
+            | SetupReferenceCaptureState::CapturingCandidate { .. }
             | SetupReferenceCaptureState::Review { .. }
             | SetupReferenceCaptureState::SavingCandidate { .. }
             | SetupReferenceCaptureState::SaveFailed { .. }
@@ -5325,7 +5618,7 @@ const fn setup_reference_capture_label(reference_available: bool) -> &'static st
     if reference_available {
         "Capture again"
     } else {
-        "Capture this idle display"
+        "Capture reference image"
     }
 }
 
@@ -8829,6 +9122,7 @@ mod tests {
         for (name, kind) in [
             ("dialog-exit", AppDialogKind::Exit),
             ("dialog-clear-logs", AppDialogKind::ClearLogs),
+            ("dialog-reference-capture", AppDialogKind::ReferenceCapture),
             ("dialog-admin", AppDialogKind::Admin),
             (
                 "dialog-replace-baseline",
@@ -8989,6 +9283,13 @@ mod tests {
         );
         assert_eq!(setup_reference_card_top_offset(446.0), 92.0);
         assert_eq!(setup_reference_card_top_offset(200.0), 0.0);
+
+        let preview = Rect::from_min_size(Pos2::new(0.0, 36.0), egui::vec2(484.0, 260.0));
+        assert_eq!(reference_dialog_example_top_offset(0.0, preview), 35.0);
+        assert_eq!(
+            reference_dialog_example_top_offset(100.0, Rect::from_min_size(Pos2::ZERO, Vec2::ZERO)),
+            0.0
+        );
     }
 
     #[test]
@@ -8997,8 +9298,8 @@ mod tests {
         assert!(!setup_reference_requires_decision(
             SetupReferenceCaptureState::Idle
         ));
-        assert!(!setup_reference_requires_decision(
-            SetupReferenceCaptureState::Preparing
+        assert!(setup_reference_requires_decision(
+            SetupReferenceCaptureState::PreparingCandidate { started_at: now }
         ));
         assert!(setup_reference_requires_decision(
             SetupReferenceCaptureState::CapturingCandidate {
@@ -9029,7 +9330,7 @@ mod tests {
     fn setup_reference_capture_action_distinguishes_first_capture_from_retry() {
         assert_eq!(
             setup_reference_capture_label(false),
-            "Capture this idle display"
+            "Capture reference image"
         );
         assert_eq!(setup_reference_capture_label(true), "Capture again");
     }
@@ -9187,6 +9488,113 @@ mod tests {
             app.setup_reference_capture,
             SetupReferenceCaptureState::Confirmed
         ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn shared_reference_modal_preserves_cancels_and_confirms_candidates() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            ui_preview_config(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        )
+        .with_ui_preview(UiPreviewRequest {
+            target: UiPreviewTarget::Setup(SetupStep::Reference),
+        });
+        let original = app.snapshot().previews.reference.unwrap();
+
+        app.begin_reference_capture();
+        assert!(app.dialog_is(AppDialogKind::ReferenceCapture));
+        let preparing = app.snapshot();
+        app.update_setup_reference_capture(&preparing);
+        let captured = app.snapshot();
+        assert!(Arc::ptr_eq(
+            captured.previews.reference.as_ref().unwrap(),
+            &original
+        ));
+        assert!(captured.previews.reference_candidate.is_some());
+        let first_candidate_sequence = captured
+            .previews
+            .reference_candidate
+            .as_ref()
+            .unwrap()
+            .sequence;
+        app.update_setup_reference_capture(&captured);
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::Review { .. }
+        ));
+
+        app.prepare_reference_capture();
+        let cleared = app.snapshot();
+        assert!(cleared.previews.reference_candidate.is_none());
+        app.update_setup_reference_capture(&cleared);
+        let retaken = app.snapshot();
+        assert_eq!(
+            retaken
+                .previews
+                .reference_candidate
+                .as_ref()
+                .unwrap()
+                .sequence,
+            first_candidate_sequence
+        );
+        app.update_setup_reference_capture(&retaken);
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::Review { .. }
+        ));
+
+        app.cancel_reference_capture();
+        let cancelled = app.snapshot();
+        assert!(app.active_dialog.is_none());
+        assert!(cancelled.previews.reference_candidate.is_none());
+        assert!(Arc::ptr_eq(
+            cancelled.previews.reference.as_ref().unwrap(),
+            &original
+        ));
+
+        app.begin_reference_capture();
+        let preparing = app.snapshot();
+        app.update_setup_reference_capture(&preparing);
+        let captured = app.snapshot();
+        let candidate = captured
+            .previews
+            .reference_candidate
+            .as_ref()
+            .unwrap()
+            .clone();
+        app.update_setup_reference_capture(&captured);
+        app.confirm_reference_candidate();
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::SavingCandidate { .. }
+        ));
+        app.cancel_reference_capture();
+        assert!(app.dialog_is(AppDialogKind::ReferenceCapture));
+
+        let confirmed = app.snapshot();
+        assert!(confirmed.previews.reference_candidate.is_none());
+        assert!(Arc::ptr_eq(
+            confirmed.previews.reference.as_ref().unwrap(),
+            &candidate
+        ));
+        let context = egui::Context::default();
+        let _ = context.run_ui(egui::RawInput::default(), |_ui| app.dialog(&context));
+        assert!(app.active_dialog.is_none());
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::Confirmed
+        ));
+
+        app.setup_animations_enabled = false;
+        app.setup_session = Some(SetupSession::preview(SetupStep::Reference));
+        app.apply_setup_action(SetupAction::Next);
+        assert_eq!(
+            app.setup_session.map(|session| session.step),
+            Some(SetupStep::Ready)
+        );
     }
 
     #[cfg(not(windows))]
@@ -9666,6 +10074,7 @@ mod tests {
         for kind in [
             AppDialogKind::Exit,
             AppDialogKind::ClearLogs,
+            AppDialogKind::ReferenceCapture,
             AppDialogKind::Admin,
             AppDialogKind::ReplaceAdminBaseline,
             AppDialogKind::LoadAdminConfig,
@@ -9740,6 +10149,34 @@ mod tests {
             let used = width * count as f32 + gap * (count - 1) as f32;
             assert!((used - available).abs() < 0.01);
         }
+    }
+
+    #[test]
+    fn reference_dialog_columns_keep_their_reserved_widths() {
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(720.0, 480.0))),
+            ..egui::RawInput::default()
+        };
+        let mut columns = [Rect::NOTHING; 2];
+        let _ = context.run_ui(input, |ui| {
+            ui.set_width(720.0);
+            ui.spacing_mut().item_spacing.x = SETUP_REFERENCE_COLUMN_GAP;
+            ui.horizontal_top(|ui| {
+                columns[0] = allocate_reference_dialog_column(ui, 484.0, |ui| {
+                    ui.set_width(484.0);
+                    ui.label("Candidate");
+                });
+                columns[1] = allocate_reference_dialog_column(ui, 220.0, |ui| {
+                    ui.set_width(220.0);
+                    ui.label("Example reference image");
+                });
+            });
+        });
+
+        assert!(columns[0].width() >= 484.0);
+        assert!(columns[1].width() >= 220.0);
+        assert!(columns[1].left() >= columns[0].right() + SETUP_REFERENCE_COLUMN_GAP - 0.01);
     }
 
     #[test]
@@ -10430,6 +10867,114 @@ mod tests {
                             app.setup_session.map(|session| session.step),
                             Some(SetupStep::Reference)
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn reference_capture_modal_states_render_responsively_in_every_locale() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            ui_preview_config(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        )
+        .with_ui_preview(UiPreviewRequest {
+            target: UiPreviewTarget::Dialog(AppDialogKind::ReferenceCapture),
+        });
+        let context = egui::Context::default();
+        ui_icon::install_fonts(&context);
+
+        for locale in Locale::ALL {
+            app.config.interface_language = locale.tag().into();
+            set_ui_locale(&context, locale);
+            for viewport in [
+                egui::vec2(520.0, 720.0),
+                egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
+                egui::vec2(1280.0, 720.0),
+            ] {
+                for dpi_scale in [1.0, 1.5] {
+                    for name in [
+                        "preparing",
+                        "capturing",
+                        "review",
+                        "saving",
+                        "capture-failed",
+                        "save-failed",
+                    ] {
+                        let mut snapshot = ui_preview_snapshot();
+                        let reference_sequence =
+                            snapshot.previews.reference.as_ref().unwrap().sequence;
+                        app.setup_reference_capture = match name {
+                            "preparing" => {
+                                snapshot.previews.reference_candidate =
+                                    snapshot.previews.screen.clone();
+                                SetupReferenceCaptureState::PreparingCandidate {
+                                    started_at: Instant::now(),
+                                }
+                            }
+                            "capturing" => {
+                                snapshot.previews.reference_candidate = None;
+                                SetupReferenceCaptureState::CapturingCandidate {
+                                    started_at: Instant::now(),
+                                    previous_candidate_sequence: None,
+                                }
+                            }
+                            "review" => {
+                                snapshot.previews.reference_candidate =
+                                    snapshot.previews.screen.clone();
+                                SetupReferenceCaptureState::Review {
+                                    captured_at: Instant::now() - SETUP_REFERENCE_FLASH_DURATION,
+                                }
+                            }
+                            "saving" => {
+                                snapshot.previews.reference_candidate =
+                                    snapshot.previews.screen.clone();
+                                SetupReferenceCaptureState::SavingCandidate {
+                                    started_at: Instant::now(),
+                                    previous_reference_sequence: Some(reference_sequence),
+                                }
+                            }
+                            "capture-failed" => {
+                                snapshot.previews.reference_candidate = None;
+                                SetupReferenceCaptureState::CaptureFailed
+                            }
+                            "save-failed" => {
+                                snapshot.previews.reference_candidate =
+                                    snapshot.previews.screen.clone();
+                                SetupReferenceCaptureState::SaveFailed {
+                                    previous_reference_sequence: Some(reference_sequence),
+                                }
+                            }
+                            _ => unreachable!(),
+                        };
+                        app.ui_preview.as_mut().unwrap().snapshot = snapshot;
+                        app.active_dialog = Some(ActiveDialog {
+                            kind: AppDialogKind::ReferenceCapture,
+                            opened_at: Instant::now() - DIALOG_ENTRANCE_DURATION,
+                            focus_safe_action: true,
+                        });
+                        let mut input = egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
+                            ..egui::RawInput::default()
+                        };
+                        input
+                            .viewports
+                            .get_mut(&egui::ViewportId::ROOT)
+                            .unwrap()
+                            .native_pixels_per_point = Some(dpi_scale);
+                        let output = context.run_ui(input, |ui| {
+                            let content = app.root_ui(ui);
+                            assert!(ui.max_rect().contains_rect(content));
+                        });
+                        assert!(
+                            output.shapes.len() > 20,
+                            "{name} did not render at {locale:?}, {viewport:?}, {dpi_scale}"
+                        );
+                        assert!(app.dialog_is(AppDialogKind::ReferenceCapture));
                     }
                 }
             }

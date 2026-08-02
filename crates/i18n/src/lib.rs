@@ -209,7 +209,7 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "JW Library is idle: Webcam. JW Library shows media: Display. Without a usable idle reference, Automatic mode stays on Webcam." => ("JW Library est en attente : Webcam. JW Library affiche un média : Écran. Sans référence d’attente utilisable, le mode Automatique reste sur Webcam.", "JW Library está inactiva: Cámara web. JW Library muestra contenido multimedia: Pantalla. Sin una referencia inactiva válida, el modo Automático permanece en Cámara web."),
         "No idle reference — show the JW Library idle display and capture it." => ("Aucune référence d’attente — affichez l’écran d’attente de JW Library et capturez-le.", "No hay referencia inactiva: muestra la pantalla inactiva de JW Library y captúrala."),
         "Checks 4×/s · 5 matches or 3 mismatches · 0.5s fade" => ("4 vérifications/s · 5 correspondances ou 3 différences · fondu de 0,5 s", "4 comprobaciones/s · 5 coincidencias o 3 diferencias · fundido de 0,5 s"),
-        "Capture idle display" => ("Capturer l’écran d’attente", "Capturar pantalla inactiva"),
+        "Capture reference image" => ("Capturer l’image de référence", "Capturar imagen de referencia"),
         "Import image…" => ("Importer une image…", "Importar imagen…"),
         "Match strictness" => ("Précision de la correspondance", "Precisión de coincidencia"),
         "Reset 98%" => ("Réinitialiser à 98 %", "Restablecer al 98 %"),
@@ -308,7 +308,6 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "JW Library display preview" => ("Aperçu de l’écran JW Library", "Vista previa de la pantalla de JW Library"),
         "No display found. Connect the JW Library presentation display, then rescan." => ("Aucun écran détecté. Connectez l’écran de présentation JW Library, puis relancez la recherche.", "No se encontró ninguna pantalla. Conecta la pantalla de presentación de JW Library y vuelve a buscar."),
         "This JW Library display is unavailable. Choose another one or rescan." => ("Cet écran JW Library est indisponible. Choisissez-en un autre ou relancez la recherche.", "Esta pantalla de JW Library no está disponible. Elige otra o vuelve a buscar."),
-        "Capture the idle display" => ("Capturez l’écran d’attente", "Captura la pantalla inactiva"),
         "Capture the normal JW Library idle display as the reference." => ("Capturez l’écran d’attente normal de JW Library comme référence.", "Captura la pantalla inactiva normal de JW Library como referencia."),
         "Return JW Library to its normal idle display, then capture the live frame below." => ("Revenez à l’écran d’attente normal de JW Library, puis capturez l’image en direct ci-dessous.", "Vuelve a la pantalla inactiva normal de JW Library y captura la imagen en directo que aparece abajo."),
         "Example idle display" => ("Exemple d’écran d’attente", "Ejemplo de pantalla inactiva"),
@@ -322,7 +321,6 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Check the live preview, then capture the idle display as the reference." => ("Vérifiez l’aperçu en direct, puis capturez l’écran d’attente comme référence.", "Comprueba la vista previa en directo y captura la pantalla inactiva como referencia."),
         "No reference captured yet." => ("Aucune référence capturée pour le moment.", "Aún no se ha capturado ninguna referencia."),
         "Idle reference captured" => ("Référence d’attente capturée", "Referencia inactiva capturada"),
-        "Capture this idle display" => ("Capturer cet écran d’attente", "Capturar esta pantalla inactiva"),
         "Capturing the current frame…" => ("Capture de l’image actuelle…", "Capturando la imagen actual…"),
         "No live display frame yet. Check the connection or choose another display." => ("Aucune image d’écran en direct pour le moment. Vérifiez la connexion ou choisissez un autre écran.", "Aún no hay imagen de pantalla en directo. Comprueba la conexión o elige otra pantalla."),
         "StageSwap will use this frame to recognize when JW Library is idle." => ("StageSwap utilisera cette image pour reconnaître quand JW Library est en attente.", "StageSwap usará esta imagen para reconocer cuándo JW Library está inactiva."),
@@ -336,6 +334,8 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Retake" => ("Reprendre", "Repetir captura"),
         "Try again" => ("Réessayer", "Reintentar"),
         "Use this image" => ("Utiliser cette image", "Usar esta imagen"),
+        "Confirm reference image" => ("Confirmer l’image de référence", "Confirmar imagen de referencia"),
+        "Make sure this image shows the normal JW Library idle display." => ("Vérifiez que cette image montre l’écran d’attente normal de JW Library.", "Comprueba que esta imagen muestre la pantalla inactiva normal de JW Library."),
         "Example reference image" => ("Exemple d’image de référence", "Ejemplo de imagen de referencia"),
         "Your JW Library idle screen should look like this example." => ("Votre écran d’attente JW Library doit ressembler à cet exemple.", "La pantalla inactiva de JW Library debe parecerse a este ejemplo."),
         "Capture again" => ("Capturer à nouveau", "Capturar de nuevo"),
@@ -444,8 +444,8 @@ mod tests {
     #[test]
     fn setup_guide_copy_uses_the_approved_localizations() {
         assert_eq!(
-            text(Locale::French, "Capture the idle display"),
-            "Capturez l’écran d’attente"
+            text(Locale::French, "Capture reference image"),
+            "Capturer l’image de référence"
         );
         assert_eq!(
             text(
@@ -498,7 +498,7 @@ mod tests {
             "JW Library display preview",
             "No display found. Connect the JW Library presentation display, then rescan.",
             "This JW Library display is unavailable. Choose another one or rescan.",
-            "Capture the idle display",
+            "Capture reference image",
             "Capture the normal JW Library idle display as the reference.",
             "Return JW Library to its normal idle display, then capture the live frame below.",
             "Example idle display",
@@ -511,7 +511,6 @@ mod tests {
             "Choose the JW Library display before capturing a reference.",
             "Check the live preview, then capture the idle display as the reference.",
             "Idle reference captured",
-            "Capture this idle display",
             "Capturing the current frame…",
             "No live display frame yet. Check the connection or choose another display.",
             "StageSwap will use this frame to recognize when JW Library is idle.",
@@ -525,6 +524,8 @@ mod tests {
             "Retake",
             "Try again",
             "Use this image",
+            "Confirm reference image",
+            "Make sure this image shows the normal JW Library idle display.",
             "Example reference image",
             "Your JW Library idle screen should look like this example.",
             "Ready for the meeting",
@@ -540,7 +541,6 @@ mod tests {
             "Idle reference",
             "JW Library is idle: Webcam. JW Library shows media: Display. Without a usable idle reference, Automatic mode stays on Webcam.",
             "No idle reference — show the JW Library idle display and capture it.",
-            "Capture idle display",
             "StageSwap is an independent, unofficial project and is not affiliated with or endorsed by the publisher of JW Library. The name JW Library is used only to describe compatibility.",
             "JW Library display only",
             "The virtual camera needs attention. Restart it here, then reselect StageSwap in Zoom if necessary.",
