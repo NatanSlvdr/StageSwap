@@ -68,7 +68,7 @@ General opens by default. To open a particular page:
 cargo run -p stageswap --bin StageSwap -- --ui-preview matching
 ```
 
-Available page names are `general`, `webcam`, `screen`, `matching`, and `diagnostics`. You can still navigate between every page after launch.
+Available preview names are `dashboard`, `general`, `webcam`, `screen`, `matching`, and `diagnostics`. You can still navigate between every page after launch.
 
 Setup-guide previews are `setup-1` through `setup-5`. Each name opens one deterministic full-window step for the JW Library-to-Zoom workflow.
 
@@ -80,7 +80,15 @@ cargo run -p stageswap --bin StageSwap -- --ui-preview setup-4 --ui-setup-refere
 
 The `setup-4` capture, retake, confirmation, and capture-again controls are interactive in preview mode. They update only the in-memory mock frames and never write `reference.png`.
 
-Dialog previews are `dialog-exit`, `dialog-clear-logs`, `dialog-admin`, `dialog-replace-baseline`, `dialog-load-admin-config`, and `dialog-remove-baseline`.
+Dialog previews are `dialog-exit`, `dialog-clear-logs`, `dialog-reference-capture`, `dialog-admin`, `dialog-replace-baseline`, `dialog-load-admin-config`, and `dialog-remove-baseline`.
+
+The English user-guide screenshot set can be regenerated from the repository root with:
+
+```bash
+./scripts/capture-user-guide-screenshots.sh
+```
+
+The helper writes verified 1280×720 PNGs to `docs/images/user-guide/`.
 
 Append `--ui-language en-US`, `--ui-language fr-FR`, or `--ui-language es` to render any preview in a supported language:
 

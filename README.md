@@ -11,6 +11,8 @@ The virtual-camera output is fixed at 1280×720 and 30 fps. StageSwap watches th
 > [!IMPORTANT]
 > StageSwap is an independent, unofficial project and is not affiliated with or endorsed by the publisher of JW Library. The name JW Library is used only to describe compatibility.
 
+For the complete user manual, including guided setup, Settings, diagnostics, troubleshooting, and annotated screenshots, see the [StageSwap user guide](docs/USER_GUIDE.md).
+
 ## How Automatic mode works
 
 Auto mode uses a saved **reference image** of JW Library with no media playing—the view with centered text and a gray square in the corner—to decide what Zoom shows.
@@ -46,24 +48,21 @@ StageSwap requires a 64-bit Windows 11 computer, a webcam, a secondary screen co
 1. Download `StageSwap_win64_vX.Y.Z.exe` from the [official releases page](https://github.com/NatanSlvdr/StageSwap/releases/latest).
 2. Open it and choose **Install StageSwap**, or choose **Run once** to try it without copying the app to your computer.
 
-<p align="center">
-  <img src="docs/images/readme/first-launch.svg" width="760" alt="Placeholder for the StageSwap first-launch installation choice">
-</p>
-<p align="center"><em>First launch lets you install StageSwap or run the downloaded copy once.</em></p>
+First launch offers **Install StageSwap** or **Run once**. The installer choice, Windows elevation prompt, and native Windows dialogs are described in the [full user guide](docs/USER_GUIDE.md); the repository screenshot set focuses on deterministic in-app previews.
 
 3. Approve the administrator prompt. This is required only to add or update the virtual camera; normal launches run without administrator access.
 4. On a fresh installation, follow the five-step full-page guided setup. It explains the JW Library-to-Zoom signal path, lets you choose the webcam and secondary screen, captures the reference image, and prepares Zoom. You can choose **Set up later** or reopen it under **Settings → General → Open guided setup**.
 5. Confirm the webcam and secondary screen used by JW Library.
 
 <p align="center">
-  <img src="docs/images/readme/dashboard.svg" width="760" alt="Placeholder for the StageSwap dashboard">
+  <img src="docs/images/user-guide/dashboard.png" width="760" alt="StageSwap dashboard with webcam, secondary screen, reference image, and Zoom output previews">
 </p>
 <p align="center"><em>The dashboard shows the four previews, component status, output mode, and automation controls.</em></p>
 
 6. Open the JW Library presentation on the secondary screen. Leave it on the normal view with no media playing, centered text, and the gray square in the corner; then select **Capture reference image** and confirm the captured frame. An existing reference image can also be imported.
 
 <p align="center">
-  <img src="docs/images/readme/matching-settings.svg" width="760" alt="Placeholder for the StageSwap reference-matching settings">
+  <img src="docs/images/user-guide/settings-reference-image.png" width="760" alt="StageSwap Reference image Settings page with preview, capture, import, and similarity controls">
 </p>
 <p align="center"><em>Reference image settings capture or import the saved image and adjust required similarity.</em></p>
 
@@ -127,8 +126,8 @@ This removes the installed app, shortcuts, startup entry, and virtual camera. Se
 - **A camera is missing:** refresh the camera list and select it again. StageSwap does not silently substitute another camera.
 
 <p align="center">
-  <img src="docs/images/readme/diagnostics.svg" width="760" alt="Placeholder for the StageSwap diagnostics settings">
+  <img src="docs/images/user-guide/settings-diagnostics.png" width="760" alt="StageSwap Diagnostics Settings page with component health, recovery tools, technical details, and logs">
 </p>
 <p align="center"><em>Diagnostics shows component health and provides individual and complete restart controls.</em></p>
 
-Build, test, and architecture information is in the [developer guide](DEV.md).
+The [full user guide](docs/USER_GUIDE.md) covers the complete user workflow. Build, test, and architecture information is in the [developer guide](DEV.md).
