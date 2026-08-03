@@ -56,11 +56,11 @@ const REFERENCE_DIALOG_WIDTH: f32 = 720.0;
 const REFERENCE_DIALOG_STACK_BREAKPOINT: f32 = 600.0;
 const DISCO_GESTURE_WINDOW: Duration = Duration::from_secs(3);
 const SETTINGS_SIDEBAR_WIDTH: f32 = 228.0;
-const SETTINGS_CONTENT_WIDTH: f32 = 960.0;
 const SETTINGS_PREVIEW_WIDTH: f32 = 480.0;
+const SETTINGS_CONTENT_WIDTH: f32 = SETTINGS_PREVIEW_WIDTH;
 const SETTINGS_PREVIEW_HEIGHT: f32 = 270.0;
-const SETTINGS_PREVIEW_COLUMNS_BREAKPOINT: f32 = 700.0;
 const SETTINGS_SIDEBAR_FILL: Color32 = Color32::from_rgb(20, 22, 27);
+const SETTINGS_SIDEBAR_CORNER_RADIUS: u8 = 12;
 const SETTINGS_NAV_HOVERED: Color32 = Color32::from_rgb(32, 35, 41);
 const SETTINGS_NAV_SELECTED: Color32 = Color32::from_rgb(45, 48, 55);
 const SETTINGS_NAV_INDICATOR: Color32 = Color32::from_rgb(151, 157, 168);
@@ -425,6 +425,16 @@ impl SettingsTab {
 
     const DIAGNOSTICS: (Self, UiIcon) = (Self::Diagnostics, UiIcon::Layers);
 
+    const fn icon(self) -> UiIcon {
+        match self {
+            Self::General => UiIcon::Settings,
+            Self::Webcam => UiIcon::Camera,
+            Self::Screen => UiIcon::Monitor,
+            Self::Matching => UiIcon::Target,
+            Self::Diagnostics => UiIcon::Layers,
+        }
+    }
+
     fn title(self, locale: Locale) -> std::borrow::Cow<'static, str> {
         localized_text(
             locale,
@@ -443,8 +453,12 @@ impl SettingsTab {
             locale,
             match self {
                 Self::General => "Choose how StageSwap starts, stays open, and alerts you.",
-                Self::Webcam => "Choose the webcam Zoom sees when JW Library is not playing media.",
-                Self::Screen => "Choose the secondary screen JW Library uses for presentations.",
+                Self::Webcam => {
+                    "Choose the webcam Zoom sees when JW Library is not playing media. Output is always 16:9."
+                }
+                Self::Screen => {
+                    "Choose the secondary screen JW Library uses for presentations. StageSwap watches it for media."
+                }
                 Self::Matching => {
                     "Capture the screen JW Library shows when no media is playing. StageSwap compares the live screen with it to detect media."
                 }
@@ -1030,10 +1044,8 @@ struct PreviewOptions {
 
 #[derive(Clone, Copy, Debug)]
 struct SettingsPreviewControls {
-    heading: Rect,
     preview: Rect,
     controls: Rect,
-    side_by_side: bool,
 }
 
 #[derive(Debug)]
@@ -1107,13 +1119,6 @@ struct SetupExampleTextures {
     reference: TextureHandle,
     webcam: TextureHandle,
     screen: TextureHandle,
-}
-
-#[derive(Clone, Copy)]
-struct SettingsSection {
-    icon: UiIcon,
-    title: &'static str,
-    description: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -3300,7 +3305,6 @@ impl SwitcherApp {
                 |ui| self.settings_sidebar(ui, workspace_height),
             );
 
-            ui.separator();
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), workspace_height),
                 egui::Layout::top_down(egui::Align::Min),
@@ -3337,6 +3341,7 @@ impl SwitcherApp {
         };
         egui::Frame::new()
             .fill(sidebar_fill)
+            .corner_radius(SETTINGS_SIDEBAR_CORNER_RADIUS)
             .inner_margin(egui::Margin::symmetric(10, 12))
             .show(ui, |ui| {
                 ui.set_width(SETTINGS_SIDEBAR_WIDTH - 20.0);
@@ -3560,7 +3565,7 @@ impl SwitcherApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let available_width = ui.available_width();
-                let content_width = (available_width - 28.0).min(SETTINGS_CONTENT_WIDTH);
+                let content_width = settings_content_width(available_width);
                 ui.allocate_ui_with_layout(
                     egui::vec2(available_width, ui.available_height()),
                     egui::Layout::top_down(egui::Align::Center),
@@ -3571,12 +3576,24 @@ impl SwitcherApp {
                             |ui| {
                                 ui.set_opacity(0.62 + section_progress * 0.38);
                                 ui.add_space(18.0 + (1.0 - section_progress) * 5.0);
-                                ui.label(
-                                    RichText::new(self.settings_tab.title(self.locale()))
-                                        .size(23.0)
-                                        .strong()
-                                        .color(Color32::WHITE),
-                                );
+                                ui.horizontal(|ui| {
+                                    let (icon_rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(22.0, 22.0),
+                                        Sense::hover(),
+                                    );
+                                    ui_icon::paint(
+                                        ui.painter(),
+                                        icon_rect,
+                                        self.settings_tab.icon(),
+                                        Color32::from_rgb(119, 164, 247),
+                                    );
+                                    ui.label(
+                                        RichText::new(self.settings_tab.title(self.locale()))
+                                            .size(23.0)
+                                            .strong()
+                                            .color(Color32::WHITE),
+                                    );
+                                });
                                 ui.add_space(4.0);
                                 ui.label(
                                     RichText::new(self.settings_tab.description(self.locale()))
@@ -3785,11 +3802,6 @@ impl SwitcherApp {
             });
         self.settings_preview_control_row(
             ui,
-            SettingsSection {
-                icon: UiIcon::Camera,
-                title: "Camera input",
-                description: "This is the webcam StageSwap sends when JW Library is not playing media. Output is always 16:9.",
-            },
             SettingsPreview {
                 kind: PreviewKind::Webcam,
                 frame: snapshot.previews.webcam.as_ref(),
@@ -3798,8 +3810,6 @@ impl SwitcherApp {
                 actual_output: snapshot.actual_output,
             },
             |app, ui| {
-                settings_device_status(ui, UiIcon::Camera, "Webcam", snapshot.webcam_state);
-                ui.add_space(12.0);
                 ui.label(
                     RichText::new(tr(ui, "Camera"))
                         .size(12.0)
@@ -3841,7 +3851,7 @@ impl SwitcherApp {
                     }
                 });
                 ui.add_space(8.0);
-                settings_toggle_row(
+                settings_toggle_row_without_separator(
                     ui,
                     &mut app.config.crop_webcam_to_16_9,
                     "Crop webcam to 16:9",
@@ -3859,11 +3869,6 @@ impl SwitcherApp {
         );
         self.settings_preview_control_row(
             ui,
-            SettingsSection {
-                icon: UiIcon::Monitor,
-                title: "Secondary screen",
-                description: "This is the secondary screen JW Library uses for presentations. StageSwap watches it for media.",
-            },
             SettingsPreview {
                 kind: PreviewKind::Screen,
                 frame: snapshot.previews.screen.as_ref(),
@@ -3873,8 +3878,6 @@ impl SwitcherApp {
                 actual_output: snapshot.actual_output,
             },
             |app, ui| {
-                settings_device_status(ui, UiIcon::Monitor, "Capture", snapshot.screen_state);
-                ui.add_space(12.0);
                 ui.label(
                     RichText::new(tr(ui, "Display"))
                         .size(12.0)
@@ -3935,11 +3938,6 @@ impl SwitcherApp {
         let snapshot = self.snapshot();
         self.settings_preview_control_row(
             ui,
-            SettingsSection {
-                icon: UiIcon::Target,
-                title: "Reference image",
-                description: "StageSwap compares the live secondary screen with this image. A match means no media is playing.",
-            },
             SettingsPreview {
                 kind: PreviewKind::Reference,
                 frame: snapshot.previews.reference.as_ref(),
@@ -3949,12 +3947,6 @@ impl SwitcherApp {
                 actual_output: snapshot.actual_output,
             },
             |app, ui| {
-                ui.vertical(|ui| {
-                    settings_reference_status(ui, snapshot.previews.reference.is_some());
-                    ui.add_space(3.0);
-                    settings_detection_status(ui, snapshot.detection);
-                });
-                ui.add_space(7.0);
                 ui.add(
                     egui::Label::new(
                         RichText::new(tr(
@@ -4181,71 +4173,30 @@ impl SwitcherApp {
     fn settings_preview_control_row(
         &mut self,
         ui: &mut egui::Ui,
-        section: SettingsSection,
         preview: SettingsPreview<'_>,
         add_controls: impl FnOnce(&mut Self, &mut egui::Ui),
     ) -> SettingsPreviewControls {
         let available = ui.available_width();
-        let side_by_side = available >= SETTINGS_PREVIEW_COLUMNS_BREAKPOINT;
-        let mut heading_rect = Rect::NOTHING;
-        let mut preview_rect = Rect::NOTHING;
-        let mut controls_rect = Rect::NOTHING;
-        if side_by_side {
-            let gap = 22.0;
-            let preview_width = ((available - gap) * 0.56).min(SETTINGS_PREVIEW_WIDTH);
-            let controls_width = (available - gap - preview_width).max(220.0);
-            let row_height = preview_width / WINDOW_ASPECT_RATIO + 26.0;
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                ui.horizontal_top(|ui| {
-                    preview_rect = self.settings_preview_panel(ui, preview, preview_width);
-                    let controls = ui.allocate_ui_with_layout(
-                        egui::vec2(controls_width, row_height),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui.set_width(controls_width);
-                            heading_rect = settings_section_heading(
-                                ui,
-                                section.icon,
-                                section.title,
-                                section.description,
-                            );
-                            ui.add_space(10.0);
-                            add_controls(self, ui);
-                        },
-                    );
-                    controls_rect = controls.response.rect;
-                });
-            });
-        } else {
-            heading_rect =
-                settings_section_heading(ui, section.icon, section.title, section.description);
-            ui.add_space(8.0);
-            preview_rect = self.settings_single_preview(ui, preview);
-            ui.add_space(10.0);
-            let controls = ui.allocate_ui_with_layout(
+        let preview_rect = self.settings_single_preview(ui, preview);
+        ui.add_space(16.0);
+        let controls_rect = ui
+            .allocate_ui_with_layout(
                 egui::vec2(available, 1.0),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_width(available);
                     add_controls(self, ui);
                 },
-            );
-            controls_rect = controls.response.rect;
-        }
+            )
+            .response
+            .rect;
         let layout = SettingsPreviewControls {
-            heading: heading_rect,
             preview: preview_rect,
             controls: controls_rect,
-            side_by_side,
         };
-        debug_assert!(layout.heading.is_positive());
         debug_assert!(layout.preview.is_positive());
         debug_assert!(layout.controls.is_positive());
-        debug_assert_eq!(
-            layout.side_by_side,
-            available >= SETTINGS_PREVIEW_COLUMNS_BREAKPOINT
-        );
+        debug_assert!(layout.preview.bottom() < layout.controls.top());
         layout
     }
 
@@ -6929,6 +6880,10 @@ fn settings_section_gap(ui: &mut egui::Ui) {
     ui.add_space(24.0);
 }
 
+fn settings_content_width(available: f32) -> f32 {
+    (available - 28.0).clamp(1.0, SETTINGS_CONTENT_WIDTH)
+}
+
 fn settings_group_label(ui: &mut egui::Ui, label: &str) {
     let label = tr(ui, label);
     ui.label(
@@ -7336,6 +7291,31 @@ fn settings_control_row(
     let title = tr(ui, title);
     let description = tr(ui, description);
     let width = ui.available_width();
+    if width <= 560.0 {
+        ui.vertical(|ui| {
+            ui.label(
+                RichText::new(title.as_ref())
+                    .size(13.0)
+                    .color(Color32::from_rgb(224, 228, 235)),
+            );
+            if !description.is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(description.as_ref())
+                            .size(10.5)
+                            .color(Color32::from_rgb(126, 134, 148)),
+                    )
+                    .wrap(),
+                );
+            }
+            ui.add_space(5.0);
+            add_control(ui);
+        });
+        ui.add_space(8.0);
+        ui.separator();
+        return;
+    }
+
     let control_width = 300.0_f32.min((width * 0.46).max(120.0));
     let label_width = (width - control_width - 12.0).max(100.0);
     ui.allocate_ui_with_layout(
@@ -7440,8 +7420,36 @@ fn settings_single_button_row(
     let description = tr(ui, description);
     let button_label = tr(ui, button_label);
     let width = ui.available_width();
-    let (row, _) = ui.allocate_exact_size(egui::vec2(width, 54.0), Sense::hover());
+    if width <= 560.0 {
+        let response = ui
+            .vertical(|ui| {
+                ui.label(
+                    RichText::new(title.as_ref())
+                        .size(13.0)
+                        .color(Color32::from_rgb(224, 228, 235)),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(description.as_ref())
+                            .size(10.5)
+                            .color(Color32::from_rgb(126, 134, 148)),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(8.0);
+                ui.add_sized(
+                    egui::vec2(ui.available_width(), 32.0),
+                    egui::Button::new(button_label.as_ref()),
+                )
+            })
+            .inner;
+        ui.add_space(8.0);
+        ui.separator();
+        return response;
+    }
+
     let button_size = egui::vec2(button_width.min(width).max(1.0), 32.0);
+    let (row, _) = ui.allocate_exact_size(egui::vec2(width, 54.0), Sense::hover());
     let button_rect = Rect::from_center_size(
         Pos2::new(row.right() - button_size.x / 2.0, row.center().y),
         button_size,
@@ -7506,15 +7514,6 @@ fn settings_device_status(ui: &mut egui::Ui, icon: UiIcon, label: &str, state: D
         friendly_device_state(state),
         color,
     );
-}
-
-fn settings_reference_status(ui: &mut egui::Ui, available: bool) {
-    let (icon, status, color) = if available {
-        (UiIcon::Check, "Ready", ACTIVE_GREEN)
-    } else {
-        (UiIcon::Unavailable, "Missing", LIVE_RED)
-    };
-    settings_status_item(ui, UiIcon::Image, "Reference image", icon, status, color);
 }
 
 fn settings_detection_status(ui: &mut egui::Ui, state: DetectionState) {
@@ -9131,6 +9130,7 @@ mod tests {
         assert_eq!(SETTINGS_NAV_HOVERED, Color32::from_rgb(32, 35, 41));
         assert_eq!(SETTINGS_NAV_SELECTED, Color32::from_rgb(45, 48, 55));
         assert_eq!(SETTINGS_NAV_INDICATOR, Color32::from_rgb(151, 157, 168));
+        assert_eq!(SETTINGS_SIDEBAR_CORNER_RADIUS, 12);
     }
 
     #[cfg(not(windows))]
@@ -9707,6 +9707,15 @@ mod tests {
     }
 
     #[test]
+    fn settings_page_titles_reuse_their_navigation_icons() {
+        for (tab, icon) in SettingsTab::PRIMARY {
+            assert_eq!(tab.icon(), icon);
+        }
+        let (diagnostics, icon) = SettingsTab::DIAGNOSTICS;
+        assert_eq!(diagnostics.icon(), icon);
+    }
+
+    #[test]
     fn settings_switches_use_fixed_aligned_geometry_and_blue_slate_states() {
         let first = settings_switch_geometry(Rect::from_min_size(
             Pos2::new(10.0, 20.0),
@@ -9726,33 +9735,44 @@ mod tests {
     }
 
     #[test]
-    fn guided_setup_settings_action_is_flush_with_the_right_control_edge() {
-        let context = egui::Context::default();
-        let mut button_rect = Rect::NOTHING;
-        let mut row_right = 0.0;
-        let _ = context.run_ui(
-            egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 80.0))),
-                ..egui::RawInput::default()
-            },
-            |ui| {
-                ui.set_width(960.0);
-                row_right = ui.available_rect_before_wrap().right();
-                button_rect = settings_single_button_row(
-                    ui,
-                    "Guided setup",
-                    "Choose the webcam and secondary screen, then capture the screen JW Library shows when no media is playing.",
-                    "Open guided setup",
-                    206.0,
-                )
-                .rect;
-            },
-        );
-        assert!(
-            (button_rect.right() - row_right).abs() <= 2.0,
-            "guided setup button should align with the full settings row: \
-             button={button_rect:?}, row_right={row_right}"
-        );
+    fn guided_setup_settings_action_wraps_safely_and_stays_flush_right() {
+        let mut consumed_heights = Vec::new();
+        for width in [960.0, SETTINGS_CONTENT_WIDTH] {
+            let context = egui::Context::default();
+            let mut button_rect = Rect::NOTHING;
+            let mut row_right = 0.0;
+            let mut consumed_height = 0.0;
+            let _ = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        Pos2::ZERO,
+                        egui::vec2(width, 160.0),
+                    )),
+                    ..egui::RawInput::default()
+                },
+                |ui| {
+                    ui.set_width(width);
+                    row_right = ui.available_rect_before_wrap().right();
+                    let before = ui.cursor().top();
+                    button_rect = settings_single_button_row(
+                        ui,
+                        "Guided setup",
+                        "Choose the webcam and secondary screen, then capture the screen JW Library shows when no media is playing.",
+                        "Open guided setup",
+                        206.0,
+                    )
+                    .rect;
+                    consumed_height = ui.cursor().top() - before;
+                },
+            );
+            assert!(
+                (button_rect.right() - row_right).abs() <= 2.0,
+                "guided setup button should align with the full settings row: \
+                 button={button_rect:?}, row_right={row_right}"
+            );
+            consumed_heights.push(consumed_height);
+        }
+        assert!(consumed_heights[1] > consumed_heights[0]);
     }
 
     #[test]
@@ -10038,7 +10058,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_previews_are_bounded_and_responsive() {
+    fn settings_previews_are_stacked_bounded_and_responsive() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
             AppConfig::default(),
@@ -10050,7 +10070,7 @@ mod tests {
             PreviewKind::Screen,
             PreviewKind::Reference,
         ] {
-            for (width, expected_side_by_side) in [(760.0, true), (560.0, false)] {
+            for width in [760.0, 560.0, 360.0] {
                 let context = egui::Context::default();
                 let input = egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 900.0))),
@@ -10061,11 +10081,6 @@ mod tests {
                     ui.set_width(width);
                     layout = Some(app.settings_preview_control_row(
                         ui,
-                        SettingsSection {
-                            icon: UiIcon::Camera,
-                            title: "Test section",
-                            description: "Test section description.",
-                        },
                         SettingsPreview {
                             kind,
                             frame: None,
@@ -10079,8 +10094,6 @@ mod tests {
                     ));
                 });
                 let layout = layout.unwrap();
-                assert_eq!(layout.side_by_side, expected_side_by_side);
-                assert!(layout.heading.is_positive());
                 assert!(layout.preview.is_positive());
                 assert!(layout.controls.is_positive());
                 assert!(layout.preview.left() >= -0.01 && layout.preview.right() <= width + 0.01);
@@ -10091,16 +10104,21 @@ mod tests {
                         < 0.01
                 );
                 assert!(!layout.preview.intersects(layout.controls));
-                if expected_side_by_side {
-                    assert!(layout.controls.left() > layout.preview.right());
-                    assert!(layout.controls.contains_rect(layout.heading));
-                } else {
-                    assert!(layout.heading.bottom() < layout.preview.top());
-                    assert!(layout.controls.top() > layout.preview.bottom());
-                }
+                assert!(layout.preview.bottom() < layout.controls.top());
+                assert!((layout.preview.center().x - width / 2.0).abs() < 0.01);
+                assert!((layout.controls.width() - width).abs() < 0.01);
                 assert!(!output.shapes.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn settings_content_width_matches_the_preview_width() {
+        assert_eq!(SETTINGS_CONTENT_WIDTH, SETTINGS_PREVIEW_WIDTH);
+        assert_eq!(settings_content_width(1200.0), SETTINGS_CONTENT_WIDTH);
+        assert_eq!(settings_content_width(900.0), SETTINGS_CONTENT_WIDTH);
+        assert_eq!(settings_content_width(600.0), SETTINGS_CONTENT_WIDTH);
+        assert_eq!(settings_content_width(20.0), 1.0);
     }
 
     #[test]
