@@ -90,7 +90,7 @@ fn main() -> eframe::Result {
         Err(error) => {
             eprintln!("StageSwap UI preview: {error}");
             eprintln!(
-                "Usage: StageSwap --ui-preview [dashboard|general|webcam|screen|matching|diagnostics|setup-1..5|dialog-*] [--ui-language en-US|fr-FR|es] [--ui-setup-reference-state captured|empty|review|missing-screen]"
+                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|setup-1..5|dialog-*] [--ui-language en-US|fr-FR|es] [--ui-setup-reference-state captured|empty|review|missing-screen]"
             );
             return Ok(());
         }
@@ -479,7 +479,6 @@ struct UiPreviewRequest {
 #[cfg(not(windows))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UiPreviewTarget {
-    Dashboard,
     Settings(SettingsTab),
     Setup(SetupStep),
     Dialog(AppDialogKind),
@@ -533,7 +532,6 @@ fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>,
     };
     ui_preview_locale(args)?;
     let target = match args.get(preview_index + 1).map(String::as_str) {
-        Some("dashboard") => UiPreviewTarget::Dashboard,
         Some("dialog-exit") => UiPreviewTarget::Dialog(AppDialogKind::Exit),
         Some("dialog-clear-logs") => UiPreviewTarget::Dialog(AppDialogKind::ClearLogs),
         Some("dialog-admin") => UiPreviewTarget::Dialog(AppDialogKind::Admin),
@@ -560,7 +558,7 @@ fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>,
             .map(UiPreviewTarget::Settings)
             .ok_or_else(|| {
                 format!(
-                    "unknown UI preview '{value}'; expected dashboard, a Settings page, or dialog-* preview"
+                    "unknown UI preview '{value}'; expected a Settings page or dialog-* preview"
                 )
             })?,
         _ => UiPreviewTarget::Settings(SettingsTab::General),
@@ -1350,9 +1348,6 @@ impl SwitcherApp {
     #[cfg(not(windows))]
     fn with_ui_preview(mut self, request: UiPreviewRequest) -> Self {
         match request.target {
-            UiPreviewTarget::Dashboard => {
-                self.view = AppView::Dashboard;
-            }
             UiPreviewTarget::Settings(tab) => {
                 self.view = AppView::Settings;
                 self.settings_tab = tab;
@@ -9141,17 +9136,6 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn ui_preview_cli_selects_each_settings_page() {
-        let dashboard = vec![
-            "StageSwap".to_owned(),
-            "--ui-preview".to_owned(),
-            "dashboard".to_owned(),
-        ];
-        assert_eq!(
-            parse_ui_preview_request(&dashboard).unwrap(),
-            Some(UiPreviewRequest {
-                target: UiPreviewTarget::Dashboard,
-            })
-        );
         for tab in SettingsTab::ALL {
             let args = vec![
                 "StageSwap".to_owned(),

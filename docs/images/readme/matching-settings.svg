@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">Matching settings screenshot placeholder</title>
+  <desc id="desc">Neutral placeholder to be replaced with a screenshot of StageSwap reference-matching settings.</desc>
+  <rect width="1280" height="720" rx="18" fill="#e5e7eb"/>
+  <rect x="32" y="32" width="1216" height="656" rx="12" fill="#f3f4f6" stroke="#9ca3af" stroke-width="4" stroke-dasharray="14 12"/>
+  <g fill="none" stroke="#6b7280" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="565" y="220" width="150" height="112" rx="10"/>
+    <circle cx="610" cy="260" r="13"/>
+    <path d="M585 309l36-34 25 24 20-18 29 28"/>
+  </g>
+  <text x="640" y="404" text-anchor="middle" fill="#374151" font-family="Segoe UI, Arial, sans-serif" font-size="34" font-weight="600">MATCHING SETTINGS</text>
+  <text x="640" y="452" text-anchor="middle" fill="#6b7280" font-family="Segoe UI, Arial, sans-serif" font-size="23">Replace with the reference configuration screenshot</text>
+</svg>
