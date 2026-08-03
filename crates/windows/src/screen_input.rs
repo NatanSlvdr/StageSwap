@@ -1,5 +1,8 @@
 use crate::ScreenInput;
-use stageswap_core::{Frame, FramePacer, MonitorDescriptor, Size};
+use stageswap_core::{
+    CAPTURE_FRAME_POOL_CAPACITY, Frame, FrameBufferPool, FramePacer, MonitorDescriptor,
+    PIPELINE_SIZE, Size, aspect_fit_bgra_into,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -20,11 +23,13 @@ const SCREEN_FRAME_EARLY_TOLERANCE: Duration = Duration::from_millis(1);
 struct Shared {
     latest: Mutex<Option<Arc<Frame>>>,
     sequence: AtomicU64,
+    dropped_frames: AtomicU64,
 }
 
 struct CaptureHandler {
     shared: Arc<Shared>,
     scratch: Vec<u8>,
+    pool: FrameBufferPool,
     pacer: Option<FramePacer>,
 }
 
@@ -36,6 +41,10 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         Ok(Self {
             shared: context.flags,
             scratch: Vec::new(),
+            pool: FrameBufferPool::new(
+                (PIPELINE_SIZE.width * PIPELINE_SIZE.height * 4) as usize,
+                CAPTURE_FRAME_POOL_CAPACITY,
+            ),
             pacer: None,
         })
     }
@@ -58,11 +67,27 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         let height = frame.height();
         let buffer = frame.buffer().map_err(|error| error.to_string())?;
         let pixels = buffer.as_nopadding_buffer(&mut self.scratch);
+        let pixels = self
+            .pool
+            .try_write(|destination| {
+                aspect_fit_bgra_into(
+                    pixels,
+                    Size::new(width, height),
+                    width * 4,
+                    destination,
+                    PIPELINE_SIZE,
+                )
+            })
+            .map_err(|error| format!("could not normalize screen frame: {error:?}"))?;
+        let Some(pixels) = pixels else {
+            self.shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        };
         let sequence = self.shared.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let frame = Frame::new(
-            pixels.to_vec().into(),
-            Size::new(width, height),
-            width * 4,
+            pixels,
+            PIPELINE_SIZE,
+            PIPELINE_SIZE.width * 4,
             sequence,
             timestamp,
             now,
@@ -95,6 +120,12 @@ impl Default for WindowsGraphicsScreenInput {
             shared: Arc::new(Shared::default()),
             control: None,
         }
+    }
+}
+
+impl WindowsGraphicsScreenInput {
+    pub fn dropped_frame_count(&self) -> u64 {
+        self.shared.dropped_frames.load(Ordering::Relaxed)
     }
 }
 

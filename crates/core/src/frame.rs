@@ -7,6 +7,161 @@ use std::time::{Duration, Instant};
 pub const PIPELINE_SIZE: Size = Size::new(1280, 720);
 pub const PIPELINE_FPS: u32 = 30;
 pub const FRAME_STALE_AFTER: Duration = Duration::from_secs(1);
+pub const CAPTURE_FRAME_POOL_CAPACITY: usize = 4;
+
+#[derive(Debug)]
+pub struct FrameBufferPool {
+    frame_bytes: usize,
+    capacity: usize,
+    slots: Vec<Arc<[u8]>>,
+    exhaustion_count: u64,
+}
+
+impl FrameBufferPool {
+    pub fn new(frame_bytes: usize, capacity: usize) -> Self {
+        assert!(frame_bytes > 0, "pooled frames must not be empty");
+        assert!(capacity > 0, "frame pool capacity must not be zero");
+        Self {
+            frame_bytes,
+            capacity,
+            slots: Vec::with_capacity(capacity),
+            exhaustion_count: 0,
+        }
+    }
+
+    pub fn try_write<E>(
+        &mut self,
+        write: impl FnOnce(&mut [u8]) -> Result<(), E>,
+    ) -> Result<Option<Arc<[u8]>>, E> {
+        self.try_write_sized(self.frame_bytes, write)
+    }
+
+    pub fn try_write_sized<E>(
+        &mut self,
+        frame_bytes: usize,
+        write: impl FnOnce(&mut [u8]) -> Result<(), E>,
+    ) -> Result<Option<Arc<[u8]>>, E> {
+        assert!(frame_bytes > 0, "pooled frames must not be empty");
+        let available = self
+            .slots
+            .iter()
+            .position(|slot| Arc::strong_count(slot) == 1 && slot.len() == frame_bytes);
+        let index = match available {
+            Some(index) => index,
+            None if self.slots.len() < self.capacity => {
+                self.slots.push(vec![0; frame_bytes].into());
+                self.slots.len() - 1
+            }
+            None if self.slots.iter().any(|slot| Arc::strong_count(slot) == 1) => {
+                let index = self
+                    .slots
+                    .iter()
+                    .position(|slot| Arc::strong_count(slot) == 1)
+                    .expect("a uniquely owned slot was found");
+                self.slots[index] = vec![0; frame_bytes].into();
+                index
+            }
+            None => {
+                self.exhaustion_count = self.exhaustion_count.saturating_add(1);
+                return Ok(None);
+            }
+        };
+        let slot = &mut self.slots[index];
+        let destination = Arc::get_mut(slot).expect("available pool slot is uniquely owned");
+        write(destination)?;
+        Ok(Some(Arc::clone(slot)))
+    }
+
+    pub fn allocated_slots(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn exhaustion_count(&self) -> u64 {
+        self.exhaustion_count
+    }
+}
+
+pub fn aspect_fit_bgra_into(
+    source: &[u8],
+    source_size: Size,
+    source_stride: u32,
+    destination: &mut [u8],
+    output: Size,
+) -> Result<(), FrameError> {
+    if source_size.width == 0 || source_size.height == 0 || output.width == 0 || output.height == 0
+    {
+        return Err(FrameError::Empty);
+    }
+    let source_row_bytes = source_size
+        .width
+        .checked_mul(4)
+        .ok_or(FrameError::TooLarge)?;
+    if source_stride < source_row_bytes {
+        return Err(FrameError::InvalidStride);
+    }
+    let source_bytes = usize::try_from(source_stride)
+        .ok()
+        .and_then(|stride| stride.checked_mul(source_size.height as usize))
+        .ok_or(FrameError::TooLarge)?;
+    let output_stride = output.width.checked_mul(4).ok_or(FrameError::TooLarge)?;
+    let output_bytes = usize::try_from(output_stride)
+        .ok()
+        .and_then(|stride| stride.checked_mul(output.height as usize))
+        .ok_or(FrameError::TooLarge)?;
+    if source.len() < source_bytes || destination.len() != output_bytes {
+        return Err(FrameError::InvalidLength);
+    }
+    if source_size == output && source_stride == output_stride {
+        destination.copy_from_slice(&source[..output_bytes]);
+        return Ok(());
+    }
+
+    destination.fill(0);
+    for alpha in destination.iter_mut().skip(3).step_by(4) {
+        *alpha = 0xff;
+    }
+    let scale = f64::min(
+        output.width as f64 / source_size.width as f64,
+        output.height as f64 / source_size.height as f64,
+    );
+    let width = (source_size.width as f64 * scale).round().max(1.0) as u32;
+    let height = (source_size.height as f64 * scale).round().max(1.0) as u32;
+    let x_offset = (output.width - width) / 2;
+    let y_offset = (output.height - height) / 2;
+    let source_x_step = u64::from(source_size.width / width);
+    let source_x_increment = u64::from(source_size.width % width);
+    let source_y_step = u64::from(source_size.height / height);
+    let source_y_increment = u64::from(source_size.height % height);
+    let width = u64::from(width);
+    let height = u64::from(height);
+    let mut source_y = 0_u64;
+    let mut source_y_remainder = 0_u64;
+    for y in 0..height {
+        let source_row = source_y as usize * source_stride as usize;
+        let destination_row = (y as usize + y_offset as usize) * output_stride as usize;
+        let mut source_x = 0_u64;
+        let mut source_x_remainder = 0_u64;
+        for x in 0..width {
+            let source_offset = source_row + source_x as usize * 4;
+            let destination_offset = destination_row + (x as usize + x_offset as usize) * 4;
+            destination[destination_offset..destination_offset + 4]
+                .copy_from_slice(&source[source_offset..source_offset + 4]);
+            source_x += source_x_step;
+            source_x_remainder += source_x_increment;
+            if source_x_remainder >= width {
+                source_x += 1;
+                source_x_remainder -= width;
+            }
+        }
+        source_y += source_y_step;
+        source_y_remainder += source_y_increment;
+        if source_y_remainder >= height {
+            source_y += 1;
+            source_y_remainder -= height;
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct FrameMetadata {
@@ -313,30 +468,8 @@ impl Frame {
 
     pub fn aspect_fit(&self, output: Size, now: Instant) -> Self {
         let mut pixels = vec![0; output.width as usize * output.height as usize * 4];
-        for alpha in pixels.iter_mut().skip(3).step_by(4) {
-            *alpha = 0xff;
-        }
-        let scale = f64::min(
-            output.width as f64 / self.size.width as f64,
-            output.height as f64 / self.size.height as f64,
-        );
-        let width = (self.size.width as f64 * scale).round().max(1.0) as u32;
-        let height = (self.size.height as f64 * scale).round().max(1.0) as u32;
-        let x_offset = (output.width - width) / 2;
-        let y_offset = (output.height - height) / 2;
-        for y in 0..height {
-            let source_y =
-                ((u64::from(y) * u64::from(self.size.height)) / u64::from(height)) as u32;
-            for x in 0..width {
-                let source_x =
-                    ((u64::from(x) * u64::from(self.size.width)) / u64::from(width)) as u32;
-                let source = source_y as usize * self.stride as usize + source_x as usize * 4;
-                let destination = (y + y_offset) as usize * output.width as usize * 4
-                    + (x + x_offset) as usize * 4;
-                pixels[destination..destination + 4]
-                    .copy_from_slice(&self.pixels[source..source + 4]);
-            }
-        }
+        aspect_fit_bgra_into(&self.pixels, self.size, self.stride, &mut pixels, output)
+            .expect("validated frame and output dimensions are valid");
         Self::new(
             pixels.into(),
             output,
@@ -550,5 +683,122 @@ mod tests {
 
         let placeholder = compositor.compose(None, Some(&screen), 0.0, 0xff03_0201, metadata);
         assert_eq!(&placeholder.pixels()[..4], &[1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn aspect_fit_helper_normalizes_common_capture_sizes() {
+        for source_size in [
+            Size::new(1280, 720),
+            Size::new(1920, 1080),
+            Size::new(3840, 2160),
+            Size::new(1920, 1200),
+            Size::new(3440, 1440),
+        ] {
+            let source_stride = source_size.width * 4;
+            let source = vec![0x7b; source_stride as usize * source_size.height as usize];
+            let mut output =
+                vec![0xcc; PIPELINE_SIZE.width as usize * PIPELINE_SIZE.height as usize * 4];
+            aspect_fit_bgra_into(
+                &source,
+                source_size,
+                source_stride,
+                &mut output,
+                PIPELINE_SIZE,
+            )
+            .unwrap();
+            assert_eq!(output.len(), 1280 * 720 * 4);
+            assert!(
+                output
+                    .chunks_exact(4)
+                    .all(|pixel| pixel[3] == 0x7b || pixel[3] == 0xff)
+            );
+            let pixel = |x: usize, y: usize| {
+                let offset = (y * PIPELINE_SIZE.width as usize + x) * 4;
+                &output[offset..offset + 4]
+            };
+            assert_eq!(pixel(640, 360), &[0x7b; 4]);
+            if source_size == Size::new(1920, 1200) || source_size == Size::new(3440, 1440) {
+                assert_eq!(pixel(0, 0), &[0, 0, 0, 0xff]);
+            } else {
+                assert_eq!(pixel(0, 0), &[0x7b; 4]);
+            }
+            if source_size == PIPELINE_SIZE {
+                assert_eq!(output, source);
+            }
+        }
+    }
+
+    #[test]
+    fn frame_buffer_pool_reuses_only_unshared_slots_and_is_bounded() {
+        let mut pool = FrameBufferPool::new(16, 2);
+        let first = pool
+            .try_write(|pixels| {
+                pixels.fill(1);
+                Ok::<(), ()>(())
+            })
+            .unwrap()
+            .unwrap();
+        let second = pool
+            .try_write(|pixels| {
+                pixels.fill(2);
+                Ok::<(), ()>(())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(pool.allocated_slots(), 2);
+        assert_eq!(
+            pool.try_write(|_| Ok::<(), ()>(())),
+            Ok(None),
+            "both published slots are still owned"
+        );
+        assert_eq!(pool.exhaustion_count(), 1);
+        assert!(first.iter().all(|byte| *byte == 1));
+        drop(first);
+        let reused = pool
+            .try_write(|pixels| {
+                pixels.fill(3);
+                Ok::<(), ()>(())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(reused.iter().all(|byte| *byte == 3));
+        assert!(second.iter().all(|byte| *byte == 2));
+        assert_eq!(pool.allocated_slots(), 2);
+    }
+
+    #[test]
+    fn aspect_fit_incremental_mapping_matches_nearest_neighbor_coordinates() {
+        let horizontal = (0_u8..5)
+            .flat_map(|value| [value, value, value, 0xff])
+            .collect::<Vec<_>>();
+        let mut output = vec![0; 7 * 2 * 4];
+        aspect_fit_bgra_into(
+            &horizontal,
+            Size::new(5, 1),
+            20,
+            &mut output,
+            Size::new(7, 2),
+        )
+        .unwrap();
+        let mapped = output[..7 * 4]
+            .chunks_exact(4)
+            .map(|pixel| pixel[0])
+            .collect::<Vec<_>>();
+        assert_eq!(mapped, [0, 0, 1, 2, 2, 3, 4]);
+        assert!(
+            output[7 * 4..]
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0, 0, 0, 0xff])
+        );
+
+        let vertical = (0_u8..5)
+            .flat_map(|value| [value, value, value, 0xff])
+            .collect::<Vec<_>>();
+        let mut output = vec![0; 2 * 7 * 4];
+        aspect_fit_bgra_into(&vertical, Size::new(1, 5), 4, &mut output, Size::new(2, 7)).unwrap();
+        let mapped = (0..7).map(|y| output[y * 2 * 4]).collect::<Vec<_>>();
+        assert_eq!(mapped, [0, 0, 1, 2, 2, 3, 4]);
+        assert!((0..7).all(|y| output[(y * 2 + 1) * 4..(y * 2 + 2) * 4] == [0, 0, 0, 0xff]));
     }
 }

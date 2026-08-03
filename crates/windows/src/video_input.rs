@@ -1,5 +1,7 @@
 use crate::{InputDevice, VideoInput};
-use stageswap_core::{Frame, PIPELINE_SIZE, Size};
+use stageswap_core::{
+    CAPTURE_FRAME_POOL_CAPACITY, Frame, FrameBufferPool, PIPELINE_SIZE, Size, aspect_fit_bgra_into,
+};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -160,15 +162,35 @@ fn allocated_string(activation: &IMFActivate, key: &windows_core::GUID) -> Optio
     result
 }
 
-#[derive(Default)]
 struct CaptureState {
     reader: Mutex<Option<IMFSourceReader>>,
     latest: Mutex<Option<Arc<Frame>>>,
     format: Mutex<Size>,
+    pool: Mutex<FrameBufferPool>,
     failure: Mutex<Option<String>>,
     running: AtomicBool,
     generation: AtomicU64,
     sequence: AtomicU64,
+    dropped_frames: AtomicU64,
+}
+
+impl Default for CaptureState {
+    fn default() -> Self {
+        Self {
+            reader: Mutex::new(None),
+            latest: Mutex::new(None),
+            format: Mutex::new(Size::default()),
+            pool: Mutex::new(FrameBufferPool::new(
+                (PIPELINE_SIZE.width * PIPELINE_SIZE.height * 4) as usize,
+                CAPTURE_FRAME_POOL_CAPACITY,
+            )),
+            failure: Mutex::new(None),
+            running: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+            sequence: AtomicU64::new(0),
+            dropped_frames: AtomicU64::new(0),
+        }
+    }
 }
 
 // SAFETY: IMFSourceReader documents asynchronous callbacks from Media
@@ -247,22 +269,39 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
                     if length as usize >= required {
                         // SAFETY: the locked buffer contains at least `required` bytes.
                         let pixels = unsafe { core::slice::from_raw_parts(bytes, required) };
-                        let sequence = self.state.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Ok(frame) = Frame::new(
-                            pixels.to_vec().into(),
-                            size,
-                            size.width * 4,
-                            sequence,
-                            timestamp,
-                            Instant::now(),
-                        ) && self.state.generation.load(Ordering::Acquire)
-                            == self.expected_generation
-                            && let Ok(mut latest) = self.state.latest.lock()
-                        {
-                            *latest = Some(Arc::new(frame));
-                            if let Ok(mut failure) = self.state.failure.lock() {
-                                *failure = None;
+                        let pooled = self.state.pool.lock().ok().and_then(|mut pool| {
+                            pool.try_write(|destination| {
+                                aspect_fit_bgra_into(
+                                    pixels,
+                                    size,
+                                    size.width * 4,
+                                    destination,
+                                    PIPELINE_SIZE,
+                                )
+                            })
+                            .ok()
+                            .flatten()
+                        });
+                        if let Some(pixels) = pooled {
+                            let sequence = self.state.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+                            if let Ok(frame) = Frame::new(
+                                pixels,
+                                PIPELINE_SIZE,
+                                PIPELINE_SIZE.width * 4,
+                                sequence,
+                                timestamp,
+                                Instant::now(),
+                            ) && self.state.generation.load(Ordering::Acquire)
+                                == self.expected_generation
+                                && let Ok(mut latest) = self.state.latest.lock()
+                            {
+                                *latest = Some(Arc::new(frame));
+                                if let Ok(mut failure) = self.state.failure.lock() {
+                                    *failure = None;
+                                }
                             }
+                        } else {
+                            self.state.dropped_frames.fetch_add(1, Ordering::Relaxed);
                         }
                     } else {
                         self.state.set_failure(format!(
@@ -478,6 +517,10 @@ impl MediaFoundationVideoInput {
             .lock()
             .ok()
             .and_then(|failure| failure.clone())
+    }
+
+    pub fn dropped_frame_count(&self) -> u64 {
+        self.state.dropped_frames.load(Ordering::Relaxed)
     }
 }
 
