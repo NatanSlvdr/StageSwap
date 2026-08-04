@@ -34,7 +34,7 @@ const BLACK_LUMA_THRESHOLD: u8 = 16;
 #[cfg(any(windows, test))]
 const BLACK_PIXEL_PERCENT: usize = 99;
 #[cfg(any(windows, test))]
-const BLACK_SCAN_CONFIRMATIONS: u8 = 2;
+const SCREEN_CAPTURE_FAILURE_CONFIRMATIONS: u8 = 2;
 #[cfg(any(windows, test))]
 const AUTOMATIC_SCREEN_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -369,7 +369,7 @@ fn webcam_crop_zoom(enabled: bool, native_aspect_ratio: Option<f64>) -> Option<f
 
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BlackScreenObservation {
+enum ScreenCaptureRecoveryObservation {
     Clear,
     AwaitingConfirmation,
     Restart,
@@ -377,27 +377,27 @@ enum BlackScreenObservation {
 
 #[cfg(any(windows, test))]
 #[derive(Default)]
-struct ScreenBlackRecovery {
-    consecutive_black_scans: u8,
+struct ScreenCaptureRecovery {
+    consecutive_failures: u8,
 }
 
 #[cfg(any(windows, test))]
-impl ScreenBlackRecovery {
+impl ScreenCaptureRecovery {
     fn reset(&mut self) {
-        self.consecutive_black_scans = 0;
+        self.consecutive_failures = 0;
     }
 
-    fn observe(&mut self, frame: Option<&Frame>) -> BlackScreenObservation {
-        if frame.is_none_or(|frame| !is_nearly_black(frame)) {
+    fn observe(&mut self, frame: Option<&Frame>) -> ScreenCaptureRecoveryObservation {
+        if frame.is_some_and(|frame| !is_nearly_black(frame)) {
             self.reset();
-            return BlackScreenObservation::Clear;
+            return ScreenCaptureRecoveryObservation::Clear;
         }
-        self.consecutive_black_scans = self.consecutive_black_scans.saturating_add(1);
-        if self.consecutive_black_scans < BLACK_SCAN_CONFIRMATIONS {
-            BlackScreenObservation::AwaitingConfirmation
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if self.consecutive_failures < SCREEN_CAPTURE_FAILURE_CONFIRMATIONS {
+            ScreenCaptureRecoveryObservation::AwaitingConfirmation
         } else {
             self.reset();
-            BlackScreenObservation::Restart
+            ScreenCaptureRecoveryObservation::Restart
         }
     }
 }
@@ -1083,7 +1083,7 @@ struct Platform {
     screen: WindowsGraphicsScreenInput,
     selected_monitor: Option<MonitorDescriptor>,
     monitor_tracker: MonitorTracker,
-    screen_black_recovery: ScreenBlackRecovery,
+    screen_capture_recovery: ScreenCaptureRecovery,
     last_monitor_scan: Instant,
     last_screen_capture_recovery_check: Instant,
     monitor_scan_generation: u64,
@@ -1233,7 +1233,7 @@ impl Platform {
             screen,
             selected_monitor,
             monitor_tracker,
-            screen_black_recovery: ScreenBlackRecovery::default(),
+            screen_capture_recovery: ScreenCaptureRecovery::default(),
             last_monitor_scan: Instant::now(),
             last_screen_capture_recovery_check: Instant::now(),
             monitor_scan_generation: 1,
@@ -1288,7 +1288,7 @@ impl Platform {
                     }
                 }
                 if automatic_recovery_changed {
-                    self.screen_black_recovery.reset();
+                    self.screen_capture_recovery.reset();
                     self.last_screen_capture_recovery_check = Instant::now();
                 }
             }
@@ -1504,7 +1504,7 @@ impl Platform {
     }
 
     fn restart_screen(&mut self, state: &mut RuntimeState) {
-        self.screen_black_recovery.reset();
+        self.screen_capture_recovery.reset();
         self.last_screen_capture_recovery_check = Instant::now();
         self.screen.stop();
         let Some(monitor) = self.selected_monitor.as_ref() else {
@@ -1538,15 +1538,19 @@ impl Platform {
     fn check_screen_capture_recovery(&mut self, state: &mut RuntimeState, now: Instant) {
         self.last_screen_capture_recovery_check = now;
         match self
-            .screen_black_recovery
+            .screen_capture_recovery
             .observe(self.screen.latest_frame().as_deref())
         {
-            BlackScreenObservation::Clear => {}
-            BlackScreenObservation::AwaitingConfirmation => {
-                state.record("Black screen detected; awaiting the next automatic recovery check");
+            ScreenCaptureRecoveryObservation::Clear => {}
+            ScreenCaptureRecoveryObservation::AwaitingConfirmation => {
+                state.record(
+                    "Screen capture is black or unavailable; awaiting the next automatic recovery check",
+                );
             }
-            BlackScreenObservation::Restart => {
-                state.record("Persistent black screen detected; restarting screen capture");
+            ScreenCaptureRecoveryObservation::Restart => {
+                state.record(
+                    "Screen capture remains black or unavailable; restarting screen capture",
+                );
                 self.restart_screen(state);
             }
         }
@@ -1944,54 +1948,84 @@ mod tests {
             Instant::now(),
         )
         .unwrap();
-        let mut recovery = ScreenBlackRecovery::default();
+        let mut recovery = ScreenCaptureRecovery::default();
 
         assert!(!is_nearly_black(&frame));
         assert_eq!(
             recovery.observe(Some(&frame)),
-            BlackScreenObservation::Clear
+            ScreenCaptureRecoveryObservation::Clear
         );
         assert_eq!(
             recovery.observe(Some(&frame)),
-            BlackScreenObservation::Clear
+            ScreenCaptureRecoveryObservation::Clear
         );
     }
 
     #[test]
-    fn black_screen_recovery_requires_two_consecutive_scheduled_checks() {
-        let black = frame_with_bright_pixels(0);
-        let visible = frame_with_bright_pixels(200);
-        let mut recovery = ScreenBlackRecovery::default();
+    fn two_missing_frames_restart_screen_capture() {
+        let mut recovery = ScreenCaptureRecovery::default();
 
         assert_eq!(
-            recovery.observe(Some(&black)),
-            BlackScreenObservation::AwaitingConfirmation
+            recovery.observe(None),
+            ScreenCaptureRecoveryObservation::AwaitingConfirmation
         );
-        assert_eq!(recovery.observe(None), BlackScreenObservation::Clear);
         assert_eq!(
-            recovery.observe(Some(&black)),
-            BlackScreenObservation::AwaitingConfirmation
+            recovery.observe(None),
+            ScreenCaptureRecoveryObservation::Restart
+        );
+    }
+
+    #[test]
+    fn visible_frame_clears_a_single_missing_frame() {
+        let visible = frame_with_bright_pixels(200);
+        let mut recovery = ScreenCaptureRecovery::default();
+
+        assert_eq!(
+            recovery.observe(None),
+            ScreenCaptureRecoveryObservation::AwaitingConfirmation
         );
         assert_eq!(
             recovery.observe(Some(&visible)),
-            BlackScreenObservation::Clear
-        );
-        assert_eq!(
-            recovery.observe(Some(&black)),
-            BlackScreenObservation::AwaitingConfirmation
-        );
-        assert_eq!(
-            recovery.observe(Some(&black)),
-            BlackScreenObservation::Restart
-        );
-        assert_eq!(
-            recovery.observe(Some(&black)),
-            BlackScreenObservation::AwaitingConfirmation
+            ScreenCaptureRecoveryObservation::Clear
         );
     }
 
     #[test]
-    fn display_discovery_and_black_screen_recovery_are_scheduled_independently() {
+    fn near_black_then_missing_frame_restarts_screen_capture() {
+        let black = frame_with_bright_pixels(0);
+        let mut recovery = ScreenCaptureRecovery::default();
+
+        assert_eq!(
+            recovery.observe(Some(&black)),
+            ScreenCaptureRecoveryObservation::AwaitingConfirmation
+        );
+        assert_eq!(
+            recovery.observe(None),
+            ScreenCaptureRecoveryObservation::Restart
+        );
+    }
+
+    #[test]
+    fn two_near_black_frames_restart_and_reset_screen_capture_recovery() {
+        let black = frame_with_bright_pixels(0);
+        let mut recovery = ScreenCaptureRecovery::default();
+
+        assert_eq!(
+            recovery.observe(Some(&black)),
+            ScreenCaptureRecoveryObservation::AwaitingConfirmation
+        );
+        assert_eq!(
+            recovery.observe(Some(&black)),
+            ScreenCaptureRecoveryObservation::Restart
+        );
+        assert_eq!(
+            recovery.observe(Some(&black)),
+            ScreenCaptureRecoveryObservation::AwaitingConfirmation
+        );
+    }
+
+    #[test]
+    fn display_discovery_and_screen_capture_recovery_are_scheduled_independently() {
         let started_at = Instant::now();
         let due_at = started_at + AUTOMATIC_SCREEN_CHECK_INTERVAL;
         assert_eq!(

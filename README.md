@@ -75,7 +75,7 @@ StageSwap requires a 64-bit Windows 11 computer, a webcam, a secondary screen co
 ### Displays and operation
 
 - 🖥️ **Display discovery** looks for the reference image at startup, when Settings opens, after reference changes, and every 30 seconds by default.
-- 🩺 **Black-screen recovery** checks only the selected display every 30 seconds and restarts capture after two consecutive nearly-black checks.
+- 🩺 **Black-or-unavailable recovery** checks only the selected display every 30 seconds and restarts capture after two consecutive nearly-black or missing-frame checks.
 - 🛠️ **Recovery controls** restart the camera, display capture, virtual camera, or the complete pipeline.
 - 🔒 **Local processing** keeps frames on the computer and does not record or upload them.
 
@@ -111,10 +111,10 @@ This removes the installed app, shortcuts, startup entry, and virtual camera. Se
 
 ## Troubleshooting
 
-- **The camera or display stopped after being unplugged, reconnected, or waking from sleep:** select the source again or restart it under **Settings → Diagnostics**.
-- **Screen capture stays black after an HDMI splitter or screen change:** enable **Restart capture automatically after a black screen**, or use **Restart screen capture** under **Settings → Diagnostics**.
+- **The camera or display stopped after being unplugged, reconnected, or waking from sleep:** for a previously selected display whose capture closed, enable **Restart capture automatically when black or unavailable**; otherwise select the source again or restart it under **Settings → Diagnostics**.
+- **Screen capture stays black or unavailable after an HDMI splitter or screen change:** enable **Restart capture automatically when black or unavailable**, or use **Restart screen capture** under **Settings → Diagnostics**.
 - **Auto mode switches at the wrong time:** return JW Library to the normal screen with no media playing, capture the reference image again, and adjust **Required similarity**.
-- **The saved display is missing:** use **Rescan screens** or choose another display. StageSwap does not provide automatic hot-plug or docking recovery.
+- **The saved display is missing:** recovery retries the stored selected monitor, so reconnecting that same display identity can restore capture automatically. If Windows assigns a different identity, use **Rescan screens** or choose another display. StageSwap does not provide a general hot-plug, docking-recovery, or monitor-reselection system.
 - **A camera is missing:** refresh the camera list and select it again. StageSwap does not silently substitute another camera.
 
 <p align="center"><em>Diagnostics shows component health and provides individual and complete restart controls.</em></p>

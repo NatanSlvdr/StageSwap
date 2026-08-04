@@ -3927,7 +3927,7 @@ impl SwitcherApp {
                 settings_conditional_toggle_row(
                     ui,
                     &mut app.config.automatic_screen_capture_recovery,
-                    "Restart capture automatically after a black screen",
+                    "Restart capture automatically when black or unavailable",
                     recovery_result,
                 );
             },
@@ -6972,7 +6972,7 @@ const fn automatic_display_discovery_result(enabled: bool) -> &'static str {
 
 const fn automatic_screen_recovery_result(enabled: bool) -> &'static str {
     if enabled {
-        "On — Checks the selected screen every 30 seconds and restarts capture after two black results. Black content can trigger a restart."
+        "On — Checks the selected screen every 30 seconds and restarts capture after two black or unavailable results. Black content can trigger a restart."
     } else {
         "Off — Use Restart screen capture in Diagnostics."
     }
@@ -9824,7 +9824,7 @@ mod tests {
             layout = Some(settings_conditional_toggle_row(
                 ui,
                 &mut enabled,
-                "Restart capture automatically after a black screen",
+                "Restart capture automatically when black or unavailable",
                 result,
             ));
         });
@@ -9865,7 +9865,7 @@ mod tests {
 
         let recovery_on = automatic_screen_recovery_result(true);
         assert!(recovery_on.starts_with("On —"));
-        assert!(recovery_on.contains("two black results"));
+        assert!(recovery_on.contains("two black or unavailable results"));
         assert!(recovery_on.contains("Black content"));
         let recovery_off = automatic_screen_recovery_result(false);
         assert!(recovery_off.starts_with("Off —"));

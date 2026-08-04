@@ -11,13 +11,13 @@ StageSwap is a local-only, native Windows 11 x64 virtual camera for automatic Zo
 - The runtime uses synchronous bounded channels and no Tokio.
 - Reference detection runs every 250 ms with five-match/three-mismatch debounce.
 - Monitor selection is restored by friendly label with secondary-display fallback. Reference discovery requires the same winning display twice, does not pause output, runs at startup, when Settings opens, after reference changes, and every 30 seconds by default, and can be limited to explicit rescans.
-- Independent black-screen recovery samples only the selected capture every 30 seconds. Two consecutive near-black checks restart screen capture; the setting can be disabled without changing reference discovery.
+- Independent black-or-unavailable recovery samples only the selected capture every 30 seconds. Two consecutive near-black or missing-frame checks restart screen capture; the setting can be disabled without changing reference discovery.
 - Composition uses CPU aspect-fit, black letterboxing, configurable missing-source fallback, and a reversible 500 ms blend.
 - The virtual camera prefers RGB32 1280×720 at 30 fps. Selectable NV12 720p is retained for Windows Camera and Zoom compatibility; 1080p is intentionally excluded.
 - Output uses deadline-based 30 fps pacing. Visible dashboard previews use latest-only conversion workers and display-sized textures. FPS is runtime-owned and remains meaningful while the dashboard is hidden.
 - While automation is stopped, a fixed black screen with the centered StageSwap icon is published at 30 fps. The virtual camera generates the same frame whenever the app publisher is absent.
 - The app includes the dashboard, five settings categories, contextual previews, shared executable/window/tray icon, synchronized tray controls, warning notifications, exit confirmation, 14-day JSONL logs, and individual/all component restarts.
-- There is no general hot-plug manager, sleep/resume recovery, docking recovery, dynamic format management, OBS integration, or kernel driver. Screen recovery is limited to the selected-capture black-frame check.
+- There is no general hot-plug manager, monitor-reselection system, sleep/resume recovery, docking recovery, dynamic format management, OBS integration, or kernel driver. Screen recovery only retries a selected capture that is black or unavailable, using its stored display identity.
 
 Configuration schema 1, references, and logs live under `%LocalAppData%\StageSwap`. Frames are never recorded or uploaded.
 
