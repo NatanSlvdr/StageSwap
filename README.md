@@ -46,25 +46,16 @@ StageSwap requires a 64-bit Windows 11 computer, a webcam, a secondary screen co
 1. Download `StageSwap_win64_vX.Y.Z.exe` from the [official releases page](https://github.com/NatanSlvdr/StageSwap/releases/latest).
 2. Open it and choose **Install StageSwap**, or choose **Run once** to try it without copying the app to your computer.
 
-<p align="center">
-  <img src="docs/images/readme/first-launch.svg" width="760" alt="Placeholder for the StageSwap first-launch installation choice">
-</p>
 <p align="center"><em>First launch lets you install StageSwap or run the downloaded copy once.</em></p>
 
 3. Approve the administrator prompt. This is required only to add or update the virtual camera; normal launches run without administrator access.
 4. On a fresh installation, follow the five-step full-page guided setup. It explains the JW Library-to-Zoom signal path, lets you choose the webcam and secondary screen, captures the reference image, and prepares Zoom. You can choose **Set up later** or reopen it under **Settings → General → Open guided setup**.
 5. Confirm the webcam and secondary screen used by JW Library.
 
-<p align="center">
-  <img src="docs/images/readme/dashboard.svg" width="760" alt="Placeholder for the StageSwap dashboard">
-</p>
 <p align="center"><em>The dashboard shows the four previews, component status, output mode, and automation controls.</em></p>
 
 6. Open the JW Library presentation on the secondary screen. Leave it on the normal view with no media playing, centered text, and the gray square in the corner; then select **Capture reference image** and confirm the captured frame. An existing reference image can also be imported.
 
-<p align="center">
-  <img src="docs/images/readme/matching-settings.svg" width="760" alt="Placeholder for the StageSwap reference-matching settings">
-</p>
 <p align="center"><em>Reference image settings capture or import the saved image and adjust required similarity.</em></p>
 
 7. Select **StageSwap** as the camera in Zoom.
@@ -126,9 +117,6 @@ This removes the installed app, shortcuts, startup entry, and virtual camera. Se
 - **The saved display is missing:** use **Rescan screens** or choose another display. StageSwap does not provide automatic hot-plug or docking recovery.
 - **A camera is missing:** refresh the camera list and select it again. StageSwap does not silently substitute another camera.
 
-<p align="center">
-  <img src="docs/images/readme/diagnostics.svg" width="760" alt="Placeholder for the StageSwap diagnostics settings">
-</p>
 <p align="center"><em>Diagnostics shows component health and provides individual and complete restart controls.</em></p>
 
 Build, test, and architecture information is in the [developer guide](DEV.md).

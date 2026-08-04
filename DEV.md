@@ -52,7 +52,7 @@ On macOS, also cross-check the Windows target:
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 ```
 
-These checks provide strong day-to-day coverage, but GitHub-hosted runners and macOS cannot validate an interactive Windows desktop, a physical webcam, or virtual-camera enumeration. Native Windows acceptance testing remains required.
+These checks provide strong day-to-day coverage, but GitHub-hosted runners and macOS cannot validate an interactive Windows desktop, a physical webcam, or virtual-camera enumeration. Those behaviors still require a native Windows machine.
 
 ## Interactive UI preview on macOS
 
@@ -88,7 +88,7 @@ Append `--ui-language en-US`, `--ui-language fr-FR`, or `--ui-language es` to re
 cargo run -p stageswap --bin StageSwap -- --ui-preview matching --ui-language fr-FR
 ```
 
-Preview mode uses a temporary configuration directory and does not save changes to the normal StageSwap configuration. It is intended for checking layout, wrapping, conditional explanations, and interactions. Windows tray behavior, native file dialogs, hardware capture, and exact Windows font rendering still require native Windows acceptance testing.
+Preview mode uses a temporary configuration directory and does not save changes to the normal StageSwap configuration. It is intended for checking layout, wrapping, conditional explanations, and interactions. Windows tray behavior, native file dialogs, hardware capture, and exact Windows font rendering still require a native Windows desktop.
 
 ## Fast x64 packaging from macOS
 
@@ -158,34 +158,9 @@ StageSwap owns independent storage, startup, IPC, COM, virtual-camera, and deplo
 
 When a development build is ready to publish, manually run the [Windows workflow](https://github.com/NatanSlvdr/StageSwap/actions/workflows/windows.yml) in GitHub Actions. It runs the x64 Windows tests, packages the x64 build, and creates a GitHub release tagged with the commit's short SHA. Re-running it for the same commit replaces the release assets. Ordinary pushes do not build or publish releases.
 
-A release contains the unsigned versioned executable and its SHA-256 sidecar. The full required gates are documented in [Release gates](docs/RELEASE_GATES.md).
-
-## Native acceptance testing
-
-Run the final smoke pass on a physical x64 Windows 11 computer or an x64 Windows 11 VM. An Apple-silicon Mac cannot virtualize x64 Windows natively.
-
-Short VM smoke pass:
-
-1. Launch the x64 executable, test both **Run once** and **Install**, and approve first-run virtual-camera registration.
-2. Confirm Windows Camera lists **StageSwap**.
-3. Verify screen capture, **Screen** mode, the configured missing-source fallback, and the branded off screen after stopping automation.
-4. Verify webcam capture and **Webcam** mode if the VM exposes a camera.
-5. Verify **Automatic** mode, tray/close behavior, restart actions, update handoff, cleanup, and uninstall.
-
-Before the manual pass, run the ignored interactive tests on the native target:
-
-```powershell
-cargo test -p stageswap-media-source --target x86_64-pc-windows-msvc -- --test-threads=1
-cargo test -p stageswap-windows --target x86_64-pc-windows-msvc -- --ignored --test-threads=1
-cargo test -p stageswap --target x86_64-pc-windows-msvc -- --ignored --test-threads=1
-```
-
-The complete retained workflow, timing requirements, compatibility checks, and deliberate exclusions live in [Acceptance tests](docs/ACCEPTANCE_TESTS.md).
+A release contains the unsigned versioned executable and its SHA-256 sidecar.
 
 ## Technical references
 
 - [Architecture](docs/ARCHITECTURE.md) — runtime pipeline, deployment, source selection, monitoring, and recovery boundaries
-- [Acceptance tests](docs/ACCEPTANCE_TESTS.md) — native Windows workflow and compatibility checks
-- [Release gates](docs/RELEASE_GATES.md) — mandatory publication evidence
 - [Requirements traceability](docs/REQUIREMENTS_TRACEABILITY.md) — requirements mapped to implementation and evidence
-- [Rust rewrite scope](docs/RUST_REWRITE_SCOPE.md) — locked product boundaries and dependency decisions

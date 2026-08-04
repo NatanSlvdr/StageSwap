@@ -28,4 +28,4 @@ A session-only disco easter egg is toggled by five primary clicks within 3 secon
 
 There is no recovery worker or webcam hot-plug recovery. The runtime loop provides the bounded selected-screen black-frame check described above, and users can manually restart each retained component or all components. Device-change and DPI messages do not directly trigger video recovery; D3D device removal requires application relaunch.
 
-The deliberately excluded behavior is: continuous webcam enumeration, unplug/replug recovery, sleep/resume recovery, GPU-device recreation, camera-contention handling, persisted physical monitor identity, and dynamic input-format management. See [the Rust rewrite scope](RUST_REWRITE_SCOPE.md) for the boundary between reusable crates and the Windows-specific virtual-camera code.
+The deliberately excluded behavior is: continuous webcam enumeration, unplug/replug recovery, sleep/resume recovery, GPU-device recreation, camera-contention handling, persisted physical monitor identity, and dynamic input-format management.
