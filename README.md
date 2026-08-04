@@ -119,4 +119,4 @@ This removes the installed app, shortcuts, startup entry, and virtual camera. Se
 
 <p align="center"><em>Diagnostics shows component health and provides individual and complete restart controls.</em></p>
 
-Build, test, and architecture information is in the [developer guide](DEV.md).
+Build, test, and architecture information is in the [engineering guide](AGENTS.md).

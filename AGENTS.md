@@ -1,6 +1,6 @@
-# StageSwap developer guide
+# StageSwap repository guidance
 
-This document contains the engineering, build, test, packaging, and release information for StageSwap. The main [README](README.md) is the product presentation and end-user guide.
+Use this guide for engineering, build, test, packaging, deployment, and release work on StageSwap. The main [README](README.md) is the product presentation and end-user guide.
 
 ## Product contract
 
@@ -21,7 +21,7 @@ StageSwap is a local-only, native Windows 11 x64 virtual camera for automatic Zo
 
 Configuration schema 1, references, and logs live under `%LocalAppData%\StageSwap`. Frames are never recorded or uploaded.
 
-## Workspace
+## Repository layout
 
 ```text
 StageSwap/
@@ -31,14 +31,14 @@ StageSwap/
 ├── crates/media-source/  Media Foundation virtual-camera source DLL
 ├── xtask/                packaging, PE validation, and checksums
 ├── scripts/              local packaging and release-evidence helpers
-└── docs/                 architecture, acceptance, and release specifications
+└── docs/                 architecture, localization, requirements, and release-evidence references
 ```
 
 The workspace uses Rust edition 2024 and is pinned to Rust 1.97.1 in `rust-toolchain.toml`. `stageswap-core` and `xtask` are the default members so platform-independent work can be built and tested on non-Windows hosts. Direct Windows APIs, COM, and unavoidable unsafe code belong in `stageswap-windows` and `stageswap-media-source`.
 
-## Routine development checks
+## Development workflow
 
-Before pushing to `main`, run the platform-independent format, lint, and test suite:
+Before pushing to `main`, run the format, lint, and host test suite:
 
 ```bash
 cargo fmt --all -- --check
@@ -46,15 +46,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 ```
 
-On macOS, also cross-check the Windows target:
+For cross-target linting, run:
 
 ```bash
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 ```
 
-These checks provide strong day-to-day coverage, but GitHub-hosted runners and macOS cannot validate an interactive Windows desktop, a physical webcam, or virtual-camera enumeration. Those behaviors still require a native Windows machine.
-
-## Interactive UI preview on macOS
+### UI preview
 
 Launch the real StageSwap Settings interface with deterministic mock cameras, displays, reference imagery, and healthy runtime states:
 
@@ -88,77 +86,29 @@ Append `--ui-language en-US`, `--ui-language fr-FR`, or `--ui-language es` to re
 cargo run -p stageswap --bin StageSwap -- --ui-preview matching --ui-language fr-FR
 ```
 
-Preview mode uses a temporary configuration directory and does not save changes to the normal StageSwap configuration. It is intended for checking layout, wrapping, conditional explanations, and interactions. Windows tray behavior, native file dialogs, hardware capture, and exact Windows font rendering still require a native Windows desktop.
+Preview mode uses a temporary configuration directory and does not save changes to the normal StageSwap configuration.
 
-## Fast x64 packaging from macOS
+## Platform limitations
 
-An Apple-silicon Mac can cross-compile the x64 Windows build but cannot run or hardware-test it. Install the native tools once:
+Development is performed on macOS. Host checks, deterministic UI previews, and cross-compilation are available locally, but macOS cannot validate an interactive Windows desktop, physical webcam capture, virtual-camera enumeration, native Windows dialogs/tray behavior, exact Windows font rendering, or hardware-specific capture behavior. Use a native Windows machine or the GitHub Actions workflow for those checks.
 
-```bash
-brew install llvm
-cargo install --locked cargo-xwin
-```
+## Packaging and release
 
-Then run:
+### Cross-compiled x64 package
 
 ```bash
 ./scripts/package-x64-macos.sh
 ```
 
-The wrapper cross-compiles with the x64 Windows MSVC target, pins the Windows SDK, embeds the matching Media Foundation DLL and Windows resources, validates the generated PE files and payload, and writes the versioned executable and checksum to `dist/`.
+The wrapper cross-compiles the x64 Windows build, pins the Windows SDK, embeds the matching Media Foundation DLL and Windows resources, validates the generated PE files and payload, and writes the versioned executable and checksum to `dist/`.
 
 If the optimized release build differs from the latest versioned artifact in `dist/`, the patch number is incremented and the selected version is persisted to `Cargo.toml` and `Cargo.lock` before the final DLL and EXE are rebuilt. Rebuilding identical bytes with an already synchronized workspace keeps the existing version. The filename, application UI, Windows version resources, and checksum metadata therefore use one version. Rust and SDK caches make later builds faster. GitHub Actions remains the authoritative release builder.
 
-## Native Windows build and package
+### Release and deployment
 
-Install:
+Releases are unsigned versioned executables with SHA-256 sidecars. The local package command is `cargo run --release -p xtask -- package x64 dist`.
 
-- Rust 1.97.1
-- Visual Studio 2022 Build Tools
-- Windows SDK 10.0.22621.0
-
-Use a Developer PowerShell with `WindowsSDKVersion` set to `10.0.22621.0\\`. `xtask` deliberately rejects a missing or different SDK so it cannot write misleading artifact metadata.
-
-```powershell
-rustup target add x86_64-pc-windows-msvc
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
-cargo test --workspace --all-targets --target x86_64-pc-windows-msvc
-cargo run --release -p xtask -- package x64 dist
-```
-
-`xtask` builds and validates the x64 DLL first, embeds it into the EXE, validates the PE machine type and embedded payload, and emits the EXE with a SHA-256 sidecar. Packaging and both Windows payloads use Cargo's optimized release profile. Windows builds also embed an `asInvoker`, Per-Monitor-V2 manifest and executable version metadata.
-
-## Packaging and deployment model
-
-`StageSwap_win64_vX.Y.Z.exe` is an installerless, self-deploying application. A downloaded copy offers to:
-
-- install atomically at `%LocalAppData%\Programs\StageSwap\StageSwap.exe`, creating per-user Start Menu and Desktop shortcuts; or
-- run once without registering its download path for Windows startup.
-
-The executable embeds its x64 Media Foundation source DLL. First launch verifies the native architecture and elevates only to extract and register that DLL under `%ProgramFiles%\StageSwap`; ordinary launches remain unelevated.
-
-DLL payloads use content-versioned names, allowing a new build to register while a camera application still has the prior DLL loaded. Unlocked stale copies are removed immediately; locked copies are scheduled for deletion at reboot.
-
-Opening a different downloaded build asks to replace the installed copy, gracefully closes the running managed instance, activates the new executable, and opens its dashboard. Failed replacement startup rolls back to the previous executable. A legacy instance that cannot participate in the handoff must be exited manually and is never force-terminated.
-
-Cleanup entry points are intentionally different:
-
-```powershell
-# Remove startup and the virtual-camera deployment; keep app and user data
-.\StageSwap_win64_vX.Y.Z.exe --cleanup
-
-# Also remove the managed app and shortcuts; keep user data
-.\StageSwap_win64_vX.Y.Z.exe --uninstall
-```
-
-StageSwap owns independent storage, startup, IPC, COM, virtual-camera, and deployment identities. It does not migrate, unregister, overwrite, or delete Automatic Screen Camera data or deployments.
-
-## Release workflow
-
-When a development build is ready to publish, manually run the [Windows workflow](https://github.com/NatanSlvdr/StageSwap/actions/workflows/windows.yml) in GitHub Actions. It runs the x64 Windows tests, packages the x64 build, and creates a GitHub release tagged with the commit's short SHA. Re-running it for the same commit replaces the release assets. Ordinary pushes do not build or publish releases.
-
-A release contains the unsigned versioned executable and its SHA-256 sidecar.
+`StageSwap_win64_vX.Y.Z.exe` self-deploys per-user or can run once without installation. `--cleanup` removes startup and the virtual-camera deployment; `--uninstall` also removes the managed app and shortcuts. Both preserve user data, and deployment never modifies Automatic Screen Camera data.
 
 ## Technical references
 
