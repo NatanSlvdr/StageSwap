@@ -15,7 +15,7 @@ use windows::Win32::Media::MediaFoundation::{
     MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_E_INVALID_POSITION,
-    MF_E_INVALID_STATE_TRANSITION, MF_E_INVALIDSTREAMNUMBER, MF_E_SHUTDOWN,
+    MF_E_INVALID_STATE_TRANSITION, MF_E_INVALIDREQUEST, MF_E_INVALIDSTREAMNUMBER, MF_E_SHUTDOWN,
     MF_E_UNSUPPORTED_SERVICE, MF_E_UNSUPPORTED_TIME_FORMAT, MFCreateAttributes, MFCreateEventQueue,
     MFCreatePresentationDescriptor, MFMEDIASOURCE_IS_LIVE,
 };
@@ -36,6 +36,12 @@ enum Lifecycle {
 struct SourceState {
     lifecycle: Lifecycle,
     stream_announced: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartPosition {
+    Current,
+    Absolute(i64),
 }
 
 #[implement(IMFMediaSourceEx, IMFGetService, IKsControl)]
@@ -120,7 +126,9 @@ fn read_string_attribute(
     Ok(String::from_utf16_lossy(&buffer[..length as usize]))
 }
 
-fn validate_start_position(start_position: *const PROPVARIANT) -> windows_core::Result<()> {
+fn validate_start_position(
+    start_position: *const PROPVARIANT,
+) -> windows_core::Result<StartPosition> {
     if start_position.is_null() {
         return Err(Error::from_hresult(E_INVALIDARG));
     }
@@ -129,13 +137,13 @@ fn validate_start_position(start_position: *const PROPVARIANT) -> windows_core::
     // SAFETY: reading the discriminator is valid for every PROPVARIANT alternative.
     let inner = unsafe { &value.Anonymous.Anonymous };
     if inner.vt == VT_EMPTY {
-        return Ok(());
+        return Ok(StartPosition::Current);
     }
     if inner.vt == VT_I8 {
         // SAFETY: VT_I8 selects the hVal union member.
         let position = unsafe { inner.Anonymous.hVal };
         return if position >= 0 {
-            Ok(())
+            Ok(StartPosition::Absolute(position))
         } else {
             Err(Error::from_hresult(MF_E_INVALID_POSITION))
         };
@@ -207,7 +215,7 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
         start_position: *const PROPVARIANT,
     ) -> windows_core::Result<()> {
         let presentation = presentation.ok()?;
-        validate_start_position(start_position)?;
+        let start_position_kind = validate_start_position(start_position)?;
         if !time_format.is_null() {
             // SAFETY: non-null time_format points to a GUID for this COM call.
             if unsafe { *time_format } != GUID::zeroed() {
@@ -218,6 +226,14 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
             let state = self.state.lock().expect("source state lock poisoned");
             if state.lifecycle == Lifecycle::Shutdown {
                 return Err(Error::from_hresult(MF_E_SHUTDOWN));
+            }
+            // This is a live, non-seekable source. VT_I8 is valid for the initial start, but a
+            // new absolute position while already running would be a seek and must not be
+            // reported as another ordinary MESourceStarted transition.
+            if state.lifecycle == Lifecycle::Started
+                && matches!(start_position_kind, StartPosition::Absolute(_))
+            {
+                return Err(Error::from_hresult(MF_E_INVALIDREQUEST));
             }
             let event_type = if state.stream_announced {
                 MEUpdatedStream
@@ -432,6 +448,12 @@ mod tests {
             assert_eq!(source.GetCharacteristics()?, MFMEDIASOURCE_IS_LIVE.0 as u32);
             let descriptor = source.CreatePresentationDescriptor()?;
             let start = PROPVARIANT::default();
+            source.Start(&descriptor, core::ptr::null(), &start)?;
+            let repeated_absolute_position = PROPVARIANT::from(0_i64);
+            let repeated_start_error = source
+                .Start(&descriptor, core::ptr::null(), &repeated_absolute_position)
+                .expect_err("a running live source must reject seek-like starts");
+            assert_eq!(repeated_start_error.code(), MF_E_INVALIDREQUEST);
             source.Start(&descriptor, core::ptr::null(), &start)?;
             source.Stop()?;
             let live_position = PROPVARIANT::from(0_i64);

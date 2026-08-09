@@ -7,7 +7,7 @@ Use this guide for engineering, build, test, packaging, deployment, and release 
 StageSwap is a local-only, native Windows 11 x64 virtual camera for automatic Zoom retransmission during congregation meetings using JW Library. It watches the second display visually and does not integrate with or control JW Library.
 
 - Frames are immutable CPU BGRA and the internal/output contract is fixed at 1280×720, 30 fps.
-- Webcam input uses Media Foundation with native-aspect-aware centered 16:9 cropping. Native 16:9 and unknown-aspect signals pass through unchanged. Screen input uses Windows Graphics Capture. Cropping feeds both preview and output.
+- Webcam input uses Media Foundation tiered negotiation: it prefers progressive RGB32 1280×720 at 30 fps, safely falls back through compatible RGB32, NV12, YUY2, and MJPEG modes, and normalizes row-aware input into the fixed BGRA contract. Native-aspect-aware centered 16:9 cropping leaves native 16:9 and unknown-aspect signals unchanged. Screen input uses Windows Graphics Capture. Cropping feeds both preview and output.
 - The runtime uses synchronous bounded channels and no Tokio.
 - Reference detection runs every 250 ms with five-match/three-mismatch debounce.
 - Monitor selection is restored by friendly label with secondary-display fallback. Reference discovery requires the same winning display twice, does not pause output, runs at startup, when Settings opens, after reference changes, and every 30 seconds by default, and can be limited to explicit rescans.
@@ -17,7 +17,7 @@ StageSwap is a local-only, native Windows 11 x64 virtual camera for automatic Zo
 - Output uses deadline-based 30 fps pacing. Visible dashboard previews use latest-only conversion workers and display-sized textures. FPS is runtime-owned and remains meaningful while the dashboard is hidden.
 - While automation is stopped, a fixed black screen with the centered StageSwap icon is published at 30 fps. The virtual camera generates the same frame whenever the app publisher is absent.
 - The app includes the dashboard, five settings categories, contextual previews, shared executable/window/tray icon, synchronized tray controls, warning notifications, exit confirmation, 14-day JSONL logs, and individual/all component restarts.
-- There is no general hot-plug manager, monitor-reselection system, sleep/resume recovery, docking recovery, dynamic format management, OBS integration, or kernel driver. Screen recovery only retries a selected capture that is black or unavailable, using its stored display identity.
+- There is no general hot-plug manager, monitor-reselection system, sleep/resume recovery, docking recovery, dynamic output-format management, OBS integration, or kernel driver. Compatible webcam media-type changes are revalidated, but failures require an explicit webcam restart. Screen recovery only retries a selected capture that is black or unavailable, using its stored display identity.
 
 Configuration schema 1, references, and logs live under `%LocalAppData%\StageSwap`. Frames are never recorded or uploaded.
 

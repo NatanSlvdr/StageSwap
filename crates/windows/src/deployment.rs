@@ -43,7 +43,19 @@ pub enum StartupRegistrationStatus {
 
 fn expected_startup_command() -> Result<String, String> {
     let executable = crate::managed_executable_path()?;
-    Ok(format!("\"{}\" --startup", executable.display()))
+    Ok(startup_command(&executable))
+}
+
+fn startup_command(executable: &Path) -> String {
+    format!("\"{}\" --startup", executable.display())
+}
+
+fn classify_startup_command(actual: String, expected: &str) -> StartupRegistrationStatus {
+    if actual.eq_ignore_ascii_case(expected) {
+        StartupRegistrationStatus::Current
+    } else {
+        StartupRegistrationStatus::Different(actual)
+    }
 }
 
 pub fn startup_registration_status() -> Result<StartupRegistrationStatus, String> {
@@ -93,11 +105,10 @@ pub fn startup_registration_status() -> Result<StartupRegistrationStatus, String
         .position(|word| *word == 0)
         .unwrap_or(value.len());
     let actual = String::from_utf16_lossy(&value[..length]);
-    if actual.eq_ignore_ascii_case(&expected_startup_command()?) {
-        Ok(StartupRegistrationStatus::Current)
-    } else {
-        Ok(StartupRegistrationStatus::Different(actual))
-    }
+    Ok(classify_startup_command(
+        actual,
+        &expected_startup_command()?,
+    ))
 }
 
 pub fn configure_startup(enabled: bool) -> Result<(), String> {
@@ -128,7 +139,7 @@ pub fn configure_startup(enabled: bool) -> Result<(), String> {
             let _ = unsafe { RegCloseKey(key) };
             return Err("Start with Windows requires the managed StageSwap installation".into());
         }
-        let command = format!("\"{}\" --startup", executable.display());
+        let command = startup_command(&executable);
         let command: Vec<u16> = command.encode_utf16().chain([0]).collect();
         // SAFETY: the key and both buffers are live for the call.
         unsafe {
@@ -620,5 +631,22 @@ mod tests {
             ),
             directory
         ));
+    }
+
+    #[test]
+    fn startup_command_is_quoted_and_status_comparison_is_case_insensitive() {
+        let expected = startup_command(Path::new(r"C:\Program Files\StageSwap\StageSwap.exe"));
+        assert_eq!(
+            expected,
+            r#""C:\Program Files\StageSwap\StageSwap.exe" --startup"#
+        );
+        assert_eq!(
+            classify_startup_command(expected.to_ascii_uppercase(), &expected),
+            StartupRegistrationStatus::Current
+        );
+        assert_eq!(
+            classify_startup_command("StageSwap.exe --show".into(), &expected),
+            StartupRegistrationStatus::Different("StageSwap.exe --show".into())
+        );
     }
 }
