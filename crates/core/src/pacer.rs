@@ -29,14 +29,23 @@ impl FramePacer {
     }
 
     pub fn advance(&mut self, now: Instant) -> u64 {
-        let mut skipped = 0;
-        loop {
-            self.next_deadline += self.interval;
-            if self.next_deadline > now {
-                return skipped;
-            }
-            skipped += 1;
-        }
+        let elapsed = now.saturating_duration_since(self.next_deadline);
+        let interval_nanos = self.interval.as_nanos();
+        let elapsed_intervals = elapsed.as_nanos() / interval_nanos;
+        let steps = elapsed_intervals.saturating_add(1);
+        let skipped = steps.saturating_sub(1).min(u128::from(u64::MAX)) as u64;
+        let advance_nanos = interval_nanos.saturating_mul(steps);
+        let advance_seconds = advance_nanos / 1_000_000_000;
+        let advance = if advance_seconds > u128::from(u64::MAX) {
+            Duration::MAX
+        } else {
+            Duration::new(
+                advance_seconds as u64,
+                (advance_nanos % 1_000_000_000) as u32,
+            )
+        };
+        self.next_deadline = self.next_deadline.checked_add(advance).unwrap_or(now);
+        skipped
     }
 }
 
@@ -90,6 +99,23 @@ mod tests {
                 (accepted - expected).abs() <= 1,
                 "accepted {accepted}, expected {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn advances_constant_time_across_long_gaps() {
+        let start = Instant::now();
+        let interval = Duration::from_nanos(1_000_000_000 / 30);
+        for gap in [
+            Duration::from_secs(60),
+            Duration::from_secs(60 * 60),
+            Duration::from_secs(60 * 60 * 24),
+        ] {
+            let mut pacer = FramePacer::new(start, interval);
+            let skipped = pacer.advance(start + gap);
+            assert!(skipped >= gap.as_secs() * 29);
+            assert!(pacer.deadline() > start + gap);
+            assert!(pacer.deadline() <= start + gap + interval);
         }
     }
 }

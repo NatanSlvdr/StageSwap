@@ -2,29 +2,260 @@ use crate::{InputDevice, VideoInput};
 use stageswap_core::{
     CAPTURE_FRAME_POOL_CAPACITY, Frame, FrameBufferPool, PIPELINE_SIZE, Size, aspect_fit_bgra_into,
 };
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use windows::Win32::Foundation::E_ACCESSDENIED;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFMediaEvent, IMFMediaType, IMFSample, IMFSourceReader, IMFSourceReaderCallback,
-    IMFSourceReaderCallback_Impl, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+    IMF2DBuffer2, IMFActivate, IMFMediaEvent, IMFMediaType, IMFSample, IMFSourceReader,
+    IMFSourceReaderCallback, IMFSourceReaderCallback_Impl, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
-    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_DEFAULT_STRIDE,
-    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_GEOMETRIC_APERTURE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+    MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED, MF_E_VIDEO_RECORDING_DEVICE_PREEMPTED,
+    MF_MT_DEFAULT_STRIDE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_GEOMETRIC_APERTURE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
+    MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE,
     MF_SOURCE_READER_ASYNC_CALLBACK, MF_SOURCE_READER_CURRENT_TYPE_INDEX,
     MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-    MF_SOURCE_READERF_ERROR, MF_VERSION, MFCreateAttributes, MFCreateDeviceSource,
-    MFCreateMediaType, MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video,
-    MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoArea, MFVideoFormat_RGB32,
-    MFVideoInterlace_Progressive,
+    MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ERROR,
+    MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED, MF_VERSION, MF2DBuffer_LockFlags_Read,
+    MFCreateAttributes, MFCreateDeviceSource, MFCreateMediaType,
+    MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFSTARTUP_FULL,
+    MFShutdown, MFStartup, MFVideoArea, MFVideoFormat_MJPG, MFVideoFormat_NV12,
+    MFVideoFormat_RGB32, MFVideoFormat_YUY2, MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
-use windows_core::{HRESULT, PCWSTR, PWSTR, Ref, implement};
+use windows_core::{HRESULT, Interface, PCWSTR, PWSTR, Ref, implement};
 
 const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+const WEBCAM_FAILURE_THRESHOLD: u32 = 3;
+
+fn webcam_error_message(context: &str, code: HRESULT) -> String {
+    if code == E_ACCESSDENIED {
+        return format!(
+            "{context}: camera access was denied or camera privacy is disabled; open Windows Settings > Privacy & security > Camera"
+        );
+    }
+    if code == MF_E_VIDEO_RECORDING_DEVICE_PREEMPTED {
+        return format!(
+            "{context}: the webcam is in use; close Zoom, Teams, or another application using it, then restart the webcam"
+        );
+    }
+    if code == MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED {
+        return format!(
+            "{context}: the webcam was disconnected or invalidated; reconnect it and restart the webcam"
+        );
+    }
+    format!("{context}: {}", windows_core::Error::from_hresult(code))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NegotiatedFormat {
+    size: Size,
+    stride: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WebcamFormatCandidate {
+    size: Size,
+    frame_rate_numerator: u32,
+    frame_rate_denominator: u32,
+    subtype_rank: u8,
+}
+
+fn ranked_native_formats(reader: &IMFSourceReader) -> Vec<WebcamFormatCandidate> {
+    let mut formats = Vec::new();
+    for index in 0.. {
+        // SAFETY: the reader is live; enumeration ends when Media Foundation returns an error.
+        let Ok(media_type) = (unsafe { reader.GetNativeMediaType(STREAM, index) }) else {
+            break;
+        };
+        // SAFETY: native media-type attributes are scalar values owned by media_type.
+        let Ok(subtype) = (unsafe { media_type.GetGUID(&MF_MT_SUBTYPE) }) else {
+            continue;
+        };
+        let subtype_rank = if subtype == MFVideoFormat_RGB32 {
+            0
+        } else if subtype == MFVideoFormat_NV12 {
+            1
+        } else if subtype == MFVideoFormat_YUY2 {
+            2
+        } else if subtype == MFVideoFormat_MJPG {
+            3
+        } else {
+            continue;
+        };
+        let Ok(frame_size) = (unsafe { media_type.GetUINT64(&MF_MT_FRAME_SIZE) }) else {
+            continue;
+        };
+        let Ok(frame_rate) = (unsafe { media_type.GetUINT64(&MF_MT_FRAME_RATE) }) else {
+            continue;
+        };
+        let interlace = unsafe { media_type.GetUINT32(&MF_MT_INTERLACE_MODE) }.ok();
+        if interlace.is_some_and(|mode| mode != MFVideoInterlace_Progressive.0 as u32) {
+            continue;
+        }
+        let candidate = WebcamFormatCandidate {
+            size: Size::new((frame_size >> 32) as u32, frame_size as u32),
+            frame_rate_numerator: (frame_rate >> 32) as u32,
+            frame_rate_denominator: frame_rate as u32,
+            subtype_rank,
+        };
+        if candidate.size.width > 0
+            && candidate.size.height > 0
+            && candidate.frame_rate_numerator > 0
+            && candidate.frame_rate_denominator > 0
+            && !formats.contains(&candidate)
+        {
+            formats.push(candidate);
+        }
+    }
+    formats.sort_by_key(|candidate| {
+        let exact_rgb32 = !(candidate.subtype_rank == 0
+            && candidate.size == PIPELINE_SIZE
+            && u64::from(candidate.frame_rate_numerator)
+                == 30 * u64::from(candidate.frame_rate_denominator));
+        let rgb32_fallback = candidate.subtype_rank != 0;
+        let aspect_error = (i64::from(candidate.size.width) * 9
+            - i64::from(candidate.size.height) * 16)
+            .unsigned_abs();
+        let resolution_error = (i64::from(candidate.size.width) * i64::from(candidate.size.height)
+            - i64::from(PIPELINE_SIZE.width) * i64::from(PIPELINE_SIZE.height))
+        .unsigned_abs();
+        let frame_rate_error = (i64::from(candidate.frame_rate_numerator)
+            - 30 * i64::from(candidate.frame_rate_denominator))
+        .unsigned_abs();
+        (
+            exact_rgb32,
+            rgb32_fallback,
+            aspect_error,
+            resolution_error,
+            frame_rate_error,
+            candidate.subtype_rank,
+        )
+    });
+    formats
+}
+
+fn negotiate_rgb32_output(
+    reader: &IMFSourceReader,
+) -> Result<(NegotiatedFormat, String, String), String> {
+    let native = ranked_native_formats(reader);
+    let native_description = native.first().map_or_else(
+        || "no ranked native format".to_owned(),
+        |format| {
+            format!(
+                "{}x{} {}/{} fps subtype-rank {}",
+                format.size.width,
+                format.size.height,
+                format.frame_rate_numerator,
+                format.frame_rate_denominator,
+                format.subtype_rank
+            )
+        },
+    );
+    let exact = WebcamFormatCandidate {
+        size: PIPELINE_SIZE,
+        frame_rate_numerator: 30,
+        frame_rate_denominator: 1,
+        subtype_rank: 0,
+    };
+    let mut candidates = vec![exact];
+    candidates.extend(native.into_iter().filter(|candidate| *candidate != exact));
+    let mut last_error = "camera exposed no convertible progressive format".to_owned();
+    for candidate in candidates {
+        let output: IMFMediaType = unsafe { MFCreateMediaType() }
+            .map_err(|error| format!("could not create video output type: {error}"))?;
+        let frame_size = (u64::from(candidate.size.width) << 32) | u64::from(candidate.size.height);
+        let frame_rate = (u64::from(candidate.frame_rate_numerator) << 32)
+            | u64::from(candidate.frame_rate_denominator);
+        let sample_size = candidate
+            .size
+            .width
+            .saturating_mul(candidate.size.height)
+            .saturating_mul(4);
+        let configured = (|| -> windows_core::Result<()> {
+            // SAFETY: reader, media type, and attributes are live.
+            unsafe {
+                output.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+                output.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
+                output.SetUINT64(&MF_MT_FRAME_SIZE, frame_size)?;
+                output.SetUINT64(&MF_MT_FRAME_RATE, frame_rate)?;
+                output.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+                output.SetUINT32(&MF_MT_DEFAULT_STRIDE, candidate.size.width * 4)?;
+                output.SetUINT32(&MF_MT_FIXED_SIZE_SAMPLES, 1)?;
+                output.SetUINT32(&MF_MT_SAMPLE_SIZE, sample_size)?;
+                reader.SetCurrentMediaType(STREAM, None, &output)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = configured {
+            last_error = format!(
+                "{}x{} at {}/{} fps was rejected: {error}",
+                candidate.size.width,
+                candidate.size.height,
+                candidate.frame_rate_numerator,
+                candidate.frame_rate_denominator
+            );
+            continue;
+        }
+        // SAFETY: the reader is live and returns a retained media type.
+        let current = unsafe { reader.GetCurrentMediaType(STREAM) }
+            .map_err(|error| format!("could not read negotiated webcam format: {error}"))?;
+        match validate_negotiated_type(&current) {
+            Ok(format) => {
+                let output_description = format!(
+                    "RGB32 {}x{} stride {}",
+                    format.size.width, format.size.height, format.stride
+                );
+                return Ok((format, native_description, output_description));
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    Err(format!("could not negotiate a webcam format: {last_error}"))
+}
+
+fn copy_bgra_rows(
+    source: &[u8],
+    scanline0_offset: usize,
+    stride: i32,
+    size: Size,
+    destination: &mut Vec<u8>,
+) -> Result<(), String> {
+    let row_bytes = usize::try_from(size.width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or_else(|| "webcam row size overflowed".to_owned())?;
+    let destination_length = row_bytes
+        .checked_mul(size.height as usize)
+        .ok_or_else(|| "webcam frame size overflowed".to_owned())?;
+    if (stride.unsigned_abs() as usize) < row_bytes {
+        return Err(format!(
+            "webcam stride {stride} is shorter than the {row_bytes}-byte RGB32 row"
+        ));
+    }
+    destination.resize(destination_length, 0);
+    for row in 0..size.height as usize {
+        let source_offset = (scanline0_offset as i128)
+            .checked_add((row as i128) * i128::from(stride))
+            .filter(|offset| *offset >= 0)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(|| "webcam stride points outside the sample buffer".to_owned())?;
+        let source_end = source_offset
+            .checked_add(row_bytes)
+            .filter(|end| *end <= source.len())
+            .ok_or_else(|| {
+                "webcam sample buffer is too short for its declared stride".to_owned()
+            })?;
+        let destination_offset = row * row_bytes;
+        destination[destination_offset..destination_offset + row_bytes]
+            .copy_from_slice(&source[source_offset..source_end]);
+    }
+    Ok(())
+}
 
 fn media_type_display_aspect_ratio(media_type: &IMFMediaType) -> Option<f64> {
     let display_size = [&MF_MT_MINIMUM_DISPLAY_APERTURE, &MF_MT_GEOMETRIC_APERTURE]
@@ -162,13 +393,66 @@ fn allocated_string(activation: &IMFActivate, key: &windows_core::GUID) -> Optio
     result
 }
 
+fn validate_negotiated_type(media_type: &IMFMediaType) -> Result<NegotiatedFormat, String> {
+    // SAFETY: the media type is live and these attributes have scalar values.
+    let subtype = unsafe { media_type.GetGUID(&MF_MT_SUBTYPE) }
+        .map_err(|error| format!("negotiated webcam format has no subtype: {error}"))?;
+    if subtype != MFVideoFormat_RGB32 {
+        return Err(format!(
+            "negotiated webcam subtype {subtype:?} is not convertible RGB32"
+        ));
+    }
+    let frame_size = unsafe { media_type.GetUINT64(&MF_MT_FRAME_SIZE) }
+        .map_err(|error| format!("negotiated webcam format has no frame size: {error}"))?;
+    let size = Size::new((frame_size >> 32) as u32, frame_size as u32);
+    if size.width == 0 || size.height == 0 {
+        return Err("negotiated webcam format has empty dimensions".into());
+    }
+    let frame_rate = unsafe { media_type.GetUINT64(&MF_MT_FRAME_RATE) }
+        .map_err(|error| format!("negotiated webcam format has no frame rate: {error}"))?;
+    if (frame_rate >> 32) == 0 || frame_rate as u32 == 0 {
+        return Err("negotiated webcam format has an invalid frame rate".into());
+    }
+    let interlace = unsafe { media_type.GetUINT32(&MF_MT_INTERLACE_MODE) }
+        .map_err(|error| format!("negotiated webcam format has no interlace mode: {error}"))?;
+    if interlace != MFVideoInterlace_Progressive.0 as u32 {
+        return Err("interlaced webcam formats are unsupported".into());
+    }
+    let fixed_size = unsafe { media_type.GetUINT32(&MF_MT_FIXED_SIZE_SAMPLES) }
+        .map_err(|error| format!("negotiated webcam format has no fixed-size flag: {error}"))?;
+    if fixed_size == 0 {
+        return Err("negotiated webcam format does not use fixed-size samples".into());
+    }
+    let stride = unsafe { media_type.GetUINT32(&MF_MT_DEFAULT_STRIDE) }
+        .map_err(|error| format!("negotiated webcam format has no stride: {error}"))?
+        as i32;
+    let row_bytes = size.width.saturating_mul(4);
+    if stride == 0 || stride.unsigned_abs() < row_bytes {
+        return Err(format!(
+            "negotiated webcam stride {stride} is too short for {row_bytes}-byte rows"
+        ));
+    }
+    let sample_size = unsafe { media_type.GetUINT32(&MF_MT_SAMPLE_SIZE) }
+        .map_err(|error| format!("negotiated webcam format has no sample size: {error}"))?;
+    let required = stride.unsigned_abs().saturating_mul(size.height);
+    if sample_size < required {
+        return Err(format!(
+            "negotiated webcam sample size {sample_size} is smaller than {required} bytes"
+        ));
+    }
+    Ok(NegotiatedFormat { size, stride })
+}
+
 struct CaptureState {
     reader: Mutex<Option<IMFSourceReader>>,
     latest: Mutex<Option<Arc<Frame>>>,
     format: Mutex<Size>,
+    stride: AtomicI32,
+    scratch: Mutex<Vec<u8>>,
     pool: Mutex<FrameBufferPool>,
     failure: Mutex<Option<String>>,
     running: AtomicBool,
+    consecutive_failures: AtomicU32,
     generation: AtomicU64,
     sequence: AtomicU64,
     dropped_frames: AtomicU64,
@@ -180,12 +464,15 @@ impl Default for CaptureState {
             reader: Mutex::new(None),
             latest: Mutex::new(None),
             format: Mutex::new(Size::default()),
+            stride: AtomicI32::new(0),
+            scratch: Mutex::new(Vec::new()),
             pool: Mutex::new(FrameBufferPool::new(
                 (PIPELINE_SIZE.width * PIPELINE_SIZE.height * 4) as usize,
                 CAPTURE_FRAME_POOL_CAPACITY,
             )),
             failure: Mutex::new(None),
             running: AtomicBool::new(false),
+            consecutive_failures: AtomicU32::new(0),
             generation: AtomicU64::new(0),
             sequence: AtomicU64::new(0),
             dropped_frames: AtomicU64::new(0),
@@ -205,21 +492,59 @@ impl CaptureState {
             && self.generation.load(Ordering::Acquire) == expected_generation
     }
 
-    fn request_next(&self, expected_generation: u64) {
+    fn request_next(&self, expected_generation: u64) -> Result<(), String> {
         if !self.is_current(expected_generation) {
-            return;
+            return Ok(());
         }
         let reader = self.reader.lock().ok().and_then(|reader| reader.clone());
         if let Some(reader) = reader {
             // SAFETY: asynchronous mode requires all output pointers to be null.
-            let _ = unsafe { reader.ReadSample(STREAM, 0, None, None, None, None) };
+            if let Err(error) = unsafe { reader.ReadSample(STREAM, 0, None, None, None, None) } {
+                let message = format!("webcam sample request failed: {error}");
+                self.set_failure(message.clone(), true);
+                return Err(message);
+            }
         }
+        Ok(())
     }
 
-    fn set_failure(&self, message: impl Into<String>) {
+    fn set_failure(&self, message: impl Into<String>, terminal: bool) {
         if let Ok(mut failure) = self.failure.lock() {
             *failure = Some(message.into());
         }
+        let failures = self.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1;
+        if terminal || failures >= WEBCAM_FAILURE_THRESHOLD {
+            self.running.store(false, Ordering::Release);
+            if let Ok(mut latest) = self.latest.lock() {
+                *latest = None;
+            }
+        }
+    }
+
+    fn clear_failure(&self) {
+        self.consecutive_failures.store(0, Ordering::Release);
+        if let Ok(mut failure) = self.failure.lock() {
+            *failure = None;
+        }
+    }
+
+    fn update_current_format(&self) -> Result<NegotiatedFormat, String> {
+        let reader = self
+            .reader
+            .lock()
+            .map_err(|_| "webcam reader state is poisoned")?
+            .clone()
+            .ok_or_else(|| "webcam reader is unavailable".to_owned())?;
+        // SAFETY: the reader is live and returns a retained media type.
+        let current = unsafe { reader.GetCurrentMediaType(STREAM) }
+            .map_err(|error| format!("could not read changed webcam media type: {error}"))?;
+        let format = validate_negotiated_type(&current)?;
+        *self
+            .format
+            .lock()
+            .map_err(|_| "webcam format state is poisoned")? = format.size;
+        self.stride.store(format.stride, Ordering::Release);
+        Ok(format)
     }
 }
 
@@ -242,37 +567,102 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
             return Ok(());
         }
         if status.is_err() {
-            self.state.set_failure(format!(
-                "webcam sample failed: {}",
-                windows_core::Error::from_hresult(status)
-            ));
+            self.state
+                .set_failure(webcam_error_message("webcam sample failed", status), true);
+            return Ok(());
         } else if flags & MF_SOURCE_READERF_ERROR.0 as u32 != 0 {
             self.state
-                .set_failure("webcam source reader reported a capture error");
+                .set_failure("webcam source reader reported a capture error", true);
+            return Ok(());
         }
-        if status.is_ok()
-            && flags & MF_SOURCE_READERF_ERROR.0 as u32 == 0
-            && let Some(sample) = sample.as_ref()
+        if flags
+            & (MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32
+                | MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED.0 as u32)
+            != 0
+            && let Err(error) = self.state.update_current_format()
         {
-            // SAFETY: the sample and buffer remain live for this callback.
-            if let Ok(buffer) = unsafe { sample.ConvertToContiguousBuffer() } {
-                let mut bytes = core::ptr::null_mut();
-                let mut length = 0;
-                // SAFETY: all output pointers are writable; Unlock balances Lock.
-                if unsafe { buffer.Lock(&mut bytes, None, Some(&mut length)) }.is_ok() {
-                    let size = self
-                        .state
-                        .format
-                        .lock()
-                        .map_or(PIPELINE_SIZE, |format| *format);
-                    let required = (size.width * size.height * 4) as usize;
-                    if length as usize >= required {
-                        // SAFETY: the locked buffer contains at least `required` bytes.
-                        let pixels = unsafe { core::slice::from_raw_parts(bytes, required) };
+            self.state.set_failure(
+                format!("webcam media-type change is incompatible: {error}"),
+                true,
+            );
+            return Ok(());
+        }
+        if let Some(sample) = sample.as_ref() {
+            // SAFETY: the sample and selected buffer remain live for this callback. Taking the
+            // original first buffer preserves IMF2DBuffer2 row metadata when the driver exposes it.
+            if let Ok(buffer) = unsafe { sample.GetBufferByIndex(0) }
+                .or_else(|_| unsafe { sample.ConvertToContiguousBuffer() })
+            {
+                let size = self
+                    .state
+                    .format
+                    .lock()
+                    .map_or(PIPELINE_SIZE, |format| *format);
+                let stride = self.state.stride.load(Ordering::Acquire);
+                let copy_result = self
+                    .state
+                    .scratch
+                    .lock()
+                    .map_err(|_| "webcam row-copy state is poisoned".to_owned())
+                    .and_then(|mut tight| {
+                        if let Ok(buffer_2d) = buffer.cast::<IMF2DBuffer2>() {
+                            let mut scanline = core::ptr::null_mut();
+                            let mut pitch = 0;
+                            let mut buffer_start = core::ptr::null_mut();
+                            let mut buffer_length = 0;
+                            // SAFETY: all output pointers are writable and Unlock2D balances a
+                            // successful lock before the callback returns.
+                            unsafe {
+                                buffer_2d.Lock2DSize(
+                                    MF2DBuffer_LockFlags_Read,
+                                    &mut scanline,
+                                    &mut pitch,
+                                    &mut buffer_start,
+                                    &mut buffer_length,
+                                )
+                            }
+                            .map_err(|error| format!("could not lock webcam 2D buffer: {error}"))?;
+                            // SAFETY: Lock2DSize returns pointers into the same locked allocation.
+                            let offset = unsafe { scanline.offset_from(buffer_start) };
+                            let result = if offset < 0 {
+                                Err("webcam scanline starts before its 2D buffer".into())
+                            } else {
+                                // SAFETY: buffer_start addresses buffer_length locked bytes.
+                                let source = unsafe {
+                                    core::slice::from_raw_parts(
+                                        buffer_start,
+                                        buffer_length as usize,
+                                    )
+                                };
+                                copy_bgra_rows(source, offset as usize, pitch, size, &mut tight)
+                            };
+                            // SAFETY: balances the successful Lock2DSize call above.
+                            let _ = unsafe { buffer_2d.Unlock2D() };
+                            result?;
+                        } else {
+                            if stride < 0 {
+                                return Err(
+                                    "negative webcam stride requires IMF2DBuffer2 access".into()
+                                );
+                            }
+                            let mut bytes = core::ptr::null_mut();
+                            let mut length = 0;
+                            // SAFETY: all output pointers are writable; Unlock balances Lock.
+                            unsafe { buffer.Lock(&mut bytes, None, Some(&mut length)) }.map_err(
+                                |error| format!("could not lock webcam buffer: {error}"),
+                            )?;
+                            // SAFETY: Lock returned length readable bytes at bytes.
+                            let source =
+                                unsafe { core::slice::from_raw_parts(bytes, length as usize) };
+                            let result = copy_bgra_rows(source, 0, stride, size, &mut tight);
+                            // SAFETY: balances the successful Lock call above.
+                            let _ = unsafe { buffer.Unlock() };
+                            result?;
+                        }
                         let pooled = self.state.pool.lock().ok().and_then(|mut pool| {
                             pool.try_write(|destination| {
                                 aspect_fit_bgra_into(
-                                    pixels,
+                                    &tight,
                                     size,
                                     size.width * 4,
                                     destination,
@@ -282,39 +672,35 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
                             .ok()
                             .flatten()
                         });
-                        if let Some(pixels) = pooled {
-                            let sequence = self.state.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-                            if let Ok(frame) = Frame::new(
-                                pixels,
-                                PIPELINE_SIZE,
-                                PIPELINE_SIZE.width * 4,
-                                sequence,
-                                timestamp,
-                                Instant::now(),
-                            ) && self.state.generation.load(Ordering::Acquire)
-                                == self.expected_generation
-                                && let Ok(mut latest) = self.state.latest.lock()
-                            {
-                                *latest = Some(Arc::new(frame));
-                                if let Ok(mut failure) = self.state.failure.lock() {
-                                    *failure = None;
-                                }
-                            }
-                        } else {
+                        let Some(pixels) = pooled else {
                             self.state.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                            return Ok(());
+                        };
+                        let sequence = self.state.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Ok(frame) = Frame::new(
+                            pixels,
+                            PIPELINE_SIZE,
+                            PIPELINE_SIZE.width * 4,
+                            sequence,
+                            timestamp,
+                            Instant::now(),
+                        ) && self.state.is_current(self.expected_generation)
+                            && let Ok(mut latest) = self.state.latest.lock()
+                        {
+                            *latest = Some(Arc::new(frame));
+                            self.state.clear_failure();
                         }
-                    } else {
-                        self.state.set_failure(format!(
-                            "webcam returned a short frame buffer: {length} bytes for {}×{} RGB32",
-                            size.width, size.height
-                        ));
-                    }
-                    // SAFETY: this callback successfully locked the buffer.
-                    let _ = unsafe { buffer.Unlock() };
+                        Ok(())
+                    });
+                if let Err(error) = copy_result {
+                    self.state.set_failure(error, false);
                 }
+            } else {
+                self.state
+                    .set_failure("could not obtain a contiguous webcam buffer", false);
             }
         }
-        self.state.request_next(self.expected_generation);
+        let _ = self.state.request_next(self.expected_generation);
         Ok(())
     }
 
@@ -331,6 +717,8 @@ pub struct MediaFoundationVideoInput {
     state: Arc<CaptureState>,
     callback: Option<IMFSourceReaderCallback>,
     native_display_aspect_ratio: Option<f64>,
+    selected_native_format: Option<String>,
+    selected_output_format: Option<String>,
     initialization_error: Option<String>,
     mf_started: bool,
     com_initialized: bool,
@@ -362,6 +750,8 @@ impl Default for MediaFoundationVideoInput {
             state: Arc::new(CaptureState::default()),
             callback: None,
             native_display_aspect_ratio: None,
+            selected_native_format: None,
+            selected_output_format: None,
             initialization_error,
             mf_started,
             com_initialized,
@@ -415,7 +805,7 @@ impl VideoInput for MediaFoundationVideoInput {
         })()
         .map_err(|error| format!("could not configure video source: {error}"))?;
         let source = unsafe { MFCreateDeviceSource(&source_attributes) }
-            .map_err(|error| format!("could not open video source: {error}"))?;
+            .map_err(|error| webcam_error_message("could not open video source", error.code()))?;
         let expected_generation = self.state.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let callback: IMFSourceReaderCallback = ReaderCallback {
             state: Arc::clone(&self.state),
@@ -434,42 +824,17 @@ impl VideoInput for MediaFoundationVideoInput {
         .map_err(|error| format!("could not configure video reader: {error}"))?;
         let reader = unsafe { MFCreateSourceReaderFromMediaSource(&source, &reader_attributes) }
             .map_err(|error| format!("could not create video reader: {error}"))?;
-        let output: IMFMediaType = unsafe { MFCreateMediaType() }
-            .map_err(|error| format!("could not create video output type: {error}"))?;
-        (|| -> windows_core::Result<()> {
-            let frame_size =
-                (u64::from(PIPELINE_SIZE.width) << 32) | u64::from(PIPELINE_SIZE.height);
-            let frame_rate = (30u64 << 32) | 1;
-            // SAFETY: reader, media type, and attributes are live.
-            unsafe {
-                output.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-                output.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
-                output.SetUINT64(&MF_MT_FRAME_SIZE, frame_size)?;
-                output.SetUINT64(&MF_MT_FRAME_RATE, frame_rate)?;
-                output.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-                output.SetUINT32(&MF_MT_DEFAULT_STRIDE, PIPELINE_SIZE.width * 4)?;
-                reader.SetCurrentMediaType(STREAM, None, &output)?;
-            }
-            Ok(())
-        })()
-        .map_err(|error| format!("could not negotiate RGB32 1280x720@30 webcam output: {error}"))?;
-        let current = unsafe { reader.GetCurrentMediaType(STREAM) }
-            .map_err(|error| format!("could not read negotiated webcam format: {error}"))?;
-        let frame_size = unsafe { current.GetUINT64(&MF_MT_FRAME_SIZE) }
-            .map_err(|error| format!("negotiated webcam format has no frame size: {error}"))?;
-        let size = Size::new((frame_size >> 32) as u32, frame_size as u32);
-        if size.width == 0 || size.height == 0 {
-            return Err("negotiated webcam format has empty dimensions".into());
-        }
+        let (format, native_description, output_description) = negotiate_rgb32_output(&reader)?;
+        self.selected_native_format = Some(native_description);
+        self.selected_output_format = Some(output_description);
         self.native_display_aspect_ratio = current_native_display_aspect_ratio(&reader);
         *self
             .state
             .format
             .lock()
-            .map_err(|_| "webcam format state is poisoned")? = size;
-        if let Ok(mut failure) = self.state.failure.lock() {
-            *failure = None;
-        }
+            .map_err(|_| "webcam format state is poisoned")? = format.size;
+        self.state.stride.store(format.stride, Ordering::Release);
+        self.state.clear_failure();
         *self
             .state
             .reader
@@ -477,7 +842,7 @@ impl VideoInput for MediaFoundationVideoInput {
             .map_err(|_| "video reader state is poisoned")? = Some(reader);
         self.state.running.store(true, Ordering::Release);
         self.callback = Some(callback);
-        self.state.request_next(expected_generation);
+        self.state.request_next(expected_generation)?;
         Ok(())
     }
 
@@ -519,6 +884,14 @@ impl MediaFoundationVideoInput {
             .and_then(|failure| failure.clone())
     }
 
+    pub fn selected_native_format(&self) -> Option<&str> {
+        self.selected_native_format.as_deref()
+    }
+
+    pub fn selected_output_format(&self) -> Option<&str> {
+        self.selected_output_format.as_deref()
+    }
+
     pub fn dropped_frame_count(&self) -> u64 {
         self.state.dropped_frames.load(Ordering::Relaxed)
     }
@@ -535,6 +908,45 @@ impl Drop for MediaFoundationVideoInput {
             // SAFETY: balances this adapter's successful CoInitializeEx.
             unsafe { CoUninitialize() };
         }
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn row_copy_accepts_padding_and_negative_stride() {
+        let size = Size::new(2, 2);
+        let top = [1, 2, 3, 4, 5, 6, 7, 8];
+        let bottom = [11, 12, 13, 14, 15, 16, 17, 18];
+        let mut padded = Vec::new();
+        padded.extend_from_slice(&top);
+        padded.extend_from_slice(&[0; 4]);
+        padded.extend_from_slice(&bottom);
+        padded.extend_from_slice(&[0; 4]);
+        let mut destination = Vec::new();
+        copy_bgra_rows(&padded, 0, 12, size, &mut destination).unwrap();
+        assert_eq!(destination, [top, bottom].concat());
+
+        let mut bottom_up = Vec::new();
+        bottom_up.extend_from_slice(&bottom);
+        bottom_up.extend_from_slice(&[0; 4]);
+        bottom_up.extend_from_slice(&top);
+        bottom_up.extend_from_slice(&[0; 4]);
+        copy_bgra_rows(&bottom_up, 12, -12, size, &mut destination).unwrap();
+        assert_eq!(destination, [top, bottom].concat());
+    }
+
+    #[test]
+    fn repeated_callback_failures_open_the_circuit() {
+        let state = CaptureState::default();
+        state.running.store(true, Ordering::Release);
+        for _ in 0..WEBCAM_FAILURE_THRESHOLD {
+            state.set_failure("scripted callback failure", false);
+        }
+        assert!(!state.running.load(Ordering::Acquire));
+        assert!(state.latest.lock().unwrap().is_none());
     }
 }
 

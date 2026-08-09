@@ -7,7 +7,15 @@
       "package_validation_passed": false,
       "interactive_windows_tests_passed": false,
       "vm_acceptance_passed": false,
-      "physical_smoke_passed": false
+      "physical_smoke_passed": false,
+      "screen_generation_and_closure_passed": false,
+      "wgc_sdr_hdr_capability_passed": false,
+      "webcam_negotiation_and_stride_passed": false,
+      "webcam_privacy_and_contention_passed": false,
+      "media_source_start_cycles_passed": false,
+      "nv12_metadata_and_cache_passed": false,
+      "tray_recovery_actions_passed": false,
+      "startup_registry_transitions_passed": false
     }
   },
   "reference_screenshots_100_150_captured": false,

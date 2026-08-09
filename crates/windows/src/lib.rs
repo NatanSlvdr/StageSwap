@@ -22,7 +22,8 @@ pub use video_input::{MediaFoundationVideoInput, enumerate_video_devices};
 mod deployment;
 #[cfg(windows)]
 pub use deployment::{
-    cleanup_deployment, configure_startup, deployment_startup, uninstall_deployment,
+    StartupRegistrationStatus, cleanup_deployment, configure_startup, deployment_startup,
+    startup_registration_status, uninstall_deployment,
 };
 #[cfg(windows)]
 mod notification;
@@ -41,7 +42,9 @@ mod dialog;
 #[cfg(windows)]
 mod shell_ui;
 #[cfg(windows)]
-pub use shell_ui::{open_directory, pick_log_export_path, pick_reference_image};
+pub use shell_ui::{
+    open_camera_privacy_settings, open_directory, pick_log_export_path, pick_reference_image,
+};
 #[cfg(windows)]
 mod instance_control;
 #[cfg(windows)]

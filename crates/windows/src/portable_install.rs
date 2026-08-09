@@ -1,7 +1,6 @@
 use crate::dialog::{TaskDialogIcon, TaskDialogSpec, show_task_dialog};
 use crate::{
-    InstanceCommand, InstanceStatus, SingleInstance, configure_startup, instance_status,
-    send_instance_command,
+    InstanceCommand, InstanceStatus, SingleInstance, instance_status, send_instance_command,
 };
 use stageswap_i18n::{Locale, format_text, text};
 use std::env;
@@ -147,13 +146,10 @@ pub fn bootstrap(payload: &[u8], locale: Locale) -> Result<BootstrapResult, Stri
             install_or_replace(&current, &managed, false, payload)?;
             Ok(BootstrapResult::Exit)
         }
-        RUN_ONCE_BUTTON => {
-            configure_startup(false)?;
-            Ok(BootstrapResult::Continue(LaunchContext {
-                mode: PortableMode::RunOnce,
-                force_visible: true,
-            }))
-        }
+        RUN_ONCE_BUTTON => Ok(BootstrapResult::Continue(LaunchContext {
+            mode: PortableMode::RunOnce,
+            force_visible: true,
+        })),
         _ => Ok(BootstrapResult::Exit),
     }
 }

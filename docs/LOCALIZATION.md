@@ -19,6 +19,9 @@ StageSwap uses clear, natural product language in English, French, and neutral i
 | Comparison control | Required similarity | Similarité requise | Similitud requerida |
 | Mode selector | Output mode | Mode de sortie | Modo de salida |
 | Rescan and restart section | Tools | Outils | Herramientas |
+| Tray recovery submenu | Recovery | Récupération | Recuperación |
+| Reference-flow shortcut | Open reference capture | Ouvrir la capture de référence | Abrir captura de referencia |
+| Windows privacy shortcut | Open camera privacy settings | Ouvrir les paramètres de confidentialité de la caméra | Abrir la configuración de privacidad de la cámara |
 | Camera selected in Zoom | Virtual camera | Caméra virtuelle | Cámara virtual |
 | Windows background area | System tray | Zone de notification | Área de notificación |
 | Onboarding flow | Guided setup | Configuration guidée | Configuración guiada |
@@ -32,6 +35,8 @@ StageSwap uses clear, natural product language in English, French, and neutral i
 - In short French states, prefer **Aucun média** and **Média détecté**. In standalone explanatory labels, **Aucun média affiché** is also approved. Do not force *contenu* into French when *média* is sufficient.
 - Adapt verbs to the language instead of concatenating glossary entries. The automatic-switching actions are **Start/Stop automatic switching**, **Activer/Désactiver le changement automatique**, and **Activar/Desactivar el cambio automático**.
 - Keep **StageSwap**, **JW Library**, and **Zoom** unchanged.
+- Keep tray recovery labels action-oriented and consistent with the matching Diagnostics action. Opening reference capture always means entering the review-and-confirm flow; never translate it as an immediate save.
+- Privacy and contention failures should name the user action. Preserve the Windows Settings destination and the examples Zoom and Teams where they appear.
 
 ## Voice and mechanics
 

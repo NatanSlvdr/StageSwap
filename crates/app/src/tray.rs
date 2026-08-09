@@ -6,7 +6,7 @@ use tray_icon::menu::{
 };
 use tray_icon::{Icon as TrayImage, TrayIcon, TrayIconBuilder};
 
-use crate::{
+use super::{
     app_icon,
     ui_icon::{self, UiIcon},
 };
@@ -21,6 +21,12 @@ pub struct Tray {
     camera: CheckMenuItem,
     screen: CheckMenuItem,
     output_mode: Submenu,
+    rescan_displays: IconMenuItem,
+    restart_screen: IconMenuItem,
+    restart_virtual_camera: IconMenuItem,
+    restart_all: IconMenuItem,
+    open_reference_capture: IconMenuItem,
+    recovery: Submenu,
     settings: IconMenuItem,
     exit: IconMenuItem,
     locale: Cell<Locale>,
@@ -32,6 +38,11 @@ pub enum TrayAction {
     OpenSettings,
     ToggleAutomation,
     SetMode(OutputMode),
+    RescanDisplays,
+    RestartScreenCapture,
+    RestartVirtualCamera,
+    RestartAll,
+    OpenReferenceCapture,
     Exit,
 }
 
@@ -62,6 +73,49 @@ impl Tray {
         )
         .map_err(|error| format!("could not create tray output-mode menu: {error}"))?;
         output_mode.set_icon(Some(action_menu_icon(UiIcon::Route, [64, 118, 216, 255])?));
+        let rescan_displays = IconMenuItem::new(
+            text(locale, "Rescan displays"),
+            true,
+            Some(action_menu_icon(UiIcon::Refresh, [64, 118, 216, 255])?),
+            None,
+        );
+        let restart_screen = IconMenuItem::new(
+            text(locale, "Restart screen capture"),
+            true,
+            Some(action_menu_icon(UiIcon::Monitor, [64, 118, 216, 255])?),
+            None,
+        );
+        let restart_virtual_camera = IconMenuItem::new(
+            text(locale, "Restart virtual camera"),
+            true,
+            Some(action_menu_icon(UiIcon::Broadcast, [64, 118, 216, 255])?),
+            None,
+        );
+        let restart_all = IconMenuItem::new(
+            text(locale, "Restart all"),
+            true,
+            Some(action_menu_icon(UiIcon::Wrench, [64, 118, 216, 255])?),
+            None,
+        );
+        let open_reference_capture = IconMenuItem::new(
+            text(locale, "Open reference capture"),
+            true,
+            Some(action_menu_icon(UiIcon::Image, [64, 118, 216, 255])?),
+            None,
+        );
+        let recovery = Submenu::with_items(
+            text(locale, "Recovery"),
+            true,
+            &[
+                &rescan_displays,
+                &restart_screen,
+                &restart_virtual_camera,
+                &restart_all,
+                &open_reference_capture,
+            ],
+        )
+        .map_err(|error| format!("could not create tray recovery menu: {error}"))?;
+        recovery.set_icon(Some(action_menu_icon(UiIcon::Wrench, [64, 118, 216, 255])?));
         let settings = IconMenuItem::new(
             text(locale, "Settings"),
             true,
@@ -82,6 +136,7 @@ impl Tray {
             &first_separator,
             &automation,
             &output_mode,
+            &recovery,
             &second_separator,
             &settings,
             &third_separator,
@@ -110,6 +165,12 @@ impl Tray {
             camera,
             screen,
             output_mode,
+            rescan_displays,
+            restart_screen,
+            restart_virtual_camera,
+            restart_all,
+            open_reference_capture,
+            recovery,
             settings,
             exit,
             locale: Cell::new(locale),
@@ -123,6 +184,16 @@ impl Tray {
             self.camera.set_text(text(locale, "Webcam only"));
             self.screen.set_text(text(locale, "Screen only"));
             self.output_mode.set_text(text(locale, "Output mode"));
+            self.rescan_displays
+                .set_text(text(locale, "Rescan displays"));
+            self.restart_screen
+                .set_text(text(locale, "Restart screen capture"));
+            self.restart_virtual_camera
+                .set_text(text(locale, "Restart virtual camera"));
+            self.restart_all.set_text(text(locale, "Restart all"));
+            self.open_reference_capture
+                .set_text(text(locale, "Open reference capture"));
+            self.recovery.set_text(text(locale, "Recovery"));
             self.settings.set_text(text(locale, "Settings"));
             self.exit.set_text(text(locale, "Exit"));
         }
@@ -146,6 +217,15 @@ impl Tray {
         set_checked(&self.automatic, snapshot.mode == OutputMode::Automatic);
         set_checked(&self.camera, snapshot.mode == OutputMode::ForceCamera);
         set_checked(&self.screen, snapshot.mode == OutputMode::ForceScreen);
+        let runtime_accepts_recovery = snapshot.run_state != RunState::Stopping;
+        self.rescan_displays.set_enabled(runtime_accepts_recovery);
+        self.restart_screen
+            .set_enabled(runtime_accepts_recovery && snapshot.selected_monitor.is_some());
+        self.restart_virtual_camera
+            .set_enabled(runtime_accepts_recovery);
+        self.restart_all.set_enabled(runtime_accepts_recovery);
+        self.open_reference_capture
+            .set_enabled(runtime_accepts_recovery && snapshot.selected_monitor.is_some());
     }
 
     pub fn poll(&self) -> Option<TrayAction> {
@@ -168,6 +248,21 @@ impl Tray {
             }
             if id == self.settings.id() {
                 return Some(TrayAction::OpenSettings);
+            }
+            if id == self.rescan_displays.id() {
+                return Some(TrayAction::RescanDisplays);
+            }
+            if id == self.restart_screen.id() {
+                return Some(TrayAction::RestartScreenCapture);
+            }
+            if id == self.restart_virtual_camera.id() {
+                return Some(TrayAction::RestartVirtualCamera);
+            }
+            if id == self.restart_all.id() {
+                return Some(TrayAction::RestartAll);
+            }
+            if id == self.open_reference_capture.id() {
+                return Some(TrayAction::OpenReferenceCapture);
             }
             if id == self.exit.id() {
                 return Some(TrayAction::Exit);

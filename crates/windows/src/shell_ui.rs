@@ -66,14 +66,25 @@ fn file_dialog(save: bool, title: &str, filter: &str, extension: &str) -> Option
 }
 
 pub fn open_directory(path: &Path) -> Result<(), String> {
+    open_shell_target(&path.display().to_string(), "log directory")
+}
+
+pub fn open_camera_privacy_settings() -> Result<(), String> {
+    open_shell_target(
+        "ms-settings:privacy-webcam",
+        "Windows camera privacy settings",
+    )
+}
+
+fn open_shell_target(target: &str, description: &str) -> Result<(), String> {
     let operation = wide("open");
-    let path = wide(&path.display().to_string());
+    let target = wide(target);
     // SAFETY: both UTF-16 strings are terminated and remain live for the call.
     let result = unsafe {
         ShellExecuteW(
             None,
             PCWSTR(operation.as_ptr()),
-            PCWSTR(path.as_ptr()),
+            PCWSTR(target.as_ptr()),
             PCWSTR::null(),
             PCWSTR::null(),
             SW_SHOWNORMAL,
@@ -81,7 +92,7 @@ pub fn open_directory(path: &Path) -> Result<(), String> {
     };
     if result.0 as usize <= 32 {
         Err(format!(
-            "could not open log directory (ShellExecute code {})",
+            "could not open {description} (ShellExecute code {})",
             result.0 as usize
         ))
     } else {

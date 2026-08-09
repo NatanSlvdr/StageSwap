@@ -31,6 +31,9 @@ pub use ipc::{
 };
 pub use monitor::{MonitorTracker, MonitorTrackerSettings, MonitorTrackingResult};
 pub use pacer::FramePacer;
-pub use runtime::{AppSnapshot, Command, PreviewFrames, RestartTarget, RunState};
+pub use runtime::{
+    AppSnapshot, Command, ComponentFailureKind, ComponentLifecycle, ComponentStatus, PreviewFrames,
+    RestartTarget, RunState, ScreenFailureKind, WebcamFailureKind,
+};
 pub use transition::{TransitionController, TransitionState};
 pub use types::*;

@@ -81,11 +81,14 @@ StageSwap requires a 64-bit Windows 11 computer, a webcam, a secondary screen co
 
 StageSwap can include or hide the mouse cursor, intelligently crop non-16:9 camera signals while leaving native 16:9 video unchanged, start minimized, begin automation on launch, and continue running when the dashboard is closed to the system tray.
 
+Webcam capture prefers RGB32 1280×720 at 30 fps and can normalize compatible RGB32, NV12, YUY2, or MJPEG camera modes—including padded rows and common 4:3 or non-30-fps inputs—into the fixed local 720p30 output. HDR/10-bit secondary displays are detected but are not tone-mapped; disable HDR on the selected display before automatic matching or reference capture.
+
 ## Everyday controls
 
 - **Start automatic switching** makes the selected output mode live.
 - **Stop automatic switching** shows the StageSwap off screen without removing the virtual camera.
 - **Camera**, **Display**, and **Automatic** can be selected from the dashboard or tray menu.
+- The tray **Recovery** submenu can rescan displays, restart screen capture, restart the virtual camera, restart all components, or open the confirmation-gated reference capture flow.
 - **Capture reference image** captures the current JW Library idle view for review and saves it only after confirmation.
 - **Rescan screens** searches the connected displays for the saved reference. It does not restart screen capture.
 - **Open guided setup** under General Settings repeats the interactive webcam, secondary-screen, reference-image, and Zoom setup at any time.
@@ -111,8 +114,8 @@ This removes the installed app, shortcuts, startup entry, and virtual camera. Se
 
 ## Troubleshooting
 
-- **The camera or display stopped after being unplugged, reconnected, or waking from sleep:** for a previously selected display whose capture closed, enable **Restart capture automatically when black or unavailable**; otherwise select the source again or restart it under **Settings → Diagnostics**.
-- **Screen capture stays black or unavailable after an HDMI splitter or screen change:** enable **Restart capture automatically when black or unavailable**, or use **Restart screen capture** under **Settings → Diagnostics**.
+- **The camera or display stopped after being unplugged, reconnected, or waking from sleep:** for a previously selected display whose capture closed, enable **Automatically fix screen capture problems**; otherwise select the source again or restart it under **Settings → Diagnostics**.
+- **Screen capture stays black or unavailable after an HDMI splitter or screen change:** enable **Automatically fix screen capture problems**, or use **Restart screen capture** under **Settings → Diagnostics**.
 - **Auto mode switches at the wrong time:** return JW Library to the normal screen with no media playing, capture the reference image again, and adjust **Required similarity**.
 - **The saved display is missing:** recovery retries the stored selected monitor, so reconnecting that same display identity can restore capture automatically. If Windows assigns a different identity, use **Rescan screens** or choose another display. StageSwap does not provide a general hot-plug, docking-recovery, or monitor-reselection system.
 - **A camera is missing:** refresh the camera list and select it again. StageSwap does not silently substitute another camera.

@@ -34,6 +34,72 @@ const SOURCE_INPROC_KEY: &str =
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "StageSwap";
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StartupRegistrationStatus {
+    Missing,
+    Current,
+    Different(String),
+}
+
+fn expected_startup_command() -> Result<String, String> {
+    let executable = crate::managed_executable_path()?;
+    Ok(format!("\"{}\" --startup", executable.display()))
+}
+
+pub fn startup_registration_status() -> Result<StartupRegistrationStatus, String> {
+    let key: Vec<u16> = RUN_KEY.encode_utf16().chain([0]).collect();
+    let value_name: Vec<u16> = RUN_VALUE.encode_utf16().chain([0]).collect();
+    let mut bytes = 0;
+    // SAFETY: key and value_name are terminated; this call only requests the value size.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key.as_ptr()),
+            PCWSTR(value_name.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut bytes),
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND {
+        return Ok(StartupRegistrationStatus::Missing);
+    }
+    if status.is_err() {
+        return Err(format!(
+            "could not read Windows startup preference: {status:?}"
+        ));
+    }
+    let mut value = vec![0_u16; (bytes as usize).div_ceil(size_of::<u16>())];
+    // SAFETY: value has the byte capacity reported by RegGetValueW.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key.as_ptr()),
+            PCWSTR(value_name.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(value.as_mut_ptr().cast()),
+            Some(&mut bytes),
+        )
+    };
+    if status.is_err() {
+        return Err(format!(
+            "could not read Windows startup preference: {status:?}"
+        ));
+    }
+    let length = value
+        .iter()
+        .position(|word| *word == 0)
+        .unwrap_or(value.len());
+    let actual = String::from_utf16_lossy(&value[..length]);
+    if actual.eq_ignore_ascii_case(&expected_startup_command()?) {
+        Ok(StartupRegistrationStatus::Current)
+    } else {
+        Ok(StartupRegistrationStatus::Different(actual))
+    }
+}
+
 pub fn configure_startup(enabled: bool) -> Result<(), String> {
     let executable = enabled.then(crate::managed_executable_path).transpose()?;
     let path: Vec<u16> = RUN_KEY.encode_utf16().chain([0]).collect();

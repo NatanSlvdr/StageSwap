@@ -1,3 +1,5 @@
+use crate::runtime_mailbox::{CommandInbox, CommandMailbox};
+use crate::{CommandDispatch, RuntimeClock, SystemRuntimeClock};
 use stageswap_core::{
     AppConfig, AppSnapshot, Command, DebouncedDetector, DetectorSettings, DeviceState, Frame,
     FrameCompositor, FrameMetadata, FramePacer, GrayImage, PIPELINE_FPS, PIPELINE_SIZE, RunState,
@@ -5,7 +7,6 @@ use stageswap_core::{
     off_frame, resize_bgra_to_gray, resize_bilinear,
 };
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -17,14 +18,72 @@ use stageswap_core::{MonitorScore, MonitorTracker, MonitorTrackerSettings, Resta
 #[cfg(windows)]
 use stageswap_windows::{
     FramePublisher, MediaFoundationVideoInput, ScreenInput, VideoInput, VirtualCameraController,
-    WindowsGraphicsScreenInput, choose_video_device, configure_startup, frame_pipe_name,
+    WindowsGraphicsScreenInput, choose_video_device, frame_pipe_name,
 };
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use std::sync::mpsc::{self, Receiver, SyncSender};
 
 const COMMAND_CAPACITY: usize = 32;
+const MAX_COMMANDS_PER_OUTPUT_CYCLE: usize = 8;
 const ACTIVITY_LIMIT: usize = 20;
 const FPS_TRACKING_WINDOW: Duration = Duration::from_secs(1);
+#[cfg(any(windows, test))]
+use stageswap_core::ComponentLifecycle;
+#[cfg(windows)]
+use stageswap_core::FRAME_STALE_AFTER;
+#[cfg(windows)]
+use stageswap_core::{ComponentFailureKind, ScreenFailureKind, WebcamFailureKind};
+#[cfg(any(windows, test))]
+const WEBCAM_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(any(windows, test))]
+const SCREEN_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(windows)]
+fn screen_failure_kind(message: &str) -> ScreenFailureKind {
+    if message.contains("Graphics Capture is unavailable") {
+        ScreenFailureKind::UnsupportedCapture
+    } else if message.contains("no longer available") || message.contains("unavailable") {
+        ScreenFailureKind::MissingSelectedMonitor
+    } else if message.contains("HDR") || message.contains("10-bit") {
+        ScreenFailureKind::UnsupportedHdr
+    } else if message.contains("closed") {
+        ScreenFailureKind::Closed
+    } else {
+        ScreenFailureKind::CaptureFailure
+    }
+}
+
+#[cfg(windows)]
+fn webcam_failure_kind(message: &str) -> WebcamFailureKind {
+    let message = message.to_ascii_lowercase();
+    if message.contains("privacy") {
+        WebcamFailureKind::PrivacyDisabled
+    } else if message.contains("access denied") || message.contains("0x80070005") {
+        WebcamFailureKind::AccessDenied
+    } else if message.contains("preempted")
+        || message.contains("0xc00d3ea3")
+        || message.contains("device busy")
+    {
+        WebcamFailureKind::DeviceBusy
+    } else if message.contains("invalidated") || message.contains("0xc00d3ea2") {
+        WebcamFailureKind::DeviceInvalidated
+    } else if message.contains("media-type change") {
+        WebcamFailureKind::IncompatibleTypeChange
+    } else if message.contains("format")
+        || message.contains("subtype")
+        || message.contains("interlaced")
+    {
+        WebcamFailureKind::UnsupportedFormat
+    } else {
+        WebcamFailureKind::DriverFailure
+    }
+}
+#[cfg(any(windows, test))]
+const SCREEN_RESTART_BACKOFF_BASE: Duration = Duration::from_secs(5);
+#[cfg(any(windows, test))]
+const SCREEN_RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
 #[cfg(any(windows, test))]
 const TARGET_WEBCAM_ASPECT_RATIO: f64 = 16.0 / 9.0;
 #[cfg(any(windows, test))]
@@ -213,15 +272,19 @@ fn paint_disco_sparkles(
 }
 
 pub struct RuntimeHandle {
-    commands: SyncSender<Command>,
+    commands: CommandMailbox,
     snapshot: Arc<RwLock<AppSnapshot>>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl RuntimeHandle {
     pub fn spawn(config: AppConfig) -> Self {
-        let (commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let now = Instant::now();
+        Self::spawn_with_clock(config, SystemRuntimeClock)
+    }
+
+    pub fn spawn_with_clock<C: RuntimeClock>(config: AppConfig, clock: C) -> Self {
+        let (commands, receiver) = CommandMailbox::bounded(COMMAND_CAPACITY);
+        let now = clock.now();
         let mut transition = TransitionController::default();
         let mut initial_snapshot = AppSnapshot {
             mode: config.output_mode,
@@ -239,7 +302,7 @@ impl RuntimeHandle {
         let worker_snapshot = Arc::clone(&snapshot);
         let worker = thread::Builder::new()
             .name("stageswap-runtime".into())
-            .spawn(move || run(config, receiver, worker_snapshot))
+            .spawn(move || run(config, receiver, worker_snapshot, clock))
             .expect("runtime thread can be created");
         Self {
             commands,
@@ -248,12 +311,12 @@ impl RuntimeHandle {
         }
     }
 
-    pub fn send(&self, command: Command) -> Result<(), mpsc::SendError<Command>> {
-        self.commands.send(command)
+    pub fn send(&self, command: Command) -> CommandDispatch {
+        self.commands.dispatch(command)
     }
 
-    pub fn try_send(&self, command: Command) -> Result<(), mpsc::TrySendError<Command>> {
-        self.commands.try_send(command)
+    pub fn try_send(&self, command: Command) -> CommandDispatch {
+        self.commands.dispatch(command)
     }
 
     pub fn snapshot(&self) -> AppSnapshot {
@@ -266,7 +329,7 @@ impl RuntimeHandle {
 
 impl Drop for RuntimeHandle {
     fn drop(&mut self) {
-        let _ = self.commands.send(Command::Exit);
+        self.commands.request_shutdown();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -432,6 +495,15 @@ fn automatic_screen_tasks_due(
     )
 }
 
+#[cfg(any(windows, test))]
+fn screen_restart_backoff(consecutive_failures: u32) -> Duration {
+    let exponent = consecutive_failures.saturating_sub(1).min(4);
+    SCREEN_RESTART_BACKOFF_BASE
+        .checked_mul(1_u32 << exponent)
+        .unwrap_or(SCREEN_RESTART_BACKOFF_MAX)
+        .min(SCREEN_RESTART_BACKOFF_MAX)
+}
+
 struct RuntimeState {
     config: AppConfig,
     snapshot: AppSnapshot,
@@ -452,7 +524,12 @@ struct RuntimeState {
 }
 
 impl RuntimeState {
+    #[cfg(test)]
     fn new(config: AppConfig) -> Self {
+        Self::new_at(config, Instant::now())
+    }
+
+    fn new_at(config: AppConfig, now: Instant) -> Self {
         let mode = config.output_mode;
         let (reference, reference_preview) = load_reference(&config.reference_image_path)
             .map_or((None, None), |(reference, preview)| {
@@ -462,7 +539,6 @@ impl RuntimeState {
             threshold: config.similarity_threshold,
             ..DetectorSettings::default()
         });
-        let now = Instant::now();
         let sequence = 1;
         let mut transition = TransitionController::default();
         let mut snapshot = AppSnapshot {
@@ -868,51 +944,100 @@ fn import_reference(
     load_reference(destination).ok_or_else(|| "could not load imported reference image".into())
 }
 
-fn run(config: AppConfig, commands: Receiver<Command>, shared: Arc<RwLock<AppSnapshot>>) {
+trait RuntimePorts {
+    fn command(&mut self, command: &Command, state: &mut RuntimeState);
+    fn refresh_inputs(&mut self, state: &mut RuntimeState, now: Instant);
+    fn publish(&self, state: &mut RuntimeState, now: Instant);
+}
+
+struct RuntimeEngine<P> {
+    state: RuntimeState,
+    platform: P,
+    pacer: FramePacer,
+}
+
+impl<P: RuntimePorts> RuntimeEngine<P> {
+    fn from_parts(state: RuntimeState, platform: P, now: Instant) -> Self {
+        let frame_interval = Duration::from_nanos(1_000_000_000 / u64::from(PIPELINE_FPS));
+        Self {
+            state,
+            platform,
+            pacer: FramePacer::new(now, frame_interval),
+        }
+    }
+
+    fn wait_duration(&self, now: Instant) -> Duration {
+        self.pacer.wait_duration(now)
+    }
+
+    fn command(&mut self, command: Command) -> bool {
+        self.platform.command(&command, &mut self.state);
+        self.state.command(command)
+    }
+
+    fn step(&mut self, now: Instant) -> bool {
+        if !self.pacer.is_due(now, Duration::ZERO) {
+            return false;
+        }
+        self.pacer.advance(now);
+        self.platform.refresh_inputs(&mut self.state, now);
+        self.state.refresh_input_fps(now);
+        self.state.detect(now);
+        self.state.tick(now);
+        self.state.snapshot.output_fps = self.state.output_fps.observe(now);
+        self.platform.publish(&mut self.state, now);
+        true
+    }
+}
+
+fn run<C: RuntimeClock>(
+    config: AppConfig,
+    commands: CommandInbox,
+    shared: Arc<RwLock<AppSnapshot>>,
+    clock: C,
+) {
     let start_automatically = config.start_automatically;
-    let mut state = RuntimeState::new(config);
+    let now = clock.now();
+    let mut state = RuntimeState::new_at(config, now);
     state.snapshot.availability = SourceAvailability::default();
     state.snapshot.webcam_state = DeviceState::Unavailable;
     state.snapshot.screen_state = DeviceState::Unavailable;
     state.snapshot.virtual_camera_state = DeviceState::Unavailable;
     state.snapshot.actual_output = Source::Placeholder;
-    let mut platform = Platform::new(&mut state);
+    let platform = Platform::new(&mut state);
     if start_automatically {
         state.command(Command::Start);
     }
-    let frame_interval = Duration::from_nanos(1_000_000_000 / u64::from(PIPELINE_FPS));
-    let mut pacer = FramePacer::new(Instant::now(), frame_interval);
+    let mut engine = RuntimeEngine::from_parts(state, platform, now);
     loop {
-        match commands.recv_timeout(pacer.wait_duration(Instant::now())) {
-            Ok(command) => {
-                platform.command(&command, &mut state);
-                if !state.command(command) {
-                    break;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        if commands.shutdown_requested() {
+            break;
         }
-        while let Ok(command) = commands.try_recv() {
-            platform.command(&command, &mut state);
-            if !state.command(command) {
+        let mut processed = 0;
+        if let Some(command) = commands.recv_timeout(engine.wait_duration(clock.now())) {
+            if !engine.command(command) {
+                break;
+            }
+            processed += 1;
+        }
+        while processed < MAX_COMMANDS_PER_OUTPUT_CYCLE && !commands.shutdown_requested() {
+            let Some(command) = commands.try_recv() else {
+                break;
+            };
+            if !engine.command(command) {
                 return;
             }
+            processed += 1;
         }
-        let now = Instant::now();
-        if !pacer.is_due(now, Duration::ZERO) {
-            continue;
+        if commands.shutdown_requested() {
+            break;
         }
-        pacer.advance(now);
-        platform.refresh_inputs(&mut state);
-        state.refresh_input_fps(now);
-        state.detect(now);
-        state.tick(now);
-        state.snapshot.output_fps = state.output_fps.observe(now);
-        platform.publish(&mut state);
-        *shared
-            .write()
-            .expect("runtime snapshot lock is not poisoned") = state.snapshot.clone();
+        let now = clock.now();
+        if engine.step(now) {
+            *shared
+                .write()
+                .expect("runtime snapshot lock is not poisoned") = engine.state.snapshot.clone();
+        }
     }
 }
 
@@ -1082,6 +1207,7 @@ struct Platform {
     webcam: MediaFoundationVideoInput,
     screen: WindowsGraphicsScreenInput,
     selected_monitor: Option<MonitorDescriptor>,
+    selected_display_hdr_unsupported: bool,
     monitor_tracker: MonitorTracker,
     screen_capture_recovery: ScreenCaptureRecovery,
     last_monitor_scan: Instant,
@@ -1093,9 +1219,15 @@ struct Platform {
 #[cfg(windows)]
 impl Platform {
     fn new(state: &mut RuntimeState) -> Self {
-        if let Err(error) = configure_startup(state.config.start_with_windows) {
-            state.record(format!("Windows startup preference failed: {error}"));
-        }
+        let now = Instant::now();
+        state
+            .snapshot
+            .publisher_component
+            .transition(ComponentLifecycle::Starting, now);
+        state
+            .snapshot
+            .virtual_camera_component
+            .transition(ComponentLifecycle::Starting, now);
         let pipe_name = match frame_pipe_name() {
             Ok(name) => Some(name),
             Err(error) => {
@@ -1110,6 +1242,10 @@ impl Platform {
                 .and_then(|pipe_name| match FramePublisher::start(pipe_name) {
                     Ok(publisher) => Some(publisher),
                     Err(error) => {
+                        state
+                            .snapshot
+                            .publisher_component
+                            .mark_failed(now, error.clone());
                         state.snapshot.warning = Some(error.clone());
                         state.record(format!("Frame publisher failed: {error}"));
                         None
@@ -1120,11 +1256,16 @@ impl Platform {
                 match VirtualCameraController::start(pipe_name.clone()) {
                     Ok(camera) => {
                         state.snapshot.virtual_camera_state = DeviceState::Ready;
+                        state.snapshot.virtual_camera_component.mark_ready(now);
                         state.record("Virtual camera initialized");
                         Some(camera)
                     }
                     Err(error) => {
                         state.snapshot.virtual_camera_state = DeviceState::Failed;
+                        state
+                            .snapshot
+                            .virtual_camera_component
+                            .mark_failed(now, error.clone());
                         state.snapshot.warning = Some(error.clone());
                         state.record(format!("Virtual camera failed: {error}"));
                         None
@@ -1134,8 +1275,24 @@ impl Platform {
         });
         if publisher.is_none() {
             state.snapshot.virtual_camera_state = DeviceState::Failed;
+            if state.snapshot.publisher_component.lifecycle != ComponentLifecycle::Failed {
+                state
+                    .snapshot
+                    .publisher_component
+                    .mark_failed(now, "frame publisher is unavailable");
+            }
+            if state.snapshot.virtual_camera_component.lifecycle != ComponentLifecycle::Failed {
+                state
+                    .snapshot
+                    .virtual_camera_component
+                    .mark_failed(now, "frame publisher is unavailable");
+            }
         }
         let mut webcam = MediaFoundationVideoInput::default();
+        state
+            .snapshot
+            .webcam_component
+            .transition(ComponentLifecycle::Starting, now);
         match webcam.enumerate() {
             Ok(devices) => {
                 state.snapshot.video_devices = devices
@@ -1167,32 +1324,66 @@ impl Platform {
                     state.config.selected_video_device_id = selected;
                     state.snapshot.selected_video_device_id =
                         state.config.selected_video_device_id.clone();
-                    state.snapshot.webcam_state = DeviceState::Ready;
+                    state.snapshot.webcam_state = DeviceState::Initializing;
+                    state
+                        .snapshot
+                        .webcam_component
+                        .waiting_for_first_frame(now, now + WEBCAM_FIRST_FRAME_TIMEOUT);
+                    state.snapshot.webcam_native_format =
+                        webcam.selected_native_format().map(str::to_owned);
+                    state.snapshot.webcam_output_format =
+                        webcam.selected_output_format().map(str::to_owned);
                     state.record("Webcam initialized");
                 } else if devices.is_empty() {
+                    state
+                        .snapshot
+                        .webcam_component
+                        .transition(ComponentLifecycle::Stopped, now);
                     state.record("No physical webcam found");
                 } else {
+                    state
+                        .snapshot
+                        .webcam_component
+                        .transition(ComponentLifecycle::Stopped, now);
                     state.record("Webcam selection required");
                 }
             }
             Err(error) => {
                 state.snapshot.webcam_state = DeviceState::Failed;
+                state.snapshot.webcam_component.mark_failed_with_kind(
+                    now,
+                    ComponentFailureKind::Webcam(webcam_failure_kind(&error)),
+                    error.clone(),
+                );
                 state.record(format!("Webcam enumeration failed: {error}"));
             }
         }
         let mut screen = WindowsGraphicsScreenInput::default();
+        state
+            .snapshot
+            .screen_component
+            .transition(ComponentLifecycle::Starting, now);
         let selected_monitor = match screen.enumerate() {
             Ok(monitors) => {
                 state.snapshot.monitors = monitors.clone().into();
                 choose_initial_monitor(&state.config.selected_monitor_label, &monitors).and_then(
                     |monitor| match screen.start(&monitor, state.config.cursor_visible) {
                         Ok(()) => {
-                            state.snapshot.screen_state = DeviceState::Ready;
+                            state.snapshot.screen_state = DeviceState::Initializing;
+                            state
+                                .snapshot
+                                .screen_component
+                                .waiting_for_first_frame(now, now + SCREEN_FIRST_FRAME_TIMEOUT);
                             state.record(format!("Screen capture initialized: {}", monitor.label));
                             Some(monitor)
                         }
                         Err(error) => {
                             state.snapshot.screen_state = DeviceState::Failed;
+                            state.snapshot.screen_component.mark_failed_with_kind(
+                                now,
+                                ComponentFailureKind::Screen(screen_failure_kind(&error)),
+                                error.clone(),
+                            );
                             state.record(format!("Screen capture failed: {error}"));
                             None
                         }
@@ -1201,6 +1392,11 @@ impl Platform {
             }
             Err(error) => {
                 state.snapshot.screen_state = DeviceState::Failed;
+                state.snapshot.screen_component.mark_failed_with_kind(
+                    now,
+                    ComponentFailureKind::Screen(screen_failure_kind(&error)),
+                    error.clone(),
+                );
                 state.record(format!("Monitor enumeration failed: {error}"));
                 None
             }
@@ -1218,6 +1414,21 @@ impl Platform {
                 .clone_from(&monitor.label);
         }
         state.snapshot.selected_monitor = selected_monitor.clone();
+        let selected_display_hdr_unsupported = selected_monitor.as_ref().is_some_and(|monitor| {
+            match screen.display_uses_hdr_or_ten_bit(monitor) {
+                Ok(unsupported) => unsupported,
+                Err(error) => {
+                    state.record(format!("Display color capability check failed: {error}"));
+                    false
+                }
+            }
+        });
+        if selected_display_hdr_unsupported {
+            state.snapshot.warning = Some(
+                "HDR or 10-bit color is enabled on the selected display; disable HDR in Windows Display settings before using automatic matching or reference capture"
+                    .into(),
+            );
+        }
         let monitor_scan_worker = match MonitorScanWorker::start() {
             Ok(worker) => Some(worker),
             Err(error) => {
@@ -1232,6 +1443,7 @@ impl Platform {
             webcam,
             screen,
             selected_monitor,
+            selected_display_hdr_unsupported,
             monitor_tracker,
             screen_capture_recovery: ScreenCaptureRecovery::default(),
             last_monitor_scan: Instant::now(),
@@ -1249,18 +1461,35 @@ impl Platform {
         match command {
             Command::UpdateSettings(config) | Command::ReloadSettings(config) => {
                 let reload_settings = matches!(command, Command::ReloadSettings(_));
-                if let Err(error) = configure_startup(config.start_with_windows) {
-                    state.record(format!("Windows startup preference failed: {error}"));
-                }
                 if config.selected_video_device_id != state.config.selected_video_device_id {
+                    let now = Instant::now();
                     self.webcam.stop();
                     if config.selected_video_device_id.is_empty() {
                         state.snapshot.webcam_state = DeviceState::Unavailable;
+                        state
+                            .snapshot
+                            .webcam_component
+                            .transition(ComponentLifecycle::Stopped, now);
                     } else {
                         match self.webcam.start(&config.selected_video_device_id) {
-                            Ok(()) => state.snapshot.webcam_state = DeviceState::Ready,
+                            Ok(()) => {
+                                state.snapshot.webcam_state = DeviceState::Initializing;
+                                state
+                                    .snapshot
+                                    .webcam_component
+                                    .waiting_for_first_frame(now, now + WEBCAM_FIRST_FRAME_TIMEOUT);
+                                state.snapshot.webcam_native_format =
+                                    self.webcam.selected_native_format().map(str::to_owned);
+                                state.snapshot.webcam_output_format =
+                                    self.webcam.selected_output_format().map(str::to_owned);
+                            }
                             Err(error) => {
                                 state.snapshot.webcam_state = DeviceState::Failed;
+                                state.snapshot.webcam_component.mark_failed_with_kind(
+                                    now,
+                                    ComponentFailureKind::Webcam(webcam_failure_kind(&error)),
+                                    error.clone(),
+                                );
                                 state.record(format!("Webcam selection failed: {error}"));
                             }
                         }
@@ -1293,6 +1522,12 @@ impl Platform {
                 }
             }
             Command::CaptureReference => {
+                if self.selected_display_hdr_unsupported {
+                    state.record(
+                        "Reference capture is unavailable while HDR or 10-bit color is enabled",
+                    );
+                    return;
+                }
                 if let Some(frame) = self.screen.latest_frame() {
                     self.commit_reference(state, frame, "Reference captured");
                 } else {
@@ -1300,6 +1535,12 @@ impl Platform {
                 }
             }
             Command::CaptureReferenceCandidate => {
+                if self.selected_display_hdr_unsupported {
+                    state.record(
+                        "Reference capture is unavailable while HDR or 10-bit color is enabled",
+                    );
+                    return;
+                }
                 if let Some(frame) = self.screen.latest_frame() {
                     state.stage_reference_candidate(frame);
                     state.record("Reference candidate captured for review");
@@ -1343,6 +1584,10 @@ impl Platform {
                     .find(|candidate| candidate.display_name == monitor.display_name)
                 {
                     self.selected_monitor = Some(monitor.clone());
+                    self.selected_display_hdr_unsupported = self
+                        .screen
+                        .display_uses_hdr_or_ten_bit(&monitor)
+                        .unwrap_or(false);
                     self.monitor_tracker.select(monitor.clone());
                     self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
                     if let Some(worker) = self.monitor_scan_worker.as_mut() {
@@ -1418,26 +1663,59 @@ impl Platform {
     }
 
     fn restart_webcam(&mut self, state: &mut RuntimeState) {
+        let now = Instant::now();
         let id = state.config.selected_video_device_id.clone();
+        if state.snapshot.webcam_component.lifecycle == ComponentLifecycle::Restarting {
+            return;
+        }
+        state
+            .snapshot
+            .webcam_component
+            .transition(ComponentLifecycle::Restarting, now);
         self.webcam.stop();
         if id.is_empty() {
             state.snapshot.webcam_state = DeviceState::Unavailable;
+            state
+                .snapshot
+                .webcam_component
+                .transition(ComponentLifecycle::Stopped, now);
             state.record("Webcam restart skipped: no video input selected");
             return;
         }
         match self.webcam.start(&id) {
             Ok(()) => {
-                state.snapshot.webcam_state = DeviceState::Ready;
+                state.snapshot.webcam_state = DeviceState::Initializing;
+                state
+                    .snapshot
+                    .webcam_component
+                    .waiting_for_first_frame(now, now + WEBCAM_FIRST_FRAME_TIMEOUT);
+                state.snapshot.webcam_native_format =
+                    self.webcam.selected_native_format().map(str::to_owned);
+                state.snapshot.webcam_output_format =
+                    self.webcam.selected_output_format().map(str::to_owned);
                 state.record("Webcam restarted");
             }
             Err(error) => {
                 state.snapshot.webcam_state = DeviceState::Failed;
+                state.snapshot.webcam_component.mark_failed_with_kind(
+                    now,
+                    ComponentFailureKind::Webcam(webcam_failure_kind(&error)),
+                    error.clone(),
+                );
                 state.record(format!("Webcam restart failed: {error}"));
             }
         }
     }
 
     fn restart_virtual_camera(&mut self, state: &mut RuntimeState) {
+        let now = Instant::now();
+        if state.snapshot.virtual_camera_component.lifecycle == ComponentLifecycle::Restarting {
+            return;
+        }
+        state
+            .snapshot
+            .virtual_camera_component
+            .transition(ComponentLifecycle::Restarting, now);
         let result = if let Some(camera) = &mut self.camera {
             camera.restart()
         } else if self.publisher.is_none() {
@@ -1451,19 +1729,23 @@ impl Platform {
         match result {
             Ok(()) => {
                 state.snapshot.virtual_camera_state = DeviceState::Ready;
+                state.snapshot.virtual_camera_component.mark_ready(now);
                 state.snapshot.warning = None;
                 state.record("Virtual camera restarted");
             }
             Err(error) => {
                 state.snapshot.virtual_camera_state = DeviceState::Failed;
+                state
+                    .snapshot
+                    .virtual_camera_component
+                    .mark_failed(now, error.clone());
                 state.snapshot.warning = Some(error.clone());
                 state.record(format!("Virtual camera restart failed: {error}"));
             }
         }
     }
 
-    fn refresh_inputs(&mut self, state: &mut RuntimeState) {
-        let now = Instant::now();
+    fn refresh_inputs(&mut self, state: &mut RuntimeState, now: Instant) {
         self.refresh_monitor_scan(state);
         let (monitor_scan_due, screen_capture_recovery_due) = automatic_screen_tasks_due(
             state.config.automatic_monitor_rescans,
@@ -1479,15 +1761,55 @@ impl Platform {
             self.check_screen_capture_recovery(state, now);
         }
         let webcam = self.webcam.latest_frame();
+        let webcam_is_stale = webcam.as_ref().is_some_and(|frame| {
+            now.saturating_duration_since(frame.received_at) > FRAME_STALE_AFTER
+        });
+        let webcam = (!webcam_is_stale).then_some(webcam).flatten();
         state.snapshot.availability.camera_ready = webcam.is_some();
         if let Some(error) = self.webcam.last_error() {
             if state.snapshot.webcam_state != DeviceState::Failed {
-                state.record(error);
+                state.record(error.clone());
             }
             state.snapshot.webcam_state = DeviceState::Failed;
-        } else if webcam.is_some() && state.snapshot.webcam_state == DeviceState::Failed {
+            state.snapshot.webcam_component.mark_failed_with_kind(
+                now,
+                ComponentFailureKind::Webcam(webcam_failure_kind(&error)),
+                error,
+            );
+            state.snapshot.previews.webcam = None;
+        } else if webcam_is_stale {
+            state.snapshot.webcam_state = DeviceState::Failed;
+            state
+                .snapshot
+                .webcam_component
+                .transition(ComponentLifecycle::Stale, now);
+            state.snapshot.previews.webcam = None;
+        } else if webcam.is_some() {
             state.snapshot.webcam_state = DeviceState::Ready;
-            state.record("Webcam capture recovered");
+            let was_ready = state.snapshot.webcam_component.lifecycle == ComponentLifecycle::Ready;
+            state.snapshot.webcam_component.mark_ready(now);
+            state.snapshot.webcam_component.last_success_at =
+                webcam.as_ref().map(|frame| frame.received_at);
+            if !was_ready {
+                state.record("Webcam first frame received");
+            }
+        } else if state
+            .snapshot
+            .webcam_component
+            .first_frame_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.webcam.stop();
+            state.snapshot.webcam_state = DeviceState::Failed;
+            state.snapshot.webcam_component.mark_failed(
+                now,
+                "webcam did not deliver a frame before the startup deadline",
+            );
+            state.snapshot.webcam_component.last_failure_kind = Some(ComponentFailureKind::Webcam(
+                WebcamFailureKind::DriverFailure,
+            ));
+            state.snapshot.previews.webcam = None;
+            state.record("Webcam first-frame deadline expired");
         }
         if let Some(webcam) = webcam {
             state.snapshot.previews.webcam = Some(state.webcam_crop.apply(
@@ -1497,27 +1819,128 @@ impl Platform {
             ));
         }
         let screen = self.screen.latest_frame();
-        state.snapshot.availability.screen_ready = screen.is_some();
-        if screen.is_some() {
-            state.snapshot.previews.screen = screen;
+        let screen_is_stale = screen.as_ref().is_some_and(|frame| {
+            now.saturating_duration_since(frame.received_at) > FRAME_STALE_AFTER
+        });
+        let screen = (!screen_is_stale).then_some(screen).flatten();
+        state.snapshot.availability.screen_ready = screen.is_some()
+            && !(self.selected_display_hdr_unsupported
+                && state.snapshot.mode == stageswap_core::OutputMode::Automatic);
+        if self.selected_display_hdr_unsupported
+            && state.snapshot.mode == stageswap_core::OutputMode::Automatic
+        {
+            state.snapshot.screen_state = DeviceState::Failed;
+            state.snapshot.screen_component.mark_failed_with_kind(
+                now,
+                ComponentFailureKind::Screen(ScreenFailureKind::UnsupportedHdr),
+                "HDR or 10-bit color must be disabled for automatic matching",
+            );
+        } else if let Some(error) = self.screen.last_error() {
+            if state.snapshot.screen_state != DeviceState::Failed {
+                state.record(error.clone());
+            }
+            state.snapshot.screen_state = DeviceState::Failed;
+            state.snapshot.screen_component.mark_failed_with_kind(
+                now,
+                ComponentFailureKind::Screen(screen_failure_kind(&error)),
+                error,
+            );
+            state.snapshot.previews.screen = None;
+        } else if screen_is_stale {
+            state.snapshot.screen_state = DeviceState::Failed;
+            state
+                .snapshot
+                .screen_component
+                .transition(ComponentLifecycle::Stale, now);
+            state.snapshot.previews.screen = None;
+        } else if let Some(screen) = screen {
+            let received_at = screen.received_at;
+            state.snapshot.screen_state = DeviceState::Ready;
+            let was_ready = state.snapshot.screen_component.lifecycle == ComponentLifecycle::Ready;
+            state.snapshot.screen_component.mark_ready(now);
+            state.snapshot.screen_component.last_success_at = Some(received_at);
+            state.snapshot.previews.screen = Some(screen);
+            if !was_ready {
+                state.record("Screen capture first frame received");
+            }
+        } else if state
+            .snapshot
+            .screen_component
+            .first_frame_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            state.snapshot.screen_state = DeviceState::Failed;
+            state.snapshot.screen_component.mark_failed(
+                now,
+                "screen capture did not deliver a frame before the startup deadline",
+            );
+            state.snapshot.screen_component.last_failure_kind = Some(ComponentFailureKind::Screen(
+                ScreenFailureKind::CaptureFailure,
+            ));
+            state.snapshot.previews.screen = None;
+            state.record("Screen capture first-frame deadline expired");
         }
     }
 
     fn restart_screen(&mut self, state: &mut RuntimeState) {
+        self.restart_screen_with_policy(state, false);
+    }
+
+    fn restart_screen_with_policy(&mut self, state: &mut RuntimeState, automatic: bool) {
+        let now = Instant::now();
+        if automatic
+            && state
+                .snapshot
+                .screen_component
+                .next_permitted_retry
+                .is_some_and(|retry_at| now < retry_at)
+        {
+            return;
+        }
+        state
+            .snapshot
+            .screen_component
+            .transition(ComponentLifecycle::Restarting, now);
         self.screen_capture_recovery.reset();
-        self.last_screen_capture_recovery_check = Instant::now();
+        self.last_screen_capture_recovery_check = now;
         self.screen.stop();
         let Some(monitor) = self.selected_monitor.as_ref() else {
             state.snapshot.screen_state = DeviceState::Unavailable;
+            state.snapshot.screen_component.mark_failed(
+                now,
+                "selected display is unavailable; automatic monitor reselection is disabled",
+            );
+            state.snapshot.screen_component.last_failure_kind = Some(ComponentFailureKind::Screen(
+                ScreenFailureKind::MissingSelectedMonitor,
+            ));
             return;
         };
         match self.screen.start(monitor, state.config.cursor_visible) {
             Ok(()) => {
-                state.snapshot.screen_state = DeviceState::Ready;
+                state.snapshot.screen_state = DeviceState::Initializing;
+                state
+                    .snapshot
+                    .screen_component
+                    .waiting_for_first_frame(now, now + SCREEN_FIRST_FRAME_TIMEOUT);
                 state.record("Screen capture restarted");
             }
             Err(error) => {
                 state.snapshot.screen_state = DeviceState::Failed;
+                let failures = state
+                    .snapshot
+                    .screen_component
+                    .consecutive_restart_failures
+                    .saturating_add(1);
+                state.snapshot.screen_component.mark_failed_with_kind(
+                    now,
+                    ComponentFailureKind::Screen(screen_failure_kind(&error)),
+                    error.clone(),
+                );
+                state.snapshot.screen_component.consecutive_restart_failures = failures;
+                if automatic {
+                    state.snapshot.screen_component.next_permitted_retry =
+                        Some(now + screen_restart_backoff(failures));
+                }
                 state.record(format!("Screen capture restart failed: {error}"));
             }
         }
@@ -1537,10 +1960,11 @@ impl Platform {
 
     fn check_screen_capture_recovery(&mut self, state: &mut RuntimeState, now: Instant) {
         self.last_screen_capture_recovery_check = now;
-        match self
-            .screen_capture_recovery
-            .observe(self.screen.latest_frame().as_deref())
-        {
+        match self.screen_capture_recovery.observe(
+            self.screen.latest_frame().as_deref().filter(|frame| {
+                now.saturating_duration_since(frame.received_at) <= FRAME_STALE_AFTER
+            }),
+        ) {
             ScreenCaptureRecoveryObservation::Clear => {}
             ScreenCaptureRecoveryObservation::AwaitingConfirmation => {
                 state.record(
@@ -1551,7 +1975,7 @@ impl Platform {
                 state.record(
                     "Screen capture remains black or unavailable; restarting screen capture",
                 );
-                self.restart_screen(state);
+                self.restart_screen_with_policy(state, true);
             }
         }
     }
@@ -1602,6 +2026,11 @@ impl Platform {
             && self.selected_monitor.as_ref() != Some(&monitor)
         {
             self.selected_monitor = Some(monitor);
+            self.selected_display_hdr_unsupported = self
+                .selected_monitor
+                .as_ref()
+                .and_then(|monitor| self.screen.display_uses_hdr_or_ten_bit(monitor).ok())
+                .unwrap_or(false);
             state.snapshot.selected_monitor = self.selected_monitor.clone();
             if let Some(monitor) = self.selected_monitor.as_ref() {
                 state
@@ -1614,16 +2043,24 @@ impl Platform {
         }
     }
 
-    fn publish(&self, state: &mut RuntimeState) {
+    fn publish(&self, state: &mut RuntimeState, now: Instant) {
         let Some(frame) = state.snapshot.previews.final_output.as_deref() else {
             return;
         };
-        if let Some(publisher) = &self.publisher
-            && let Err(error) = publisher.publish(frame)
-            && state.snapshot.warning.as_deref() != Some(error.as_str())
-        {
-            state.snapshot.warning = Some(error.clone());
-            state.record(format!("Frame publish failed: {error}"));
+        if let Some(publisher) = &self.publisher {
+            match publisher.publish(frame) {
+                Ok(()) => state.snapshot.publisher_component.mark_ready(now),
+                Err(error) => {
+                    state
+                        .snapshot
+                        .publisher_component
+                        .mark_failed(now, error.clone());
+                    if state.snapshot.warning.as_deref() != Some(error.as_str()) {
+                        state.snapshot.warning = Some(error.clone());
+                        state.record(format!("Frame publish failed: {error}"));
+                    }
+                }
+            }
         }
         if self
             .camera
@@ -1631,6 +2068,10 @@ impl Platform {
             .is_some_and(|camera| !camera.is_running())
         {
             state.snapshot.virtual_camera_state = DeviceState::Failed;
+            state
+                .snapshot
+                .virtual_camera_component
+                .mark_failed(now, "virtual camera stopped unexpectedly");
         }
     }
 }
@@ -1653,14 +2094,88 @@ impl Platform {
         Self
     }
     fn command(&mut self, _command: &Command, _state: &mut RuntimeState) {}
-    fn refresh_inputs(&mut self, _state: &mut RuntimeState) {}
-    fn publish(&self, _state: &mut RuntimeState) {}
+    fn refresh_inputs(&mut self, _state: &mut RuntimeState, _now: Instant) {}
+    fn publish(&self, _state: &mut RuntimeState, _now: Instant) {}
+}
+
+impl RuntimePorts for Platform {
+    fn command(&mut self, command: &Command, state: &mut RuntimeState) {
+        Platform::command(self, command, state);
+    }
+
+    fn refresh_inputs(&mut self, state: &mut RuntimeState, now: Instant) {
+        Platform::refresh_inputs(self, state, now);
+    }
+
+    fn publish(&self, state: &mut RuntimeState, now: Instant) {
+        Platform::publish(self, state, now);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_clock::VirtualRuntimeClock;
     use stageswap_core::OutputMode;
+
+    #[derive(Default)]
+    struct FakeComponentPort {
+        ready_at: Option<Instant>,
+        terminal_failure_at: Option<Instant>,
+        starts: u32,
+        restarts: u32,
+    }
+
+    #[derive(Default)]
+    struct FakeRuntimePorts {
+        webcam: FakeComponentPort,
+        screen: FakeComponentPort,
+        publisher: FakeComponentPort,
+        virtual_camera: FakeComponentPort,
+    }
+
+    impl RuntimePorts for FakeRuntimePorts {
+        fn command(&mut self, command: &Command, _state: &mut RuntimeState) {
+            match command {
+                Command::Start => {
+                    self.webcam.starts += 1;
+                    self.screen.starts += 1;
+                    self.publisher.starts += 1;
+                    self.virtual_camera.starts += 1;
+                }
+                Command::Restart(stageswap_core::RestartTarget::Webcam) => {
+                    self.webcam.restarts += 1;
+                }
+                Command::Restart(stageswap_core::RestartTarget::ScreenCapture) => {
+                    self.screen.restarts += 1;
+                }
+                _ => {}
+            }
+        }
+
+        fn refresh_inputs(&mut self, state: &mut RuntimeState, now: Instant) {
+            for (component, status) in [
+                (&self.webcam, &mut state.snapshot.webcam_component),
+                (&self.screen, &mut state.snapshot.screen_component),
+            ] {
+                if component
+                    .terminal_failure_at
+                    .is_some_and(|failure_at| now >= failure_at)
+                {
+                    status.mark_failed(now, "scripted terminal failure");
+                } else if component.ready_at.is_some_and(|ready_at| now >= ready_at) {
+                    status.mark_ready(now);
+                } else if status
+                    .first_frame_deadline
+                    .is_some_and(|deadline| now >= deadline)
+                {
+                    status.mark_failed(now, "scripted first-frame deadline");
+                }
+            }
+        }
+
+        fn publish(&self, _state: &mut RuntimeState, _now: Instant) {}
+    }
 
     fn monitor(display_name: &str, label: &str) -> MonitorDescriptor {
         MonitorDescriptor {
@@ -1668,6 +2183,54 @@ mod tests {
             label: label.into(),
             ..MonitorDescriptor::default()
         }
+    }
+
+    #[test]
+    fn runtime_engine_uses_virtual_time_for_delayed_frames_and_deadlines() {
+        let start = Instant::now();
+        let clock = VirtualRuntimeClock::new(start);
+        let mut state = RuntimeState::new_at(AppConfig::default(), start);
+        state
+            .snapshot
+            .webcam_component
+            .waiting_for_first_frame(start, start + WEBCAM_FIRST_FRAME_TIMEOUT);
+        state
+            .snapshot
+            .screen_component
+            .waiting_for_first_frame(start, start + SCREEN_FIRST_FRAME_TIMEOUT);
+        let platform = FakeRuntimePorts {
+            webcam: FakeComponentPort {
+                ready_at: Some(start + Duration::from_millis(2_900)),
+                ..FakeComponentPort::default()
+            },
+            ..FakeRuntimePorts::default()
+        };
+        let mut engine = RuntimeEngine::from_parts(state, platform, start);
+        assert!(engine.command(Command::Start));
+        assert_eq!(engine.platform.webcam.starts, 1);
+        assert_eq!(engine.platform.screen.starts, 1);
+        assert_eq!(engine.platform.publisher.starts, 1);
+        assert_eq!(engine.platform.virtual_camera.starts, 1);
+        assert!(engine.command(Command::Restart(stageswap_core::RestartTarget::Webcam)));
+        assert_eq!(engine.platform.webcam.restarts, 1);
+
+        clock.advance(Duration::from_secs(2));
+        assert!(engine.step(clock.now()));
+        assert_eq!(
+            engine.state.snapshot.screen_component.lifecycle,
+            ComponentLifecycle::Failed
+        );
+        assert_eq!(
+            engine.state.snapshot.webcam_component.lifecycle,
+            ComponentLifecycle::WaitingForFirstFrame
+        );
+
+        clock.advance(Duration::from_millis(900));
+        assert!(engine.step(clock.now()));
+        assert_eq!(
+            engine.state.snapshot.webcam_component.lifecycle,
+            ComponentLifecycle::Ready
+        );
     }
 
     #[test]
@@ -2057,6 +2620,14 @@ mod tests {
     }
 
     #[test]
+    fn screen_restart_backoff_is_bounded_and_resets_externally_on_success() {
+        assert_eq!(screen_restart_backoff(1), Duration::from_secs(5));
+        assert_eq!(screen_restart_backoff(2), Duration::from_secs(10));
+        assert_eq!(screen_restart_backoff(3), Duration::from_secs(20));
+        assert_eq!(screen_restart_backoff(10), Duration::from_secs(60));
+    }
+
+    #[test]
     fn reference_detection_is_gray_but_preview_stays_in_color() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("reference.png");
@@ -2154,10 +2725,12 @@ mod tests {
             start_automatically: false,
             ..AppConfig::default()
         });
-        runtime.send(Command::Start).unwrap();
-        runtime
-            .send(Command::SetMode(OutputMode::ForceScreen))
-            .unwrap();
+        assert!(runtime.send(Command::Start).is_accepted());
+        assert!(
+            runtime
+                .send(Command::SetMode(OutputMode::ForceScreen))
+                .is_accepted()
+        );
         let deadline = Instant::now() + Duration::from_secs(2);
         let snapshot = loop {
             let snapshot = runtime.snapshot();
@@ -2187,7 +2760,7 @@ mod tests {
         });
         assert!(!runtime.snapshot().disco_enabled);
 
-        runtime.send(Command::ToggleDisco).unwrap();
+        assert!(runtime.send(Command::ToggleDisco).is_accepted());
         let deadline = Instant::now() + Duration::from_secs(1);
         let enabled = loop {
             let snapshot = runtime.snapshot();
@@ -2207,7 +2780,7 @@ mod tests {
             stageswap_core::off_frame_pixels().as_ref()
         );
 
-        runtime.send(Command::ToggleDisco).unwrap();
+        assert!(runtime.send(Command::ToggleDisco).is_accepted());
         loop {
             if !runtime.snapshot().disco_enabled {
                 break;
@@ -2235,7 +2808,7 @@ mod tests {
             stageswap_core::off_frame_pixels().as_ref()
         );
 
-        runtime.send(Command::Start).unwrap();
+        assert!(runtime.send(Command::Start).is_accepted());
         let deadline = Instant::now() + Duration::from_secs(2);
         let running_sequence = loop {
             let snapshot = runtime.snapshot();
@@ -2249,7 +2822,7 @@ mod tests {
             thread::yield_now();
         };
 
-        runtime.send(Command::Stop).unwrap();
+        assert!(runtime.send(Command::Stop).is_accepted());
         let stopped = loop {
             let snapshot = runtime.snapshot();
             if snapshot.run_state == RunState::Stopped
@@ -2322,7 +2895,7 @@ mod tests {
             } else {
                 OutputMode::ForceScreen
             };
-            runtime.send(Command::SetMode(mode)).unwrap();
+            assert!(runtime.send(Command::SetMode(mode)).is_accepted());
             thread::sleep(Duration::from_millis(2));
         }
         thread::sleep(Duration::from_millis(20));
@@ -2364,7 +2937,7 @@ mod tests {
             (RestartTarget::VirtualCamera, "Virtual camera restarted"),
             (RestartTarget::All, "Restart requested: All"),
         ] {
-            runtime.send(Command::Restart(target)).unwrap();
+            assert!(runtime.send(Command::Restart(target)).is_accepted());
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 let snapshot = runtime.snapshot();

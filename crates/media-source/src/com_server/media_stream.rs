@@ -14,11 +14,13 @@ use windows::Win32::Media::MediaFoundation::{
     MF_E_INVALID_STATE_TRANSITION, MF_E_INVALIDREQUEST, MF_E_NOTACCEPTING, MF_E_SHUTDOWN,
     MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE,
     MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_STREAM_STATE,
-    MF_STREAM_STATE_PAUSED, MF_STREAM_STATE_RUNNING, MF_STREAM_STATE_STOPPED, MFCreateAttributes,
-    MFCreateEventQueue, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-    MFCreateStreamDescriptor, MFFrameSourceTypes_Color, MFGetSystemTime, MFMediaType_Video,
+    MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE,
+    MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX, MF_STREAM_STATE, MF_STREAM_STATE_PAUSED,
+    MF_STREAM_STATE_RUNNING, MF_STREAM_STATE_STOPPED, MFCreateAttributes, MFCreateEventQueue,
+    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFCreateStreamDescriptor,
+    MFFrameSourceTypes_Color, MFGetSystemTime, MFMediaType_Video, MFNominalRange_16_235,
     MFVideoFormat_NV12, MFVideoFormat_RGB32, MFVideoInterlace_Progressive,
+    MFVideoTransferMatrix_BT601,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows_core::{Error, GUID, HRESULT, IUnknown, Interface, Ref, implement};
@@ -177,6 +179,10 @@ fn create_video_type(
         media_type.SetUINT32(&MF_MT_FIXED_SIZE_SAMPLES, 1)?;
         media_type.SetUINT32(&MF_MT_SAMPLE_SIZE, sample_bytes)?;
         media_type.SetUINT32(&MF_MT_AVG_BITRATE, WIDTH * HEIGHT * bits_per_pixel * 30)?;
+        if *subtype == MFVideoFormat_NV12 {
+            media_type.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)?;
+            media_type.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601.0 as u32)?;
+        }
     }
     Ok(media_type)
 }
@@ -227,6 +233,19 @@ struct StreamState {
     next_time_100ns: i64,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct StreamCheckpoint {
+    state: MF_STREAM_STATE,
+    next_time_100ns: i64,
+}
+
+#[derive(Default)]
+struct Nv12Cache {
+    converted: Option<(u64, GUID, Arc<[u8]>)>,
+    #[cfg(test)]
+    conversions: u64,
+}
+
 #[implement(IMFMediaStream2)]
 pub(super) struct MediaStream {
     events: IMFMediaEventQueue,
@@ -235,6 +254,7 @@ pub(super) struct MediaStream {
     frames: Arc<Mutex<SharedFrameCache>>,
     off_bgra: Arc<[u8]>,
     off_nv12: Arc<[u8]>,
+    nv12_cache: Mutex<Nv12Cache>,
     buffer_pool: MediaBufferPool,
     _pipe_reader: PipeReader,
     state: Mutex<StreamState>,
@@ -285,6 +305,7 @@ impl MediaStream {
             frames,
             off_bgra,
             off_nv12: off_nv12.into(),
+            nv12_cache: Mutex::new(Nv12Cache::default()),
             buffer_pool: MediaBufferPool::new(),
             _pipe_reader: pipe_reader,
             state: Mutex::new(StreamState {
@@ -314,10 +335,36 @@ impl MediaStream {
         media_type: &windows::Win32::Media::MediaFoundation::IMFMediaType,
     ) -> windows_core::Result<()> {
         let handler = unsafe { self.descriptor.GetMediaTypeHandler()? };
-        unsafe {
+        let result = unsafe {
             handler.IsMediaTypeSupported(media_type, None)?;
             handler.SetCurrentMediaType(media_type)
+        };
+        if result.is_ok() {
+            self.nv12_cache
+                .lock()
+                .expect("NV12 cache lock poisoned")
+                .converted = None;
         }
+        result
+    }
+
+    fn nv12_frame(&self, sequence: u64, bgra: &[u8]) -> Arc<[u8]> {
+        let mut cache = self.nv12_cache.lock().expect("NV12 cache lock poisoned");
+        if let Some((cached_sequence, cached_subtype, bytes)) = &cache.converted
+            && *cached_sequence == sequence
+            && *cached_subtype == MFVideoFormat_NV12
+        {
+            return Arc::clone(bytes);
+        }
+        let mut bytes = vec![0; NV12_FRAME_BYTES as usize];
+        bgra_to_nv12(&mut bytes, bgra);
+        let bytes: Arc<[u8]> = bytes.into();
+        cache.converted = Some((sequence, MFVideoFormat_NV12, Arc::clone(&bytes)));
+        #[cfg(test)]
+        {
+            cache.conversions = cache.conversions.saturating_add(1);
+        }
+        bytes
     }
     pub(super) fn start(&self) -> windows_core::Result<()> {
         let mut state = self.state.lock().expect("stream state lock poisoned");
@@ -336,6 +383,25 @@ impl MediaStream {
                 S_OK,
                 core::ptr::null(),
             )
+        }
+    }
+
+    pub(super) fn checkpoint(&self) -> windows_core::Result<StreamCheckpoint> {
+        let state = self.state.lock().expect("stream state lock poisoned");
+        if state.shutdown {
+            return Err(Error::from_hresult(MF_E_SHUTDOWN));
+        }
+        Ok(StreamCheckpoint {
+            state: state.state,
+            next_time_100ns: state.next_time_100ns,
+        })
+    }
+
+    pub(super) fn restore(&self, checkpoint: StreamCheckpoint) {
+        let mut state = self.state.lock().expect("stream state lock poisoned");
+        if !state.shutdown {
+            state.state = checkpoint.state;
+            state.next_time_100ns = checkpoint.next_time_100ns;
         }
     }
 
@@ -404,6 +470,19 @@ impl MediaStream {
         } else {
             return Err(Error::from_hresult(MF_E_INVALIDREQUEST));
         };
+        let converted_nv12 = if format == BufferFormat::Nv12 {
+            live_frame
+                .as_ref()
+                .map(|frame| self.nv12_frame(frame.sequence, frame.pixels()))
+        } else {
+            None
+        };
+        if live_frame.is_none() {
+            self.nv12_cache
+                .lock()
+                .expect("NV12 cache lock poisoned")
+                .converted = None;
+        }
         let acquired = self.buffer_pool.acquire(format, frame_bytes)?;
         let buffer = &acquired.buffer;
         let mut destination = core::ptr::null_mut();
@@ -419,8 +498,8 @@ impl MediaStream {
         unsafe {
             let output = core::slice::from_raw_parts_mut(destination, frame_bytes as usize);
             if format == BufferFormat::Nv12 {
-                if let Some(frame) = live_frame {
-                    bgra_to_nv12(output, frame.pixels());
+                if let Some(converted) = converted_nv12 {
+                    output.copy_from_slice(&converted);
                 } else {
                     output.copy_from_slice(&self.off_nv12);
                 }
@@ -612,6 +691,14 @@ mod tests {
 
         let nv12 = unsafe { handler.GetMediaTypeByIndex(1)? };
         assert_eq!(unsafe { nv12.GetGUID(&MF_MT_SUBTYPE)? }, MFVideoFormat_NV12);
+        assert_eq!(
+            unsafe { nv12.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE)? },
+            MFNominalRange_16_235.0 as u32
+        );
+        assert_eq!(
+            unsafe { nv12.GetUINT32(&MF_MT_YUV_MATRIX)? },
+            MFVideoTransferMatrix_BT601.0 as u32
+        );
         stream.set_media_type(&nv12)?;
         let second = stream.make_output_sample(None)?;
         assert_eq!(
@@ -696,6 +783,54 @@ mod tests {
         assert_eq!(super::super::DllCanUnloadNow(), S_FALSE);
         drop(sample);
         assert_eq!(super::super::DllCanUnloadNow(), S_OK);
+        Ok(())
+    }
+
+    #[test]
+    fn limited_bt601_conversion_matches_black_white_and_primary_bars() {
+        assert_eq!(limited_y(0, 0, 0), 16);
+        assert_eq!(limited_y(255, 255, 255), 235);
+        assert_eq!(limited_y(255, 0, 0), 82);
+        assert_eq!(limited_y(0, 255, 0), 144);
+        assert_eq!(limited_y(0, 0, 255), 41);
+        assert_eq!(
+            (limited_u(128, 128, 128), limited_v(128, 128, 128)),
+            (128, 128)
+        );
+    }
+
+    #[test]
+    fn nv12_cache_converts_once_per_source_sequence() -> windows_core::Result<()> {
+        let _test_lock = super::super::TEST_LOCK
+            .lock()
+            .expect("media-source test lock poisoned");
+        // SAFETY: initializes Media Foundation for this test process.
+        unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
+        let _foundation = MediaFoundation;
+        let stream = MediaStream::new(r"\\.\pipe\StageSwap.Nonexistent.CacheTest".into())?;
+        let bgra = off_frame_pixels();
+
+        let first = stream.nv12_frame(7, &bgra);
+        let second = stream.nv12_frame(7, &bgra);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            stream
+                .nv12_cache
+                .lock()
+                .expect("NV12 cache lock poisoned")
+                .conversions,
+            1
+        );
+        let third = stream.nv12_frame(8, &bgra);
+        assert!(!Arc::ptr_eq(&second, &third));
+        assert_eq!(
+            stream
+                .nv12_cache
+                .lock()
+                .expect("NV12 cache lock poisoned")
+                .conversions,
+            2
+        );
         Ok(())
     }
 }

@@ -6,6 +6,13 @@ use stageswap_core::{
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use windows::Graphics::Capture::GraphicsCaptureSession;
+use windows::Win32::Devices::Display::{
+    DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+    DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO,
+    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DisplayConfigGetDeviceInfo,
+    GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
+};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame as CaptureFrame;
@@ -19,27 +26,116 @@ use windows_capture::settings::{
 const SCREEN_FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 30);
 const SCREEN_FRAME_EARLY_TOLERANCE: Duration = Duration::from_millis(1);
 
+fn display_uses_hdr_or_ten_bit(display_name: &str) -> Result<bool, String> {
+    let mut path_count = 0;
+    let mut mode_count = 0;
+    // SAFETY: both count pointers are writable.
+    unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count) }
+        .ok()
+        .map_err(|error| format!("could not query active display paths: {error}"))?;
+    let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+    let mut modes = vec![Default::default(); mode_count as usize];
+    // SAFETY: arrays have the capacities supplied in their writable count values.
+    unsafe {
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            None,
+        )
+    }
+    .ok()
+    .map_err(|error| format!("could not read active display paths: {error}"))?;
+    paths.truncate(path_count as usize);
+    for path in paths {
+        let mut source_name = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..DISPLAYCONFIG_SOURCE_DEVICE_NAME::default()
+        };
+        // SAFETY: the packet header identifies the enclosing writable structure.
+        let status = unsafe { DisplayConfigGetDeviceInfo(&raw mut source_name.header) };
+        if status != 0 {
+            continue;
+        }
+        let length = source_name
+            .viewGdiDeviceName
+            .iter()
+            .position(|word| *word == 0)
+            .unwrap_or(source_name.viewGdiDeviceName.len());
+        if !String::from_utf16_lossy(&source_name.viewGdiDeviceName[..length])
+            .eq_ignore_ascii_case(display_name)
+        {
+            continue;
+        }
+        let mut color = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+                size: size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO::default()
+        };
+        // SAFETY: the packet header identifies the enclosing writable structure.
+        let status = unsafe { DisplayConfigGetDeviceInfo(&raw mut color.header) };
+        if status != 0 {
+            return Err(format!(
+                "could not read advanced color information for {display_name}: error {status}"
+            ));
+        }
+        // Windows defines bit 1 as advancedColorEnabled. Ten-bit SDR is also outside
+        // StageSwap's current 8-bit matching contract.
+        let flags = unsafe { color.Anonymous.value };
+        return Ok(flags & 0b10 != 0 || color.bitsPerColorChannel > 8);
+    }
+    Err(format!(
+        "could not resolve selected display {display_name} in the active display topology"
+    ))
+}
+
 #[derive(Default)]
 struct Shared {
     latest: Mutex<Option<Arc<Frame>>>,
+    failure: Mutex<Option<String>>,
+    generation: AtomicU64,
     sequence: AtomicU64,
     dropped_frames: AtomicU64,
 }
 
+impl Shared {
+    fn is_current(&self, expected_generation: u64) -> bool {
+        self.generation.load(Ordering::Acquire) == expected_generation
+    }
+}
+
+struct CaptureFlags {
+    shared: Arc<Shared>,
+    expected_generation: u64,
+}
+
 struct CaptureHandler {
     shared: Arc<Shared>,
+    expected_generation: u64,
     scratch: Vec<u8>,
     pool: FrameBufferPool,
     pacer: Option<FramePacer>,
 }
 
 impl GraphicsCaptureApiHandler for CaptureHandler {
-    type Flags = Arc<Shared>;
+    type Flags = CaptureFlags;
     type Error = String;
 
     fn new(context: Context<Self::Flags>) -> Result<Self, Self::Error> {
         Ok(Self {
-            shared: context.flags,
+            shared: context.flags.shared,
+            expected_generation: context.flags.expected_generation,
             scratch: Vec::new(),
             pool: FrameBufferPool::new(
                 (PIPELINE_SIZE.width * PIPELINE_SIZE.height * 4) as usize,
@@ -54,6 +150,9 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         frame: &mut CaptureFrame,
         _control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
+        if !self.shared.is_current(self.expected_generation) {
+            return Ok(());
+        }
         let now = Instant::now();
         let pacer = self
             .pacer
@@ -93,17 +192,27 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             now,
         )
         .map_err(|error| format!("invalid screen frame: {error:?}"))?;
-        *self
-            .shared
-            .latest
-            .lock()
-            .map_err(|_| "screen frame state is poisoned")? = Some(Arc::new(frame));
+        if self.shared.is_current(self.expected_generation) {
+            *self
+                .shared
+                .latest
+                .lock()
+                .map_err(|_| "screen frame state is poisoned")? = Some(Arc::new(frame));
+            if let Ok(mut failure) = self.shared.failure.lock() {
+                *failure = None;
+            }
+        }
         Ok(())
     }
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
-        if let Ok(mut latest) = self.shared.latest.lock() {
-            *latest = None;
+        if self.shared.is_current(self.expected_generation) {
+            if let Ok(mut latest) = self.shared.latest.lock() {
+                *latest = None;
+            }
+            if let Ok(mut failure) = self.shared.failure.lock() {
+                *failure = Some("selected display closed the screen-capture session".into());
+            }
         }
         Ok(())
     }
@@ -127,6 +236,25 @@ impl WindowsGraphicsScreenInput {
     pub fn dropped_frame_count(&self) -> u64 {
         self.shared.dropped_frames.load(Ordering::Relaxed)
     }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.shared
+            .failure
+            .lock()
+            .ok()
+            .and_then(|failure| failure.clone())
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.shared.generation.load(Ordering::Acquire)
+    }
+
+    pub fn display_uses_hdr_or_ten_bit(
+        &self,
+        descriptor: &MonitorDescriptor,
+    ) -> Result<bool, String> {
+        display_uses_hdr_or_ten_bit(&descriptor.display_name)
+    }
 }
 
 impl ScreenInput for WindowsGraphicsScreenInput {
@@ -144,6 +272,12 @@ impl ScreenInput for WindowsGraphicsScreenInput {
         cursor_visible: bool,
     ) -> Result<(), String> {
         self.stop();
+        if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
+            return Err(
+                "Windows Graphics Capture is unavailable in this Windows session or configuration"
+                    .into(),
+            );
+        }
         let monitor = Monitor::enumerate()
             .map_err(|error| format!("could not enumerate monitors: {error}"))?
             .into_iter()
@@ -158,6 +292,10 @@ impl ScreenInput for WindowsGraphicsScreenInput {
         } else {
             CursorCaptureSettings::WithoutCursor
         };
+        let expected_generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Ok(mut failure) = self.shared.failure.lock() {
+            *failure = None;
+        }
         let settings = Settings::new(
             monitor,
             cursor,
@@ -168,7 +306,10 @@ impl ScreenInput for WindowsGraphicsScreenInput {
             MinimumUpdateIntervalSettings::Default,
             DirtyRegionSettings::Default,
             ColorFormat::Bgra8,
-            Arc::clone(&self.shared),
+            CaptureFlags {
+                shared: Arc::clone(&self.shared),
+                expected_generation,
+            },
         );
         self.control = Some(
             CaptureHandler::start_free_threaded(settings)
@@ -178,6 +319,7 @@ impl ScreenInput for WindowsGraphicsScreenInput {
     }
 
     fn stop(&mut self) {
+        self.shared.generation.fetch_add(1, Ordering::AcqRel);
         if let Some(control) = self.control.take() {
             let _ = control.stop();
         }
@@ -222,4 +364,19 @@ fn describe_monitor(monitor: Monitor) -> Result<MonitorDescriptor, String> {
         width: (info.rcMonitor.right - info.rcMonitor.left) as u32,
         height: (info.rcMonitor.bottom - info.rcMonitor.top) as u32,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacement_generation_rejects_old_callbacks() {
+        let shared = Shared::default();
+        shared.generation.store(7, Ordering::Release);
+        assert!(shared.is_current(7));
+        shared.generation.fetch_add(1, Ordering::AcqRel);
+        assert!(!shared.is_current(7));
+        assert!(shared.is_current(8));
+    }
 }

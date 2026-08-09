@@ -14,12 +14,13 @@ use windows::Win32::Media::MediaFoundation::{
     IMFPresentationDescriptor, MENewStream, MESourceStarted, MESourceStopped, MEUpdatedStream,
     MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
-    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_E_INVALID_STATE_TRANSITION,
-    MF_E_INVALIDSTREAMNUMBER, MF_E_SHUTDOWN, MF_E_UNSUPPORTED_SERVICE,
-    MF_E_UNSUPPORTED_TIME_FORMAT, MFCreateAttributes, MFCreateEventQueue,
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_E_INVALID_POSITION,
+    MF_E_INVALID_STATE_TRANSITION, MF_E_INVALIDSTREAMNUMBER, MF_E_SHUTDOWN,
+    MF_E_UNSUPPORTED_SERVICE, MF_E_UNSUPPORTED_TIME_FORMAT, MFCreateAttributes, MFCreateEventQueue,
     MFCreatePresentationDescriptor, MFMEDIASOURCE_IS_LIVE,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+use windows::Win32::System::Variant::{VT_EMPTY, VT_I8};
 use windows_core::{ComObject, Error, GUID, HRESULT, IUnknown, Ref, implement, w};
 
 const PIPE_ATTRIBUTE: GUID = GUID::from_u128(0x75c753a0_587b_4064_bb77_f0171fcd4ad7);
@@ -119,6 +120,29 @@ fn read_string_attribute(
     Ok(String::from_utf16_lossy(&buffer[..length as usize]))
 }
 
+fn validate_start_position(start_position: *const PROPVARIANT) -> windows_core::Result<()> {
+    if start_position.is_null() {
+        return Err(Error::from_hresult(E_INVALIDARG));
+    }
+    // SAFETY: COM guarantees a readable PROPVARIANT for the duration of Start.
+    let value = unsafe { &*start_position };
+    // SAFETY: reading the discriminator is valid for every PROPVARIANT alternative.
+    let inner = unsafe { &value.Anonymous.Anonymous };
+    if inner.vt == VT_EMPTY {
+        return Ok(());
+    }
+    if inner.vt == VT_I8 {
+        // SAFETY: VT_I8 selects the hVal union member.
+        let position = unsafe { inner.Anonymous.hVal };
+        return if position >= 0 {
+            Ok(())
+        } else {
+            Err(Error::from_hresult(MF_E_INVALID_POSITION))
+        };
+    }
+    Err(Error::from_hresult(MF_E_INVALID_POSITION))
+}
+
 impl Drop for MediaSource {
     fn drop(&mut self) {
         OBJECTS.fetch_sub(1, Ordering::Release);
@@ -183,9 +207,7 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
         start_position: *const PROPVARIANT,
     ) -> windows_core::Result<()> {
         let presentation = presentation.ok()?;
-        if start_position.is_null() {
-            return Err(Error::from_hresult(E_INVALIDARG));
-        }
+        validate_start_position(start_position)?;
         if !time_format.is_null() {
             // SAFETY: non-null time_format points to a GUID for this COM call.
             if unsafe { *time_format } != GUID::zeroed() {
@@ -206,6 +228,9 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
         };
         let mut selected = windows_core::BOOL::default();
         let mut stream_descriptor = None;
+        if unsafe { presentation.GetStreamDescriptorCount()? } != 1 {
+            return Err(Error::from_hresult(MF_E_INVALIDSTREAMNUMBER));
+        }
         unsafe {
             presentation.GetStreamDescriptorByIndex(0, &mut selected, &mut stream_descriptor)?;
         }
@@ -214,12 +239,16 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
         }
         let stream_descriptor =
             stream_descriptor.ok_or_else(|| Error::from_hresult(MF_E_INVALIDSTREAMNUMBER))?;
+        if unsafe { stream_descriptor.GetStreamIdentifier()? } != 0 {
+            return Err(Error::from_hresult(MF_E_INVALIDSTREAMNUMBER));
+        }
         let selected_type = unsafe {
             stream_descriptor
                 .GetMediaTypeHandler()?
                 .GetCurrentMediaType()?
         };
         self.stream.set_media_type(&selected_type)?;
+        let stream_checkpoint = self.stream.checkpoint()?;
         self.stream.start()?;
         // SAFETY: interfaces and GUID pointers remain valid for each queue call.
         let queued = unsafe {
@@ -235,12 +264,12 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
                         MESourceStarted.0 as u32,
                         &GUID::zeroed(),
                         S_OK,
-                        core::ptr::null(),
+                        start_position,
                     )
                 })
         };
         if let Err(error) = queued {
-            let _ = self.stream.stop(false);
+            self.stream.restore(stream_checkpoint);
             return Err(error);
         }
         let mut state = self.state.lock().expect("source state lock poisoned");
@@ -405,6 +434,23 @@ mod tests {
             let start = PROPVARIANT::default();
             source.Start(&descriptor, core::ptr::null(), &start)?;
             source.Stop()?;
+            let live_position = PROPVARIANT::from(0_i64);
+            source.Start(&descriptor, core::ptr::null(), &live_position)?;
+            source.Stop()?;
+            let invalid_position = PROPVARIANT::from(-1_i64);
+            assert_eq!(
+                validate_start_position(&invalid_position)
+                    .expect_err("negative live position must be rejected")
+                    .code(),
+                MF_E_INVALID_POSITION
+            );
+            let unsupported_type = PROPVARIANT::from(1_u32);
+            assert_eq!(
+                validate_start_position(&unsupported_type)
+                    .expect_err("unsupported start variant must be rejected")
+                    .code(),
+                MF_E_INVALID_POSITION
+            );
             source.Shutdown()?;
         }
         Ok(())

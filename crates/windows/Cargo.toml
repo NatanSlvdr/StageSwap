@@ -12,6 +12,8 @@ stageswap-i18n = { path = "../i18n" }
 [target.'cfg(windows)'.dependencies]
 windows-core.workspace = true
 windows = { workspace = true, features = [
+    "Graphics_Capture",
+    "Win32_Devices_Display",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Globalization",
