@@ -447,6 +447,7 @@ struct CaptureState {
     reader: Mutex<Option<IMFSourceReader>>,
     latest: Mutex<Option<Arc<Frame>>>,
     format: Mutex<Size>,
+    native_display_aspect_ratio: Mutex<Option<f64>>,
     stride: AtomicI32,
     scratch: Mutex<Vec<u8>>,
     pool: Mutex<FrameBufferPool>,
@@ -464,6 +465,7 @@ impl Default for CaptureState {
             reader: Mutex::new(None),
             latest: Mutex::new(None),
             format: Mutex::new(Size::default()),
+            native_display_aspect_ratio: Mutex::new(None),
             stride: AtomicI32::new(0),
             scratch: Mutex::new(Vec::new()),
             pool: Mutex::new(FrameBufferPool::new(
@@ -543,6 +545,11 @@ impl CaptureState {
             .format
             .lock()
             .map_err(|_| "webcam format state is poisoned")? = format.size;
+        *self
+            .native_display_aspect_ratio
+            .lock()
+            .map_err(|_| "webcam aspect-ratio state is poisoned")? =
+            current_native_display_aspect_ratio(&reader);
         self.stride.store(format.stride, Ordering::Release);
         Ok(format)
     }
@@ -716,7 +723,6 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
 pub struct MediaFoundationVideoInput {
     state: Arc<CaptureState>,
     callback: Option<IMFSourceReaderCallback>,
-    native_display_aspect_ratio: Option<f64>,
     selected_native_format: Option<String>,
     selected_output_format: Option<String>,
     initialization_error: Option<String>,
@@ -749,7 +755,6 @@ impl Default for MediaFoundationVideoInput {
         Self {
             state: Arc::new(CaptureState::default()),
             callback: None,
-            native_display_aspect_ratio: None,
             selected_native_format: None,
             selected_output_format: None,
             initialization_error,
@@ -827,7 +832,12 @@ impl VideoInput for MediaFoundationVideoInput {
         let (format, native_description, output_description) = negotiate_rgb32_output(&reader)?;
         self.selected_native_format = Some(native_description);
         self.selected_output_format = Some(output_description);
-        self.native_display_aspect_ratio = current_native_display_aspect_ratio(&reader);
+        *self
+            .state
+            .native_display_aspect_ratio
+            .lock()
+            .map_err(|_| "webcam aspect-ratio state is poisoned")? =
+            current_native_display_aspect_ratio(&reader);
         *self
             .state
             .format
@@ -856,7 +866,9 @@ impl VideoInput for MediaFoundationVideoInput {
             let _ = unsafe { reader.Flush(STREAM) };
         }
         self.callback = None;
-        self.native_display_aspect_ratio = None;
+        if let Ok(mut aspect_ratio) = self.state.native_display_aspect_ratio.lock() {
+            *aspect_ratio = None;
+        }
         if let Ok(mut latest) = self.state.latest.lock() {
             *latest = None;
         }
@@ -873,7 +885,11 @@ impl VideoInput for MediaFoundationVideoInput {
 
 impl MediaFoundationVideoInput {
     pub fn native_display_aspect_ratio(&self) -> Option<f64> {
-        self.native_display_aspect_ratio
+        self.state
+            .native_display_aspect_ratio
+            .lock()
+            .ok()
+            .and_then(|ratio| *ratio)
     }
 
     pub fn last_error(&self) -> Option<String> {

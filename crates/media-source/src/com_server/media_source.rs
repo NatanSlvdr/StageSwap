@@ -222,7 +222,7 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
                 return Err(Error::from_hresult(MF_E_UNSUPPORTED_TIME_FORMAT));
             }
         }
-        let (event_type, stream_interface) = {
+        let (event_type, stream_interface, previous_lifecycle) = {
             let state = self.state.lock().expect("source state lock poisoned");
             if state.lifecycle == Lifecycle::Shutdown {
                 return Err(Error::from_hresult(MF_E_SHUTDOWN));
@@ -240,7 +240,11 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
             } else {
                 MENewStream
             };
-            (event_type, self.stream.to_interface::<IMFMediaStream2>())
+            (
+                event_type,
+                self.stream.to_interface::<IMFMediaStream2>(),
+                state.lifecycle,
+            )
         };
         let mut selected = windows_core::BOOL::default();
         let mut stream_descriptor = None;
@@ -265,7 +269,17 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
         };
         self.stream.set_media_type(&selected_type)?;
         let stream_checkpoint = self.stream.checkpoint()?;
-        self.stream.start()?;
+        let actual_start_time = self.stream.start()?;
+        // A source starting from Stopped must report an explicit VT_I8 time even when the caller
+        // supplied VT_EMPTY. A running source resumed with VT_EMPTY keeps that empty event value.
+        let actual_start_position = PROPVARIANT::from(actual_start_time);
+        let started_event_position = if previous_lifecycle == Lifecycle::Stopped
+            && start_position_kind == StartPosition::Current
+        {
+            &actual_start_position
+        } else {
+            start_position
+        };
         // SAFETY: interfaces and GUID pointers remain valid for each queue call.
         let queued = unsafe {
             self.events
@@ -280,9 +294,10 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
                         MESourceStarted.0 as u32,
                         &GUID::zeroed(),
                         S_OK,
-                        start_position,
+                        started_event_position,
                     )
                 })
+                .and_then(|()| self.stream.queue_started(started_event_position))
         };
         if let Err(error) = queued {
             self.stream.restore(stream_checkpoint);
@@ -449,12 +464,26 @@ mod tests {
             let descriptor = source.CreatePresentationDescriptor()?;
             let start = PROPVARIANT::default();
             source.Start(&descriptor, core::ptr::null(), &start)?;
+            let new_stream = source.GetEvent(Default::default())?;
+            assert_eq!(new_stream.GetType()?, MENewStream.0 as u32);
+            let source_started = source.GetEvent(Default::default())?;
+            assert_eq!(source_started.GetType()?, MESourceStarted.0 as u32);
+            let source_started_value = source_started.GetValue()?;
+            let source_started_inner = &source_started_value.Anonymous.Anonymous;
+            assert_eq!(source_started_inner.vt, VT_I8);
+            assert!(source_started_inner.Anonymous.hVal >= 0);
             let repeated_absolute_position = PROPVARIANT::from(0_i64);
             let repeated_start_error = source
                 .Start(&descriptor, core::ptr::null(), &repeated_absolute_position)
                 .expect_err("a running live source must reject seek-like starts");
             assert_eq!(repeated_start_error.code(), MF_E_INVALIDREQUEST);
             source.Start(&descriptor, core::ptr::null(), &start)?;
+            let updated_stream = source.GetEvent(Default::default())?;
+            assert_eq!(updated_stream.GetType()?, MEUpdatedStream.0 as u32);
+            let source_resumed = source.GetEvent(Default::default())?;
+            assert_eq!(source_resumed.GetType()?, MESourceStarted.0 as u32);
+            let source_resumed_value = source_resumed.GetValue()?;
+            assert_eq!(source_resumed_value.Anonymous.Anonymous.vt, VT_EMPTY);
             source.Stop()?;
             let live_position = PROPVARIANT::from(0_i64);
             source.Start(&descriptor, core::ptr::null(), &live_position)?;

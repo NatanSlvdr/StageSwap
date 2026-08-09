@@ -366,22 +366,29 @@ impl MediaStream {
         }
         bytes
     }
-    pub(super) fn start(&self) -> windows_core::Result<()> {
+    pub(super) fn start(&self) -> windows_core::Result<i64> {
         let mut state = self.state.lock().expect("stream state lock poisoned");
         if state.shutdown {
             return Err(Error::from_hresult(MF_E_SHUTDOWN));
         }
         state.state = MF_STREAM_STATE_RUNNING;
         // SAFETY: MFGetSystemTime returns the current monotonic MF clock value.
-        state.next_time_100ns = unsafe { MFGetSystemTime() };
-        drop(state);
+        let start_time_100ns = unsafe { MFGetSystemTime() };
+        state.next_time_100ns = start_time_100ns;
+        Ok(start_time_100ns)
+    }
+
+    pub(super) fn queue_started(
+        &self,
+        start_position: *const PROPVARIANT,
+    ) -> windows_core::Result<()> {
         // SAFETY: queue and GUID pointer remain valid for the call.
         unsafe {
             self.events.QueueEventParamVar(
                 MEStreamStarted.0 as u32,
                 &GUID::zeroed(),
                 S_OK,
-                core::ptr::null(),
+                start_position,
             )
         }
     }
