@@ -1,5 +1,6 @@
 use crate::Size;
 use image::imageops::FilterType;
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -42,6 +43,44 @@ impl FrameBufferPool {
         write: impl FnOnce(&mut [u8]) -> Result<(), E>,
     ) -> Result<Option<Arc<[u8]>>, E> {
         assert!(frame_bytes > 0, "pooled frames must not be empty");
+        let Some(index) = self.acquire_slot(frame_bytes) else {
+            return Ok(None);
+        };
+        let slot = &mut self.slots[index];
+        let destination = Arc::get_mut(slot).expect("available pool slot is uniquely owned");
+        write(destination)?;
+        Ok(Some(Arc::clone(slot)))
+    }
+
+    /// Writes into a reusable slot when possible and falls back to a temporary
+    /// allocation when every bounded slot is retained by a consumer. This keeps
+    /// the normal path allocation-free without turning pool pressure into a
+    /// dropped frame.
+    pub fn write_with_fallback<E>(
+        &mut self,
+        write: impl FnOnce(&mut [u8]) -> Result<(), E>,
+    ) -> Result<Arc<[u8]>, E> {
+        self.write_with_fallback_sized(self.frame_bytes, write)
+    }
+
+    pub fn write_with_fallback_sized<E>(
+        &mut self,
+        frame_bytes: usize,
+        write: impl FnOnce(&mut [u8]) -> Result<(), E>,
+    ) -> Result<Arc<[u8]>, E> {
+        assert!(frame_bytes > 0, "pooled frames must not be empty");
+        if let Some(index) = self.acquire_slot(frame_bytes) {
+            let slot = &mut self.slots[index];
+            let destination = Arc::get_mut(slot).expect("available pool slot is uniquely owned");
+            write(destination)?;
+            return Ok(Arc::clone(slot));
+        }
+        let mut pixels = vec![0; frame_bytes];
+        write(&mut pixels)?;
+        Ok(pixels.into())
+    }
+
+    fn acquire_slot(&mut self, frame_bytes: usize) -> Option<usize> {
         let available = self
             .slots
             .iter()
@@ -63,13 +102,10 @@ impl FrameBufferPool {
             }
             None => {
                 self.exhaustion_count = self.exhaustion_count.saturating_add(1);
-                return Ok(None);
+                return None;
             }
         };
-        let slot = &mut self.slots[index];
-        let destination = Arc::get_mut(slot).expect("available pool slot is uniquely owned");
-        write(destination)?;
-        Ok(Some(Arc::clone(slot)))
+        Some(index)
     }
 
     pub fn allocated_slots(&self) -> usize {
@@ -309,13 +345,30 @@ impl FittedCache {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct FrameCompositor {
     output: Size,
     camera: FittedCache,
     screen: FittedCache,
     placeholder_color: Option<u32>,
     placeholder_pixels: Arc<[u8]>,
+    blend_pool: FrameBufferPool,
+}
+
+impl Clone for FrameCompositor {
+    fn clone(&self) -> Self {
+        Self {
+            output: self.output,
+            camera: self.camera.clone(),
+            screen: self.screen.clone(),
+            placeholder_color: self.placeholder_color,
+            placeholder_pixels: Arc::clone(&self.placeholder_pixels),
+            blend_pool: FrameBufferPool::new(
+                self.output.width as usize * self.output.height as usize * 4,
+                CAPTURE_FRAME_POOL_CAPACITY,
+            ),
+        }
+    }
 }
 
 impl FrameCompositor {
@@ -330,6 +383,10 @@ impl FrameCompositor {
             screen: FittedCache::default(),
             placeholder_color: None,
             placeholder_pixels: Arc::from([]),
+            blend_pool: FrameBufferPool::new(
+                output.width as usize * output.height as usize * 4,
+                CAPTURE_FRAME_POOL_CAPACITY,
+            ),
         }
     }
 
@@ -372,12 +429,17 @@ impl FrameCompositor {
                 .unwrap_or_else(|| self.placeholder(color_bgra));
             let weight = (mix * 256.0).round() as u16;
             let inverse = 256 - weight;
-            let mut pixels = vec![0; camera.len()];
-            for ((output, left), right) in pixels.iter_mut().zip(camera.iter()).zip(screen.iter()) {
-                *output =
-                    ((u16::from(*left) * inverse + u16::from(*right) * weight + 128) >> 8) as u8;
-            }
-            pixels.into()
+            self.blend_pool
+                .write_with_fallback(|pixels| {
+                    for ((output, left), right) in
+                        pixels.iter_mut().zip(camera.iter()).zip(screen.iter())
+                    {
+                        *output = ((u16::from(*left) * inverse + u16::from(*right) * weight + 128)
+                            >> 8) as u8;
+                    }
+                    Ok::<(), Infallible>(())
+                })
+                .expect("an infallible blend cannot fail")
         };
         Frame::new(
             pixels,
@@ -765,6 +827,48 @@ mod tests {
         assert!(reused.iter().all(|byte| *byte == 3));
         assert!(second.iter().all(|byte| *byte == 2));
         assert_eq!(pool.allocated_slots(), 2);
+    }
+
+    #[test]
+    fn frame_buffer_pool_falls_back_without_dropping_and_reuses_after_release() {
+        let mut pool = FrameBufferPool::new(8, 2);
+        let first = pool
+            .write_with_fallback(|pixels| {
+                pixels.fill(1);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        let second = pool
+            .write_with_fallback(|pixels| {
+                pixels.fill(2);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        let fallback = pool
+            .write_with_fallback(|pixels| {
+                pixels.fill(3);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+
+        assert_eq!(pool.allocated_slots(), 2);
+        assert_eq!(pool.exhaustion_count(), 1);
+        assert!(fallback.iter().all(|byte| *byte == 3));
+        assert!(!Arc::ptr_eq(&fallback, &first));
+        assert!(!Arc::ptr_eq(&fallback, &second));
+
+        let first_pointer = Arc::as_ptr(&first);
+        drop(first);
+        let reused = pool
+            .write_with_fallback(|pixels| {
+                pixels.fill(4);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        assert_eq!(Arc::as_ptr(&reused), first_pointer);
+        assert!(reused.iter().all(|byte| *byte == 4));
+        assert!(second.iter().all(|byte| *byte == 2));
+        assert!(fallback.iter().all(|byte| *byte == 3));
     }
 
     #[test]

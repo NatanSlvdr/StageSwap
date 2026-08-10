@@ -51,6 +51,14 @@ pub struct FramePublisher {
     worker: Option<JoinHandle<()>>,
 }
 
+/// Cloneable, non-owning publication endpoint. The device thread retains the
+/// owning [`FramePublisher`] and therefore controls startup and shutdown; the
+/// runtime can only replace the latest frame.
+#[derive(Clone)]
+pub struct FramePublisherSink {
+    shared: Arc<Shared>,
+}
+
 impl FramePublisher {
     pub fn start(pipe_name: &str) -> Result<Self, String> {
         if pipe_name.is_empty() {
@@ -97,6 +105,22 @@ impl FramePublisher {
     }
 
     pub fn publish(&self, frame: &Frame) -> Result<(), String> {
+        self.sink().publish(frame)
+    }
+
+    pub fn invalidate(&self) -> Result<(), String> {
+        self.sink().invalidate()
+    }
+
+    pub fn sink(&self) -> FramePublisherSink {
+        FramePublisherSink {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+impl FramePublisherSink {
+    pub fn publish(&self, frame: &Frame) -> Result<(), String> {
         self.check_worker()?;
         let frame_bytes =
             u32::try_from(frame.pixels().len()).map_err(|_| "frame exceeds the IPC capacity")?;
@@ -142,6 +166,9 @@ impl FramePublisher {
     }
 
     fn check_worker(&self) -> Result<(), String> {
+        if self.shared.stop.load(Ordering::Acquire) {
+            return Err("frame publisher is stopped".into());
+        }
         self.shared
             .failure
             .lock()

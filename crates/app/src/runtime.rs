@@ -1,33 +1,63 @@
 use crate::runtime_mailbox::{CommandInbox, CommandMailbox};
 use crate::{CommandDispatch, RuntimeClock, SystemRuntimeClock};
 use stageswap_core::{
-    AppConfig, AppSnapshot, Command, DebouncedDetector, DetectorSettings, DeviceState, Frame,
-    FrameCompositor, FrameMetadata, FramePacer, GrayImage, PIPELINE_FPS, PIPELINE_SIZE, RunState,
-    Size, Source, SourceAvailability, TransitionController, bgra_to_gray, decide, image_similarity,
-    off_frame, resize_bgra_to_gray, resize_bilinear,
+    AppConfig, AppSnapshot, CAPTURE_FRAME_POOL_CAPACITY, Command, DebouncedDetector,
+    DetectorSettings, DeviceState, Frame, FrameBufferPool, FrameCompositor, FrameMetadata,
+    FramePacer, GrayImage, PIPELINE_FPS, PIPELINE_SIZE, RunState, Size, Source, SourceAvailability,
+    TransitionController, bgra_to_gray, decide, image_similarity, off_frame, resize_bgra_to_gray,
+    resize_bilinear,
 };
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool as StdAtomicBool, Ordering as StdOrdering};
+use std::sync::mpsc::{self as std_mpsc, Receiver as StdReceiver, SyncSender as StdSyncSender};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 #[cfg(any(windows, test))]
-use stageswap_core::MonitorDescriptor;
+use stageswap_core::{MonitorDescriptor, RestartTarget};
 #[cfg(windows)]
-use stageswap_core::{MonitorScore, MonitorTracker, MonitorTrackerSettings, RestartTarget};
+use stageswap_core::{MonitorScore, MonitorTracker, MonitorTrackerSettings};
 #[cfg(windows)]
 use stageswap_windows::{
-    FramePublisher, MediaFoundationVideoInput, ScreenInput, VideoInput, VirtualCameraController,
-    WindowsGraphicsScreenInput, choose_video_device, frame_pipe_name,
+    FramePublisher, FramePublisherSink, MediaFoundationVideoInput, ScreenInput, VideoInput,
+    VirtualCameraController, WindowsGraphicsScreenInput, choose_video_device, frame_pipe_name,
 };
+#[cfg(any(windows, test))]
+use std::collections::HashSet;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(windows)]
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver};
+#[cfg(windows)]
+use std::sync::{Condvar, Mutex};
 
 const COMMAND_CAPACITY: usize = 32;
 const MAX_COMMANDS_PER_OUTPUT_CYCLE: usize = 8;
 const ACTIVITY_LIMIT: usize = 20;
+const REFERENCE_JOB_CAPACITY: usize = 4;
+const REFERENCE_MAX_DIMENSION: u32 = 8192;
+const REFERENCE_MAX_ALLOCATION: u64 = 256 * 1024 * 1024;
+const REFERENCE_PREVIEW_SIZE: Size = Size::new(1280, 720);
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn finish_worker_shutdown(
+    done: &StdReceiver<()>,
+    worker: &mut Option<JoinHandle<()>>,
+    timeout: Duration,
+) -> bool {
+    let completed = done.recv_timeout(timeout).is_ok();
+    if completed {
+        if let Some(worker) = worker.take() {
+            let _ = worker.join();
+        }
+    } else {
+        // Dropping JoinHandle deliberately detaches a worker stuck in an OS
+        // driver, filesystem, or decoder call. Callers use this only on exit.
+        worker.take();
+    }
+    completed
+}
 const FPS_TRACKING_WINDOW: Duration = Duration::from_secs(1);
 #[cfg(any(windows, test))]
 use stageswap_core::ComponentLifecycle;
@@ -110,6 +140,7 @@ struct DiscoEffect {
     x_band: Vec<u8>,
     x_boost: Vec<u8>,
     y_boost: Vec<u8>,
+    frame_pool: FrameBufferPool,
 }
 
 impl DiscoEffect {
@@ -118,6 +149,10 @@ impl DiscoEffect {
             x_band: vec![0; size.width as usize],
             x_boost: vec![0; size.width as usize],
             y_boost: vec![0; size.height as usize],
+            frame_pool: FrameBufferPool::new(
+                size.width as usize * size.height as usize * 4,
+                CAPTURE_FRAME_POOL_CAPACITY,
+            ),
         }
     }
 
@@ -151,40 +186,47 @@ impl DiscoEffect {
         let pulse = pulse_position.min(60 - pulse_position) as u16;
         let base_strength = 76_u16 + pulse * 2;
         let flash_lift = disco_flash_lift(frame_phase);
-        let mut pixels = Vec::with_capacity(source.pixels().len());
-        pixels.extend_from_slice(source.pixels());
-        for y in 0..height {
-            let row_shift = (y * palette_len / height.max(1) + frame_phase / 12) % palette_len;
-            let row_offset = y * source.stride as usize;
-            for x in 0..width {
-                let offset = row_offset + x * 4;
-                let palette =
-                    DISCO_PALETTE_BGRA[(self.x_band[x] as usize + row_shift) % palette_len];
-                let strength =
-                    (base_strength + u16::from(self.x_boost[x]) + u16::from(self.y_boost[y]))
+        let pixels = self
+            .frame_pool
+            .write_with_fallback_sized(source.pixels().len(), |pixels| {
+                pixels.copy_from_slice(source.pixels());
+                for y in 0..height {
+                    let row_shift =
+                        (y * palette_len / height.max(1) + frame_phase / 12) % palette_len;
+                    let row_offset = y * source.stride as usize;
+                    for x in 0..width {
+                        let offset = row_offset + x * 4;
+                        let palette =
+                            DISCO_PALETTE_BGRA[(self.x_band[x] as usize + row_shift) % palette_len];
+                        let strength = (base_strength
+                            + u16::from(self.x_boost[x])
+                            + u16::from(self.y_boost[y]))
                         .min(188);
-                let inverse = 256 - strength;
-                for channel in 0..3 {
-                    let tinted = ((u16::from(pixels[offset + channel]) * inverse
-                        + u16::from(palette[channel]) * strength
-                        + 128)
-                        >> 8) as u8;
-                    pixels[offset + channel] = (u16::from(tinted)
-                        + ((255 - u16::from(tinted)) * flash_lift + 128) / 256)
-                        .min(255) as u8;
+                        let inverse = 256 - strength;
+                        for channel in 0..3 {
+                            let tinted = ((u16::from(pixels[offset + channel]) * inverse
+                                + u16::from(palette[channel]) * strength
+                                + 128)
+                                >> 8) as u8;
+                            pixels[offset + channel] = (u16::from(tinted)
+                                + ((255 - u16::from(tinted)) * flash_lift + 128) / 256)
+                                .min(255)
+                                as u8;
+                        }
+                    }
                 }
-            }
-        }
-
-        paint_disco_sparkles(
-            &mut pixels,
-            source.stride as usize,
-            width,
-            height,
-            frame_phase / 3,
-        );
+                paint_disco_sparkles(
+                    pixels,
+                    source.stride as usize,
+                    width,
+                    height,
+                    frame_phase / 3,
+                );
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .expect("disco rendering is infallible");
         Frame::new(
-            pixels.into(),
+            pixels,
             source.size,
             source.stride,
             source.sequence,
@@ -337,13 +379,30 @@ impl Drop for RuntimeHandle {
 }
 
 #[cfg(any(windows, test))]
-#[derive(Default)]
 struct WebcamCropCache {
     source: Option<Arc<Frame>>,
     cropped: Option<Arc<Frame>>,
     format: Option<(Size, u32, u64)>,
     source_x: Vec<usize>,
     source_rows: Vec<usize>,
+    frame_pool: FrameBufferPool,
+}
+
+#[cfg(any(windows, test))]
+impl Default for WebcamCropCache {
+    fn default() -> Self {
+        Self {
+            source: None,
+            cropped: None,
+            format: None,
+            source_x: Vec::new(),
+            source_rows: Vec::new(),
+            frame_pool: FrameBufferPool::new(
+                PIPELINE_SIZE.width as usize * PIPELINE_SIZE.height as usize * 4,
+                CAPTURE_FRAME_POOL_CAPACITY,
+            ),
+        }
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -390,19 +449,24 @@ impl WebcamCropCache {
                 .collect();
             self.format = Some(format);
         }
-        let mut pixels = vec![0; source.pixels().len()];
-        for (y, source_row) in self.source_rows.iter().copied().enumerate() {
-            let destination_row = y * source.stride as usize;
-            for (x, source_x) in self.source_x.iter().copied().enumerate() {
-                let source_offset = source_row + source_x;
-                let destination = destination_row + x * 4;
-                pixels[destination..destination + 4]
-                    .copy_from_slice(&source.pixels()[source_offset..source_offset + 4]);
-            }
-        }
+        let pixels = self
+            .frame_pool
+            .write_with_fallback_sized(source.pixels().len(), |pixels| {
+                for (y, source_row) in self.source_rows.iter().copied().enumerate() {
+                    let destination_row = y * source.stride as usize;
+                    for (x, source_x) in self.source_x.iter().copied().enumerate() {
+                        let source_offset = source_row + source_x;
+                        let destination = destination_row + x * 4;
+                        pixels[destination..destination + 4]
+                            .copy_from_slice(&source.pixels()[source_offset..source_offset + 4]);
+                    }
+                }
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .expect("webcam crop is infallible");
         let cropped = Arc::new(
             Frame::new(
-                pixels.into(),
+                pixels,
                 source.size,
                 source.stride,
                 source.sequence,
@@ -504,6 +568,76 @@ fn screen_restart_backoff(consecutive_failures: u32) -> Duration {
         .min(SCREEN_RESTART_BACKOFF_MAX)
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum WarningSource {
+    DeviceWorker = 0,
+    PublisherSink = 1,
+    PublisherController = 2,
+    VirtualCamera = 3,
+    WebcamCapture = 4,
+    ScreenCapture = 5,
+    Hdr = 6,
+    Reference = 7,
+    Command = 8,
+}
+
+const WARNING_SOURCE_COUNT: usize = 9;
+
+#[derive(Clone)]
+struct WarningRegistry {
+    entries: [Option<String>; WARNING_SOURCE_COUNT],
+}
+
+impl Default for WarningRegistry {
+    fn default() -> Self {
+        Self {
+            entries: std::array::from_fn(|_| None),
+        }
+    }
+}
+
+impl WarningRegistry {
+    fn set(&mut self, source: WarningSource, message: impl Into<String>) -> bool {
+        let message = message.into();
+        let entry = &mut self.entries[source as usize];
+        if entry.as_ref() == Some(&message) {
+            return false;
+        }
+        *entry = Some(message);
+        true
+    }
+
+    fn clear(&mut self, source: WarningSource) -> bool {
+        self.entries[source as usize].take().is_some()
+    }
+
+    fn top(&self) -> Option<String> {
+        self.entries.iter().find_map(Clone::clone)
+    }
+
+    #[cfg(windows)]
+    fn copy_device_sources_from(&mut self, source: &Self) -> bool {
+        let mut changed = false;
+        for warning_source in [
+            WarningSource::PublisherController,
+            WarningSource::VirtualCamera,
+            WarningSource::WebcamCapture,
+            WarningSource::ScreenCapture,
+            WarningSource::Hdr,
+        ] {
+            let source_entry = &source.entries[warning_source as usize];
+            let destination = &mut self.entries[warning_source as usize];
+            if destination != source_entry {
+                destination.clone_from(source_entry);
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
 struct RuntimeState {
     config: AppConfig,
     snapshot: AppSnapshot,
@@ -513,12 +647,16 @@ struct RuntimeState {
     webcam_fps: SourceFpsTracker,
     screen_fps: SourceFpsTracker,
     output_fps: OutputFpsTracker,
+    warnings: WarningRegistry,
     activity: VecDeque<String>,
+    next_activity_id: u64,
     sequence: u64,
     started_at: Instant,
     reference: Option<GrayImage>,
     detector: DebouncedDetector,
     last_detection: Instant,
+    #[cfg(windows)]
+    pending_reference_capture: Option<Arc<Frame>>,
     #[cfg(any(windows, test))]
     webcam_crop: WebcamCropCache,
 }
@@ -531,10 +669,8 @@ impl RuntimeState {
 
     fn new_at(config: AppConfig, now: Instant) -> Self {
         let mode = config.output_mode;
-        let (reference, reference_preview) = load_reference(&config.reference_image_path)
-            .map_or((None, None), |(reference, preview)| {
-                (Some(reference), Some(preview))
-            });
+        let reference = None;
+        let reference_preview = None;
         let detector = DebouncedDetector::new(DetectorSettings {
             threshold: config.similarity_threshold,
             ..DetectorSettings::default()
@@ -564,12 +700,16 @@ impl RuntimeState {
             webcam_fps: SourceFpsTracker::default(),
             screen_fps: SourceFpsTracker::default(),
             output_fps: OutputFpsTracker::default(),
+            warnings: WarningRegistry::default(),
             activity: VecDeque::with_capacity(ACTIVITY_LIMIT),
+            next_activity_id: 1,
             sequence,
             started_at: now,
             reference,
             detector,
             last_detection: now - Duration::from_millis(250),
+            #[cfg(windows)]
+            pending_reference_capture: None,
             #[cfg(any(windows, test))]
             webcam_crop: WebcamCropCache::default(),
         }
@@ -580,7 +720,30 @@ impl RuntimeState {
             self.activity.pop_front();
         }
         self.activity.push_back(message.into());
+        self.next_activity_id = self.next_activity_id.saturating_add(1);
+        self.snapshot.recent_activity_first_id = self
+            .next_activity_id
+            .saturating_sub(self.activity.len() as u64);
         self.snapshot.recent_activity = self.activity.iter().cloned().collect::<Vec<_>>().into();
+    }
+
+    fn set_warning(&mut self, source: WarningSource, message: impl Into<String>) {
+        if self.warnings.set(source, message) {
+            self.snapshot.warning = self.warnings.top();
+        }
+    }
+
+    fn clear_warning(&mut self, source: WarningSource) {
+        if self.warnings.clear(source) {
+            self.snapshot.warning = self.warnings.top();
+        }
+    }
+
+    #[cfg(windows)]
+    fn merge_device_warnings(&mut self, warnings: &WarningRegistry) {
+        if self.warnings.copy_device_sources_from(warnings) {
+            self.snapshot.warning = self.warnings.top();
+        }
     }
 
     #[cfg(any(windows, test))]
@@ -588,12 +751,11 @@ impl RuntimeState {
         self.snapshot.previews.reference_candidate = Some(frame);
     }
 
-    #[cfg(any(windows, test))]
     fn take_reference_candidate(&mut self) -> Option<Arc<Frame>> {
         self.snapshot.previews.reference_candidate.take()
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(test)]
     fn confirm_reference_candidate(&mut self) -> Result<(), String> {
         let frame = self
             .snapshot
@@ -602,14 +764,10 @@ impl RuntimeState {
             .as_ref()
             .cloned()
             .ok_or_else(|| "no reference candidate".to_owned())?;
-        let reference = gray_thumbnail(&frame)
-            .ok_or_else(|| "reference candidate is not a valid screen frame".to_owned())?;
-
-        // Persist first so a failed save leaves both the candidate and the active
-        // reference untouched. The UI can then offer an exact retry or retake.
+        let data = reference_data_from_frame(&frame)?;
         save_reference(&frame, &self.config.reference_image_path)?;
         self.take_reference_candidate();
-        self.install_reference(reference, &frame, Instant::now());
+        self.install_reference(data.detector, &data.preview, Instant::now());
         Ok(())
     }
 
@@ -645,25 +803,27 @@ impl RuntimeState {
                 self.record(format!("Output mode changed to {mode:?}"));
             }
             Command::UpdateSettings(config) | Command::ReloadSettings(config) => {
+                let threshold_changed =
+                    self.config.similarity_threshold != config.similarity_threshold;
+                let reference_path_changed =
+                    self.config.reference_image_path != config.reference_image_path;
                 self.config = *config;
                 self.snapshot.mode = self.config.output_mode;
                 self.snapshot.selected_video_device_id =
                     self.config.selected_video_device_id.clone();
-                let (reference, preview) = load_reference(&self.config.reference_image_path)
-                    .map_or((None, None), |(reference, preview)| {
-                        (Some(reference), Some(preview))
+                if reference_path_changed {
+                    self.discard_reference_candidate();
+                }
+                if threshold_changed {
+                    self.detector = DebouncedDetector::new(DetectorSettings {
+                        threshold: self.config.similarity_threshold,
+                        ..DetectorSettings::default()
                     });
-                self.reference = reference;
-                self.snapshot.previews.reference = preview;
-                self.discard_reference_candidate();
-                self.detector = DebouncedDetector::new(DetectorSettings {
-                    threshold: self.config.similarity_threshold,
-                    ..DetectorSettings::default()
-                });
+                    self.snapshot.detection = stageswap_core::DetectionState::Unknown;
+                }
                 self.record("Settings updated");
             }
             Command::CaptureReference => {
-                self.discard_reference_candidate();
                 self.record("Reference capture requested");
             }
             Command::CaptureReferenceCandidate => {
@@ -677,7 +837,6 @@ impl RuntimeState {
                 self.record("Reference candidate discarded")
             }
             Command::ImportReference(path) => {
-                self.discard_reference_candidate();
                 let _ = path;
                 self.record("Reference import requested");
             }
@@ -741,7 +900,6 @@ impl RuntimeState {
         self.snapshot.previews.final_output = Some(Arc::new(output));
     }
 
-    #[cfg(any(windows, test))]
     fn install_reference(&mut self, reference: GrayImage, preview: &Frame, now: Instant) {
         self.sequence = self.sequence.wrapping_add(1).max(1);
         self.reference = Some(reference);
@@ -882,88 +1040,402 @@ fn gray_thumbnail(frame: &Frame) -> Option<GrayImage> {
     .ok()
 }
 
-fn load_reference(path: &str) -> Option<(GrayImage, Arc<Frame>)> {
-    if path.is_empty() {
-        return None;
+struct ReferenceData {
+    detector: GrayImage,
+    preview: Arc<Frame>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReferenceAction {
+    Load,
+    LegacyCapture { frame_sequence: u64 },
+    ConfirmedCapture { frame_sequence: u64 },
+    Import,
+}
+
+enum ReferenceJobKind {
+    Load {
+        path: std::path::PathBuf,
+    },
+    Persist {
+        frame: Arc<Frame>,
+        path: std::path::PathBuf,
+        confirmed: bool,
+    },
+    Import {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
+}
+
+struct ReferenceJob {
+    generation: u64,
+    kind: ReferenceJobKind,
+}
+
+struct ReferenceResult {
+    generation: u64,
+    action: ReferenceAction,
+    result: Result<ReferenceData, String>,
+}
+
+struct ReferenceWorker {
+    jobs: Option<StdSyncSender<ReferenceJob>>,
+    results: StdReceiver<ReferenceResult>,
+    stop: Arc<StdAtomicBool>,
+    done: StdReceiver<()>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl ReferenceWorker {
+    fn start() -> Result<Self, String> {
+        let (job_sender, job_receiver) =
+            std_mpsc::sync_channel::<ReferenceJob>(REFERENCE_JOB_CAPACITY);
+        let (result_sender, result_receiver) =
+            std_mpsc::sync_channel::<ReferenceResult>(REFERENCE_JOB_CAPACITY);
+        let (done_sender, done_receiver) = std_mpsc::sync_channel(1);
+        let stop = Arc::new(StdAtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::Builder::new()
+            .name("stageswap-reference-io".into())
+            .spawn(move || {
+                while let Ok(job) = job_receiver.recv() {
+                    if worker_stop.load(StdOrdering::Acquire) {
+                        break;
+                    }
+                    let result = execute_reference_job(job);
+                    if result_sender.try_send(result).is_err() {
+                        break;
+                    }
+                }
+                let _ = done_sender.try_send(());
+            })
+            .map_err(|error| format!("could not start reference worker: {error}"))?;
+        Ok(Self {
+            jobs: Some(job_sender),
+            results: result_receiver,
+            stop,
+            done: done_receiver,
+            worker: Some(worker),
+        })
     }
-    let image = image::open(path).ok()?.to_rgba8();
-    let size = Size::new(image.width(), image.height());
-    let mut bgra = image.into_raw();
+
+    fn submit(&self, job: ReferenceJob) -> Result<(), String> {
+        self.jobs
+            .as_ref()
+            .ok_or_else(|| "reference worker is stopped".to_owned())?
+            .try_send(job)
+            .map_err(|error| match error {
+                std_mpsc::TrySendError::Full(_) => "reference worker is busy".to_owned(),
+                std_mpsc::TrySendError::Disconnected(_) => {
+                    "reference worker is unavailable".to_owned()
+                }
+            })
+    }
+
+    fn poll(&self) -> Option<ReferenceResult> {
+        self.results.try_recv().ok()
+    }
+
+    fn signal_shutdown(&mut self) {
+        self.stop.store(true, StdOrdering::Release);
+        self.jobs.take();
+    }
+
+    fn finish_shutdown(&mut self, timeout: Duration) -> bool {
+        finish_worker_shutdown(&self.done, &mut self.worker, timeout)
+    }
+}
+
+impl Drop for ReferenceWorker {
+    fn drop(&mut self) {
+        if self.worker.is_some() {
+            self.signal_shutdown();
+            let _ = self.finish_shutdown(WORKER_SHUTDOWN_TIMEOUT);
+        }
+    }
+}
+
+fn execute_reference_job(job: ReferenceJob) -> ReferenceResult {
+    let (action, result) = match job.kind {
+        ReferenceJobKind::Load { path } => {
+            cleanup_pending_reference(&path);
+            (ReferenceAction::Load, decode_reference(&path))
+        }
+        ReferenceJobKind::Persist {
+            frame,
+            path,
+            confirmed,
+        } => {
+            let action = if confirmed {
+                ReferenceAction::ConfirmedCapture {
+                    frame_sequence: frame.sequence,
+                }
+            } else {
+                ReferenceAction::LegacyCapture {
+                    frame_sequence: frame.sequence,
+                }
+            };
+            let result = reference_data_from_frame(&frame)
+                .and_then(|data| persist_frame_atomic(&frame, &path).map(|()| data));
+            (action, result)
+        }
+        ReferenceJobKind::Import {
+            source,
+            destination,
+        } => {
+            let result = decode_rgba_limited(&source).and_then(|rgba| {
+                let data = reference_data_from_rgba(&rgba)?;
+                persist_rgba_atomic(&rgba, &destination)?;
+                Ok(data)
+            });
+            (ReferenceAction::Import, result)
+        }
+    };
+    ReferenceResult {
+        generation: job.generation,
+        action,
+        result,
+    }
+}
+
+fn decode_rgba_limited(path: &std::path::Path) -> Result<image::RgbaImage, String> {
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|error| format!("could not open reference image: {error}"))?
+        .with_guessed_format()
+        .map_err(|error| format!("could not identify reference image: {error}"))?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(REFERENCE_MAX_DIMENSION);
+    limits.max_image_height = Some(REFERENCE_MAX_DIMENSION);
+    limits.max_alloc = Some(REFERENCE_MAX_ALLOCATION);
+    reader.limits(limits);
+    reader
+        .decode()
+        .map_err(|error| format!("could not decode reference image: {error}"))
+        .map(|image| image.to_rgba8())
+}
+
+fn decode_reference(path: &std::path::Path) -> Result<ReferenceData, String> {
+    if path.as_os_str().is_empty() {
+        return Err("reference image path is empty".into());
+    }
+    let rgba = decode_rgba_limited(path)?;
+    reference_data_from_rgba(&rgba)
+}
+
+fn reference_data_from_frame(frame: &Frame) -> Result<ReferenceData, String> {
+    let detector = gray_thumbnail(frame)
+        .ok_or_else(|| "reference candidate is not a valid screen frame".to_owned())?;
+    let preview = if frame.size.width > REFERENCE_PREVIEW_SIZE.width
+        || frame.size.height > REFERENCE_PREVIEW_SIZE.height
+    {
+        let mut rgba = frame.pixels().to_vec();
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let rgba = image::RgbaImage::from_raw(frame.size.width, frame.size.height, rgba)
+            .ok_or_else(|| "reference frame layout is invalid".to_owned())?;
+        reference_data_from_rgba(&rgba)?.preview
+    } else {
+        Arc::new(frame.clone())
+    };
+    Ok(ReferenceData { detector, preview })
+}
+
+fn reference_data_from_rgba(rgba: &image::RgbaImage) -> Result<ReferenceData, String> {
+    let size = Size::new(rgba.width(), rgba.height());
+    let mut bgra = rgba.as_raw().clone();
     for pixel in bgra.chunks_exact_mut(4) {
         pixel.swap(0, 2);
     }
-    let pixels: Arc<[u8]> = bgra.into();
-    let reference = bgra_to_gray(&pixels, size, size.width as usize * 4)
-        .ok()
-        .and_then(|image| resize_bilinear(&image, Size::new(160, 90)).ok())?;
-    let preview = Frame::new(pixels, size, size.width * 4, 0, 0, Instant::now()).ok()?;
-    Some((reference, Arc::new(preview)))
+    let detector = bgra_to_gray(&bgra, size, size.width as usize * 4)
+        .and_then(|image| resize_bilinear(&image, Size::new(160, 90)))
+        .map_err(|error| format!("could not prepare reference detector image: {error:?}"))?;
+    let preview_rgba = if size.width > REFERENCE_PREVIEW_SIZE.width
+        || size.height > REFERENCE_PREVIEW_SIZE.height
+    {
+        image::DynamicImage::ImageRgba8(rgba.clone())
+            .thumbnail(REFERENCE_PREVIEW_SIZE.width, REFERENCE_PREVIEW_SIZE.height)
+            .to_rgba8()
+    } else {
+        rgba.clone()
+    };
+    let preview_size = Size::new(preview_rgba.width(), preview_rgba.height());
+    let mut preview_bgra = preview_rgba.into_raw();
+    for pixel in preview_bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let preview = Frame::new(
+        preview_bgra.into(),
+        preview_size,
+        preview_size.width * 4,
+        0,
+        0,
+        Instant::now(),
+    )
+    .map(Arc::new)
+    .map_err(|error| format!("could not prepare reference preview: {error:?}"))?;
+    Ok(ReferenceData { detector, preview })
 }
 
-#[cfg(any(windows, test))]
-fn save_reference(frame: &Frame, path: &str) -> Result<(), String> {
-    if path.is_empty() {
-        return Err("reference image path is empty".into());
+fn pending_reference_path(destination: &std::path::Path) -> std::path::PathBuf {
+    destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("reference.pending.png")
+}
+
+fn cleanup_pending_reference(destination: &std::path::Path) {
+    let pending = pending_reference_path(destination);
+    if let Err(error) = std::fs::remove_file(&pending)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        // A later atomic write will report an actionable error if this matters.
     }
+}
+
+fn persist_frame_atomic(frame: &Frame, destination: &std::path::Path) -> Result<(), String> {
     let mut rgba = frame.pixels().to_vec();
     for pixel in rgba.chunks_exact_mut(4) {
         pixel.swap(0, 2);
     }
-    if let Some(parent) = std::path::Path::new(path).parent() {
+    let rgba = image::RgbaImage::from_raw(frame.size.width, frame.size.height, rgba)
+        .ok_or_else(|| "reference frame layout is invalid".to_owned())?;
+    persist_rgba_atomic(&rgba, destination)
+}
+
+fn persist_rgba_atomic(
+    rgba: &image::RgbaImage,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    if destination.as_os_str().is_empty() {
+        return Err("reference image path is empty".into());
+    }
+    if let Some(parent) = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("could not create reference directory: {error}"))?;
     }
-    image::save_buffer(
-        path,
-        &rgba,
-        frame.size.width,
-        frame.size.height,
-        image::ColorType::Rgba8,
-    )
-    .map_err(|error| format!("could not save reference image: {error}"))
+    let pending = pending_reference_path(destination);
+    cleanup_pending_reference(destination);
+    let result = (|| {
+        image::save_buffer(
+            &pending,
+            rgba.as_raw(),
+            rgba.width(),
+            rgba.height(),
+            image::ColorType::Rgba8,
+        )
+        .map_err(|error| format!("could not encode pending reference image: {error}"))?;
+        std::fs::File::open(&pending)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("could not flush pending reference image: {error}"))?;
+        validate_pending_reference(&pending, rgba.width(), rgba.height())?;
+        replace_reference_atomic(&pending, destination)
+    })();
+    if result.is_err() {
+        cleanup_pending_reference(destination);
+    }
+    result
+}
+
+fn validate_pending_reference(
+    pending: &std::path::Path,
+    expected_width: u32,
+    expected_height: u32,
+) -> Result<(), String> {
+    use image::ImageDecoder;
+    let decoder = image::codecs::png::PngDecoder::new(std::io::BufReader::new(
+        std::fs::File::open(pending)
+            .map_err(|error| format!("could not reopen pending reference image: {error}"))?,
+    ))
+    .map_err(|error| format!("pending reference is not a valid PNG: {error}"))?;
+    let dimensions = decoder.dimensions();
+    if dimensions != (expected_width, expected_height) {
+        return Err(format!(
+            "pending reference dimensions changed from {expected_width}x{expected_height} to {}x{}",
+            dimensions.0, dimensions.1
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
-fn import_reference(
+fn replace_reference_atomic(
     source: &std::path::Path,
-    destination: &str,
-) -> Result<(GrayImage, Arc<Frame>), String> {
-    if destination.is_empty() {
-        return Err("reference image path is empty".into());
-    }
-    let image = image::open(source)
-        .map_err(|error| format!("could not decode reference image: {error}"))?
-        .to_rgba8();
-    if let Some(parent) = std::path::Path::new(destination).parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("could not create reference directory: {error}"))?;
-    }
-    image
-        .save(destination)
-        .map_err(|error| format!("could not save local reference image: {error}"))?;
-    load_reference(destination).ok_or_else(|| "could not load imported reference image".into())
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    stageswap_windows::replace_file_atomic(source, destination)
+        .map_err(|error| format!("could not atomically replace reference image: {error}"))
+}
+
+#[cfg(not(windows))]
+fn replace_reference_atomic(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    std::fs::rename(source, destination)
+        .map_err(|error| format!("could not atomically replace reference image: {error}"))
+}
+
+#[cfg(test)]
+fn load_reference(path: &str) -> Option<(GrayImage, Arc<Frame>)> {
+    let data = decode_reference(std::path::Path::new(path)).ok()?;
+    Some((data.detector, data.preview))
+}
+
+#[cfg(test)]
+fn save_reference(frame: &Frame, path: &str) -> Result<(), String> {
+    persist_frame_atomic(frame, std::path::Path::new(path))
 }
 
 trait RuntimePorts {
     fn command(&mut self, command: &Command, state: &mut RuntimeState);
     fn refresh_inputs(&mut self, state: &mut RuntimeState, now: Instant);
     fn publish(&self, state: &mut RuntimeState, now: Instant);
+    fn reference_updated(&mut self, _state: &mut RuntimeState) {}
+    fn signal_shutdown(&mut self) {}
+    fn finish_shutdown(&mut self, _timeout: Duration) -> bool {
+        true
+    }
 }
 
 struct RuntimeEngine<P> {
     state: RuntimeState,
     platform: P,
     pacer: FramePacer,
+    reference_worker: Option<ReferenceWorker>,
+    reference_generation: u64,
+    in_flight_candidate: Option<(u64, u64)>,
+    last_deadline_log: Instant,
 }
 
 impl<P: RuntimePorts> RuntimeEngine<P> {
     fn from_parts(state: RuntimeState, platform: P, now: Instant) -> Self {
         let frame_interval = Duration::from_nanos(1_000_000_000 / u64::from(PIPELINE_FPS));
-        Self {
+        let mut state = state;
+        let reference_worker = match ReferenceWorker::start() {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                state.record(error);
+                None
+            }
+        };
+        let mut engine = Self {
             state,
             platform,
             pacer: FramePacer::new(now, frame_interval),
-        }
+            reference_worker,
+            reference_generation: 0,
+            in_flight_candidate: None,
+            last_deadline_log: now - Duration::from_secs(30),
+        };
+        let path = std::path::PathBuf::from(engine.state.config.reference_image_path.clone());
+        engine.submit_reference_job(ReferenceJobKind::Load { path });
+        engine
     }
 
     fn wait_duration(&self, now: Instant) -> Duration {
@@ -971,16 +1443,212 @@ impl<P: RuntimePorts> RuntimeEngine<P> {
     }
 
     fn command(&mut self, command: Command) -> bool {
+        let previous_reference_path = self.state.config.reference_image_path.clone();
         self.platform.command(&command, &mut self.state);
-        self.state.command(command)
+        if !self.state.command(command.clone()) {
+            return false;
+        }
+        match command {
+            Command::UpdateSettings(config) => {
+                if config.reference_image_path != previous_reference_path {
+                    self.submit_reference_job(ReferenceJobKind::Load {
+                        path: std::path::PathBuf::from(config.reference_image_path.clone()),
+                    });
+                }
+            }
+            Command::ReloadSettings(config) => {
+                self.submit_reference_job(ReferenceJobKind::Load {
+                    path: std::path::PathBuf::from(config.reference_image_path.clone()),
+                });
+            }
+            Command::CaptureReference => {
+                #[cfg(windows)]
+                if let Some(frame) = self.state.pending_reference_capture.take() {
+                    self.submit_reference_job(ReferenceJobKind::Persist {
+                        frame,
+                        path: std::path::PathBuf::from(
+                            self.state.config.reference_image_path.clone(),
+                        ),
+                        confirmed: false,
+                    });
+                }
+            }
+            Command::ConfirmReferenceCandidate => {
+                if let Some(frame) = self.state.snapshot.previews.reference_candidate.clone() {
+                    if self
+                        .in_flight_candidate
+                        .is_some_and(|(sequence, _)| sequence == frame.sequence)
+                    {
+                        self.state
+                            .record("Reference candidate confirmation is already pending");
+                    } else {
+                        self.submit_reference_job(ReferenceJobKind::Persist {
+                            frame,
+                            path: std::path::PathBuf::from(
+                                self.state.config.reference_image_path.clone(),
+                            ),
+                            confirmed: true,
+                        });
+                    }
+                } else {
+                    self.state
+                        .record("Reference candidate confirmation failed: no reference candidate");
+                }
+            }
+            Command::ImportReference(source) => {
+                self.submit_reference_job(ReferenceJobKind::Import {
+                    source,
+                    destination: std::path::PathBuf::from(
+                        self.state.config.reference_image_path.clone(),
+                    ),
+                });
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn submit_reference_job(&mut self, kind: ReferenceJobKind) -> bool {
+        let generation = self.reference_generation.wrapping_add(1).max(1);
+        let candidate_sequence = match &kind {
+            ReferenceJobKind::Persist {
+                frame,
+                confirmed: true,
+                ..
+            } => Some(frame.sequence),
+            _ => None,
+        };
+        let Some(worker) = self.reference_worker.as_ref() else {
+            self.state.record("Reference worker is unavailable");
+            return false;
+        };
+        match worker.submit(ReferenceJob { generation, kind }) {
+            Ok(()) => {
+                self.reference_generation = generation;
+                self.state.clear_warning(WarningSource::Command);
+                if let Some(sequence) = candidate_sequence {
+                    self.in_flight_candidate = Some((sequence, generation));
+                }
+                true
+            }
+            Err(error) => {
+                self.state
+                    .set_warning(WarningSource::Command, error.clone());
+                self.state
+                    .record(format!("Reference command failed: {error}"));
+                false
+            }
+        }
+    }
+
+    fn poll_reference_results(&mut self, now: Instant) {
+        while let Some(result) = self
+            .reference_worker
+            .as_ref()
+            .and_then(ReferenceWorker::poll)
+        {
+            if self
+                .in_flight_candidate
+                .is_some_and(|(_, generation)| generation == result.generation)
+            {
+                self.in_flight_candidate = None;
+            }
+            if result.generation != self.reference_generation {
+                self.state.record(format!(
+                    "Ignored obsolete reference result {}",
+                    result.generation
+                ));
+                continue;
+            }
+            match result.result {
+                Ok(data) => {
+                    self.state.clear_warning(WarningSource::Reference);
+                    if let ReferenceAction::ConfirmedCapture { frame_sequence } = result.action {
+                        let candidate_matches = self
+                            .state
+                            .snapshot
+                            .previews
+                            .reference_candidate
+                            .as_ref()
+                            .is_some_and(|candidate| candidate.sequence == frame_sequence);
+                        if !candidate_matches {
+                            self.state
+                                .record("Ignored reference result for a replaced review candidate");
+                            continue;
+                        }
+                        self.state.take_reference_candidate();
+                    } else if result.action == ReferenceAction::Import {
+                        self.state.discard_reference_candidate();
+                    }
+                    self.state
+                        .install_reference(data.detector, &data.preview, now);
+                    self.platform.reference_updated(&mut self.state);
+                    let message = match result.action {
+                        ReferenceAction::Load => "Reference loaded",
+                        ReferenceAction::LegacyCapture { .. } => "Reference captured",
+                        ReferenceAction::ConfirmedCapture { .. } => "Reference candidate confirmed",
+                        ReferenceAction::Import => "Reference imported into local storage",
+                    };
+                    self.state.record(message);
+                }
+                Err(error) => {
+                    if result.action == ReferenceAction::Load {
+                        self.state.reference = None;
+                        self.state.snapshot.previews.reference = None;
+                        self.state.detector.reset();
+                        self.state.snapshot.detection = stageswap_core::DetectionState::Unknown;
+                    }
+                    self.state
+                        .set_warning(WarningSource::Reference, error.clone());
+                    self.state
+                        .record(format!("Reference operation failed: {error}"));
+                }
+            }
+        }
+    }
+
+    fn shutdown_workers(&mut self) {
+        if let Some(worker) = self.reference_worker.as_mut() {
+            worker.signal_shutdown();
+        }
+        self.platform.signal_shutdown();
+        let deadline = Instant::now() + WORKER_SHUTDOWN_TIMEOUT;
+        if let Some(worker) = self.reference_worker.as_mut() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let _ = worker.finish_shutdown(remaining);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let _ = self.platform.finish_shutdown(remaining);
     }
 
     fn step(&mut self, now: Instant) -> bool {
         if !self.pacer.is_due(now, Duration::ZERO) {
             return false;
         }
-        self.pacer.advance(now);
+        let skipped = self.pacer.advance(now);
+        self.state.snapshot.output_deadline_misses = self
+            .state
+            .snapshot
+            .output_deadline_misses
+            .saturating_add(skipped);
+        if skipped > 0
+            && now.saturating_duration_since(self.last_deadline_log) >= Duration::from_secs(30)
+        {
+            self.state.record(format!(
+                "Output pacer skipped {skipped} overdue deadline(s)"
+            ));
+            self.last_deadline_log = now;
+        }
+        self.poll_reference_results(now);
         self.platform.refresh_inputs(&mut self.state, now);
+        #[cfg(windows)]
+        if let Some(frame) = self.state.pending_reference_capture.take() {
+            self.submit_reference_job(ReferenceJobKind::Persist {
+                frame,
+                path: std::path::PathBuf::from(self.state.config.reference_image_path.clone()),
+                confirmed: false,
+            });
+        }
         self.state.refresh_input_fps(now);
         self.state.detect(now);
         self.state.tick(now);
@@ -1009,14 +1677,14 @@ fn run<C: RuntimeClock>(
         state.command(Command::Start);
     }
     let mut engine = RuntimeEngine::from_parts(state, platform, now);
-    loop {
+    'runtime: loop {
         if commands.shutdown_requested() {
             break;
         }
         let mut processed = 0;
         if let Some(command) = commands.recv_timeout(engine.wait_duration(clock.now())) {
             if !engine.command(command) {
-                break;
+                break 'runtime;
             }
             processed += 1;
         }
@@ -1025,7 +1693,7 @@ fn run<C: RuntimeClock>(
                 break;
             };
             if !engine.command(command) {
-                return;
+                break 'runtime;
             }
             processed += 1;
         }
@@ -1039,6 +1707,7 @@ fn run<C: RuntimeClock>(
                 .expect("runtime snapshot lock is not poisoned") = engine.state.snapshot.clone();
         }
     }
+    engine.shutdown_workers();
 }
 
 #[cfg(any(windows, test))]
@@ -1070,89 +1739,31 @@ struct MonitorScanResult {
 
 #[cfg(windows)]
 struct MonitorScanWorker {
-    requests: Option<SyncSender<MonitorScanRequest>>,
-    results: Option<Receiver<MonitorScanResult>>,
-    worker: Option<JoinHandle<()>>,
-    stop: Arc<AtomicBool>,
-    in_flight: bool,
-    pending: Option<MonitorScanRequest>,
+    result: Option<MonitorScanResult>,
 }
 
 #[cfg(windows)]
 impl MonitorScanWorker {
     fn start() -> Result<Self, String> {
-        let (request_sender, request_receiver) = mpsc::sync_channel::<MonitorScanRequest>(1);
-        let (result_sender, result_receiver) = mpsc::sync_channel(1);
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = Arc::clone(&stop);
-        let worker = thread::Builder::new()
-            .name("stageswap-monitor-scan".into())
-            .spawn(move || {
-                while let Ok(request) = request_receiver.recv() {
-                    if worker_stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    let result = scan_monitors(request, &worker_stop);
-                    if result_sender.send(result).is_err() {
-                        break;
-                    }
-                }
-            })
-            .map_err(|error| format!("could not start monitor scan worker: {error}"))?;
-        Ok(Self {
-            requests: Some(request_sender),
-            results: Some(result_receiver),
-            worker: Some(worker),
-            stop,
-            in_flight: false,
-            pending: None,
-        })
+        Ok(Self { result: None })
     }
 
     fn request(&mut self, request: MonitorScanRequest) -> bool {
-        if self.in_flight {
-            self.pending = Some(request);
-            return true;
-        }
-        let sent = self
-            .requests
-            .as_ref()
-            .is_some_and(|sender| sender.try_send(request).is_ok());
-        self.in_flight = sent;
-        sent
+        self.result = Some(scan_monitors(request));
+        true
     }
 
     fn poll(&mut self) -> Option<MonitorScanResult> {
-        let result = self.results.as_ref()?.try_recv().ok()?;
-        self.in_flight = false;
-        if let Some(request) = self.pending.take() {
-            self.in_flight = self
-                .requests
-                .as_ref()
-                .is_some_and(|sender| sender.try_send(request).is_ok());
-        }
-        Some(result)
+        self.result.take()
     }
 
     fn clear_pending(&mut self) {
-        self.pending = None;
+        self.result = None;
     }
 }
 
 #[cfg(windows)]
-impl Drop for MonitorScanWorker {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        self.requests.take();
-        self.results.take();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-#[cfg(windows)]
-fn scan_monitors(request: MonitorScanRequest, stop: &AtomicBool) -> MonitorScanResult {
+fn scan_monitors(request: MonitorScanRequest) -> MonitorScanResult {
     let input = WindowsGraphicsScreenInput::default();
     let monitors = input.enumerate().unwrap_or_default();
     let scores = request
@@ -1162,23 +1773,23 @@ fn scan_monitors(request: MonitorScanRequest, stop: &AtomicBool) -> MonitorScanR
             monitors
                 .iter()
                 .cloned()
-                .take_while(|_| !stop.load(Ordering::Acquire))
                 .map(|monitor| {
                     let mut capture = WindowsGraphicsScreenInput::default();
                     let valid = capture.start(&monitor, request.cursor_visible).is_ok();
                     let deadline = Instant::now() + Duration::from_millis(750);
-                    let frame = loop {
-                        if stop.load(Ordering::Acquire) {
-                            break None;
-                        }
-                        if let Some(frame) = capture.latest_frame() {
-                            break Some(frame);
-                        }
-                        if Instant::now() >= deadline {
-                            break None;
-                        }
-                        thread::sleep(Duration::from_millis(25));
-                    };
+                    let frame = valid
+                        .then(|| {
+                            loop {
+                                if let Some(frame) = capture.latest_frame() {
+                                    break Some(frame);
+                                }
+                                if Instant::now() >= deadline {
+                                    break None;
+                                }
+                                thread::sleep(Duration::from_millis(25));
+                            }
+                        })
+                        .flatten();
                     capture.stop();
                     let similarity = frame
                         .as_deref()
@@ -1200,7 +1811,8 @@ fn scan_monitors(request: MonitorScanRequest, stop: &AtomicBool) -> MonitorScanR
 }
 
 #[cfg(windows)]
-struct Platform {
+struct DevicePlatform {
+    owner_thread: thread::ThreadId,
     publisher: Option<FramePublisher>,
     camera: Option<VirtualCameraController>,
     pipe_name: Option<String>,
@@ -1217,8 +1829,11 @@ struct Platform {
 }
 
 #[cfg(windows)]
-impl Platform {
-    fn new(state: &mut RuntimeState) -> Self {
+impl DevicePlatform {
+    fn new(
+        state: &mut RuntimeState,
+        output_ready: impl FnOnce(&RuntimeState, Option<FramePublisherSink>),
+    ) -> Self {
         let now = Instant::now();
         state
             .snapshot
@@ -1231,7 +1846,7 @@ impl Platform {
         let pipe_name = match frame_pipe_name() {
             Ok(name) => Some(name),
             Err(error) => {
-                state.snapshot.warning = Some(error.clone());
+                state.set_warning(WarningSource::PublisherController, error.clone());
                 state.record(format!("Virtual camera pipe failed: {error}"));
                 None
             }
@@ -1246,11 +1861,12 @@ impl Platform {
                             .snapshot
                             .publisher_component
                             .mark_failed(now, error.clone());
-                        state.snapshot.warning = Some(error.clone());
+                        state.set_warning(WarningSource::PublisherController, error.clone());
                         state.record(format!("Frame publisher failed: {error}"));
                         None
                     }
                 });
+        output_ready(state, publisher.as_ref().map(FramePublisher::sink));
         let camera = publisher.as_ref().and_then(|_| {
             pipe_name.as_ref().and_then(|pipe_name| {
                 match VirtualCameraController::start(pipe_name.clone()) {
@@ -1266,7 +1882,7 @@ impl Platform {
                             .snapshot
                             .virtual_camera_component
                             .mark_failed(now, error.clone());
-                        state.snapshot.warning = Some(error.clone());
+                        state.set_warning(WarningSource::VirtualCamera, error.clone());
                         state.record(format!("Virtual camera failed: {error}"));
                         None
                     }
@@ -1424,10 +2040,13 @@ impl Platform {
             }
         });
         if selected_display_hdr_unsupported {
-            state.snapshot.warning = Some(
+            state.set_warning(
+                WarningSource::Hdr,
                 "HDR or 10-bit color is enabled on the selected display; disable HDR in Windows Display settings before using automatic matching or reference capture"
-                    .into(),
+                    .to_owned(),
             );
+        } else {
+            state.clear_warning(WarningSource::Hdr);
         }
         let monitor_scan_worker = match MonitorScanWorker::start() {
             Ok(worker) => Some(worker),
@@ -1437,6 +2056,7 @@ impl Platform {
             }
         };
         let mut platform = Self {
+            owner_thread: thread::current().id(),
             publisher,
             camera,
             pipe_name,
@@ -1458,6 +2078,7 @@ impl Platform {
     }
 
     fn command(&mut self, command: &Command, state: &mut RuntimeState) {
+        self.assert_owner_thread();
         match command {
             Command::UpdateSettings(config) | Command::ReloadSettings(config) => {
                 let reload_settings = matches!(command, Command::ReloadSettings(_));
@@ -1522,16 +2143,21 @@ impl Platform {
                 }
             }
             Command::CaptureReference => {
+                state.pending_reference_capture = None;
                 if self.selected_display_hdr_unsupported {
                     state.record(
                         "Reference capture is unavailable while HDR or 10-bit color is enabled",
                     );
                     return;
                 }
-                if let Some(frame) = self.screen.latest_frame() {
-                    self.commit_reference(state, frame, "Reference captured");
+                if let Some(frame) = self
+                    .screen
+                    .latest_frame()
+                    .filter(|frame| frame.is_fresh_at(Instant::now(), FRAME_STALE_AFTER))
+                {
+                    state.pending_reference_capture = Some(frame);
                 } else {
-                    state.record("Reference capture failed: no screen frame");
+                    state.record("Reference capture failed: no fresh screen frame");
                 }
             }
             Command::CaptureReferenceCandidate => {
@@ -1541,42 +2167,23 @@ impl Platform {
                     );
                     return;
                 }
-                if let Some(frame) = self.screen.latest_frame() {
+                if let Some(frame) = self
+                    .screen
+                    .latest_frame()
+                    .filter(|frame| frame.is_fresh_at(Instant::now(), FRAME_STALE_AFTER))
+                {
                     state.stage_reference_candidate(frame);
                     state.record("Reference candidate captured for review");
                 } else {
-                    state.record("Reference candidate capture failed: no screen frame");
+                    state.record("Reference candidate capture failed: no fresh screen frame");
                 }
             }
-            Command::ConfirmReferenceCandidate => match state.confirm_reference_candidate() {
-                Ok(()) => {
-                    state.record("Reference candidate confirmed");
-                    self.invalidate_monitor_scans(state.config.similarity_threshold);
-                    if state.config.automatic_monitor_rescans {
-                        self.request_monitor_scan(state, state.config.cursor_visible);
-                    }
-                }
-                Err(error) => {
-                    state.record(format!("Reference candidate confirmation failed: {error}"));
-                }
-            },
+            Command::ConfirmReferenceCandidate => {}
             Command::DiscardReferenceCandidate => {
                 state.discard_reference_candidate();
                 state.record("Reference candidate discarded");
             }
-            Command::ImportReference(path) => {
-                match import_reference(path, &state.config.reference_image_path) {
-                    Ok((reference, preview)) => {
-                        state.install_reference(reference, &preview, Instant::now());
-                        state.record("Reference imported into local storage");
-                        self.invalidate_monitor_scans(state.config.similarity_threshold);
-                        if state.config.automatic_monitor_rescans {
-                            self.request_monitor_scan(state, state.config.cursor_visible);
-                        }
-                    }
-                    Err(error) => state.record(format!("Reference import failed: {error}")),
-                }
-            }
+            Command::ImportReference(_) => {}
             Command::SelectMonitor(monitor) => {
                 let available = self.screen.enumerate().unwrap_or_default();
                 if let Some(monitor) = available
@@ -1588,6 +2195,7 @@ impl Platform {
                         .screen
                         .display_uses_hdr_or_ten_bit(&monitor)
                         .unwrap_or(false);
+                    self.synchronize_hdr_warning(state);
                     self.monitor_tracker.select(monitor.clone());
                     self.monitor_scan_generation = self.monitor_scan_generation.wrapping_add(1);
                     if let Some(worker) = self.monitor_scan_worker.as_mut() {
@@ -1639,27 +2247,31 @@ impl Platform {
         }
     }
 
-    fn commit_reference(
-        &mut self,
-        state: &mut RuntimeState,
-        frame: Arc<Frame>,
-        success_message: &str,
-    ) {
-        let Some(reference) = gray_thumbnail(&frame) else {
-            state.record("Reference capture failed: invalid screen frame");
-            return;
-        };
-        state.install_reference(reference, &frame, Instant::now());
-        match save_reference(&frame, &state.config.reference_image_path) {
-            Ok(()) => state.record(success_message),
-            Err(error) => state.record(format!(
-                "Reference captured for this session but could not be saved: {error}"
-            )),
-        }
+    fn reference_updated(&mut self, state: &mut RuntimeState) {
+        self.assert_owner_thread();
         self.invalidate_monitor_scans(state.config.similarity_threshold);
         if state.config.automatic_monitor_rescans {
             self.request_monitor_scan(state, state.config.cursor_visible);
         }
+    }
+
+    fn synchronize_hdr_warning(&self, state: &mut RuntimeState) {
+        if self.selected_display_hdr_unsupported {
+            state.set_warning(
+                WarningSource::Hdr,
+                "HDR or 10-bit color is enabled on the selected display; disable HDR in Windows Display settings before using automatic matching or reference capture",
+            );
+        } else {
+            state.clear_warning(WarningSource::Hdr);
+        }
+    }
+
+    fn assert_owner_thread(&self) {
+        assert_eq!(
+            thread::current().id(),
+            self.owner_thread,
+            "Windows device objects must only be used by their owner thread"
+        );
     }
 
     fn restart_webcam(&mut self, state: &mut RuntimeState) {
@@ -1730,7 +2342,7 @@ impl Platform {
             Ok(()) => {
                 state.snapshot.virtual_camera_state = DeviceState::Ready;
                 state.snapshot.virtual_camera_component.mark_ready(now);
-                state.snapshot.warning = None;
+                state.clear_warning(WarningSource::VirtualCamera);
                 state.record("Virtual camera restarted");
             }
             Err(error) => {
@@ -1739,13 +2351,14 @@ impl Platform {
                     .snapshot
                     .virtual_camera_component
                     .mark_failed(now, error.clone());
-                state.snapshot.warning = Some(error.clone());
+                state.set_warning(WarningSource::VirtualCamera, error.clone());
                 state.record(format!("Virtual camera restart failed: {error}"));
             }
         }
     }
 
     fn refresh_inputs(&mut self, state: &mut RuntimeState, now: Instant) {
+        self.assert_owner_thread();
         self.refresh_monitor_scan(state);
         let (monitor_scan_due, screen_capture_recovery_due) = automatic_screen_tasks_due(
             state.config.automatic_monitor_rescans,
@@ -1767,6 +2380,7 @@ impl Platform {
         let webcam = (!webcam_is_stale).then_some(webcam).flatten();
         state.snapshot.availability.camera_ready = webcam.is_some();
         if let Some(error) = self.webcam.last_error() {
+            state.set_warning(WarningSource::WebcamCapture, error.clone());
             if state.snapshot.webcam_state != DeviceState::Failed {
                 state.record(error.clone());
             }
@@ -1778,6 +2392,10 @@ impl Platform {
             );
             state.snapshot.previews.webcam = None;
         } else if webcam_is_stale {
+            state.set_warning(
+                WarningSource::WebcamCapture,
+                "Webcam frames are stale; safe fallback is active",
+            );
             state.snapshot.webcam_state = DeviceState::Failed;
             state
                 .snapshot
@@ -1785,6 +2403,7 @@ impl Platform {
                 .transition(ComponentLifecycle::Stale, now);
             state.snapshot.previews.webcam = None;
         } else if webcam.is_some() {
+            state.clear_warning(WarningSource::WebcamCapture);
             state.snapshot.webcam_state = DeviceState::Ready;
             let was_ready = state.snapshot.webcam_component.lifecycle == ComponentLifecycle::Ready;
             state.snapshot.webcam_component.mark_ready(now);
@@ -1800,6 +2419,10 @@ impl Platform {
             .is_some_and(|deadline| now >= deadline)
         {
             self.webcam.stop();
+            state.set_warning(
+                WarningSource::WebcamCapture,
+                "webcam did not deliver a frame before the startup deadline",
+            );
             state.snapshot.webcam_state = DeviceState::Failed;
             state.snapshot.webcam_component.mark_failed(
                 now,
@@ -1812,11 +2435,7 @@ impl Platform {
             state.record("Webcam first-frame deadline expired");
         }
         if let Some(webcam) = webcam {
-            state.snapshot.previews.webcam = Some(state.webcam_crop.apply(
-                webcam,
-                state.config.crop_webcam_to_16_9,
-                self.webcam.native_display_aspect_ratio(),
-            ));
+            state.snapshot.previews.webcam = Some(webcam);
         }
         let screen = self.screen.latest_frame();
         let screen_is_stale = screen.as_ref().is_some_and(|frame| {
@@ -1829,6 +2448,10 @@ impl Platform {
         if self.selected_display_hdr_unsupported
             && state.snapshot.mode == stageswap_core::OutputMode::Automatic
         {
+            state.set_warning(
+                WarningSource::ScreenCapture,
+                "screen capture did not deliver a frame before the startup deadline",
+            );
             state.snapshot.screen_state = DeviceState::Failed;
             state.snapshot.screen_component.mark_failed_with_kind(
                 now,
@@ -1836,6 +2459,7 @@ impl Platform {
                 "HDR or 10-bit color must be disabled for automatic matching",
             );
         } else if let Some(error) = self.screen.last_error() {
+            state.set_warning(WarningSource::ScreenCapture, error.clone());
             if state.snapshot.screen_state != DeviceState::Failed {
                 state.record(error.clone());
             }
@@ -1847,6 +2471,10 @@ impl Platform {
             );
             state.snapshot.previews.screen = None;
         } else if screen_is_stale {
+            state.set_warning(
+                WarningSource::ScreenCapture,
+                "Screen frames are stale; safe fallback is active",
+            );
             state.snapshot.screen_state = DeviceState::Failed;
             state
                 .snapshot
@@ -1854,6 +2482,7 @@ impl Platform {
                 .transition(ComponentLifecycle::Stale, now);
             state.snapshot.previews.screen = None;
         } else if let Some(screen) = screen {
+            state.clear_warning(WarningSource::ScreenCapture);
             let received_at = screen.received_at;
             state.snapshot.screen_state = DeviceState::Ready;
             let was_ready = state.snapshot.screen_component.lifecycle == ComponentLifecycle::Ready;
@@ -1879,6 +2508,21 @@ impl Platform {
             ));
             state.snapshot.previews.screen = None;
             state.record("Screen capture first-frame deadline expired");
+        }
+        if self
+            .camera
+            .as_ref()
+            .is_some_and(|camera| !camera.is_running())
+        {
+            state.snapshot.virtual_camera_state = DeviceState::Failed;
+            state.set_warning(
+                WarningSource::VirtualCamera,
+                "virtual camera stopped unexpectedly",
+            );
+            state
+                .snapshot
+                .virtual_camera_component
+                .mark_failed(now, "virtual camera stopped unexpectedly");
         }
     }
 
@@ -2031,6 +2675,7 @@ impl Platform {
                 .as_ref()
                 .and_then(|monitor| self.screen.display_uses_hdr_or_ten_bit(monitor).ok())
                 .unwrap_or(false);
+            self.synchronize_hdr_warning(state);
             state.snapshot.selected_monitor = self.selected_monitor.clone();
             if let Some(monitor) = self.selected_monitor.as_ref() {
                 state
@@ -2042,46 +2687,487 @@ impl Platform {
             state.record("Reference monitor changed after two scans");
         }
     }
+}
 
-    fn publish(&self, state: &mut RuntimeState, now: Instant) {
-        let Some(frame) = state.snapshot.previews.final_output.as_deref() else {
-            return;
-        };
+#[cfg(windows)]
+impl Drop for DevicePlatform {
+    fn drop(&mut self) {
+        self.assert_owner_thread();
         if let Some(publisher) = &self.publisher {
-            match publisher.publish(frame) {
-                Ok(()) => state.snapshot.publisher_component.mark_ready(now),
-                Err(error) => {
-                    state
-                        .snapshot
-                        .publisher_component
-                        .mark_failed(now, error.clone());
-                    if state.snapshot.warning.as_deref() != Some(error.as_str()) {
-                        state.snapshot.warning = Some(error.clone());
-                        state.record(format!("Frame publish failed: {error}"));
+            let _ = publisher.invalidate();
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct PendingDeviceCommands {
+    settings: Option<Command>,
+    mode: Option<Command>,
+    monitor: Option<MonitorDescriptor>,
+    refresh_video_devices: bool,
+    rescan: bool,
+    stop_output: bool,
+    capture_reference: bool,
+    capture_candidate: bool,
+    discard_candidate: bool,
+    restarts: HashSet<RestartTarget>,
+    reference: Option<GrayImage>,
+}
+
+#[cfg(any(windows, test))]
+impl PendingDeviceCommands {
+    fn push(&mut self, command: &Command) {
+        match command {
+            command @ (Command::UpdateSettings(_) | Command::ReloadSettings(_)) => {
+                self.settings = Some(command.clone());
+            }
+            command @ Command::SetMode(_) => self.mode = Some(command.clone()),
+            Command::SelectMonitor(monitor) => self.monitor = Some(monitor.clone()),
+            Command::RefreshVideoDevices => self.refresh_video_devices = true,
+            Command::Rescan => self.rescan = true,
+            Command::Stop => self.stop_output = true,
+            Command::CaptureReference => self.capture_reference = true,
+            Command::CaptureReferenceCandidate => self.capture_candidate = true,
+            Command::DiscardReferenceCandidate => self.discard_candidate = true,
+            Command::Restart(RestartTarget::All) => {
+                self.restarts.clear();
+                self.restarts.insert(RestartTarget::All);
+            }
+            Command::Restart(target) if !self.restarts.contains(&RestartTarget::All) => {
+                self.restarts.insert(*target);
+            }
+            _ => {}
+        }
+    }
+
+    fn take(&mut self) -> (Vec<Command>, Option<GrayImage>) {
+        let mut commands = Vec::with_capacity(9);
+        commands.extend(self.settings.take());
+        commands.extend(self.mode.take());
+        commands.extend(self.monitor.take().map(Command::SelectMonitor));
+        if std::mem::take(&mut self.refresh_video_devices) {
+            commands.push(Command::RefreshVideoDevices);
+        }
+        if std::mem::take(&mut self.rescan) {
+            commands.push(Command::Rescan);
+        }
+        if std::mem::take(&mut self.capture_reference) {
+            commands.push(Command::CaptureReference);
+        }
+        if std::mem::take(&mut self.capture_candidate) {
+            commands.push(Command::CaptureReferenceCandidate);
+        }
+        if std::mem::take(&mut self.discard_candidate) {
+            commands.push(Command::DiscardReferenceCandidate);
+        }
+        if std::mem::take(&mut self.stop_output) {
+            commands.push(Command::Stop);
+        }
+        if self.restarts.remove(&RestartTarget::All) {
+            self.restarts.clear();
+            commands.push(Command::Restart(RestartTarget::All));
+        } else {
+            commands.extend(self.restarts.drain().map(Command::Restart));
+        }
+        (commands, self.reference.take())
+    }
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct DeviceSnapshot {
+    app: AppSnapshot,
+    warnings: WarningRegistry,
+    observed_at: Option<Instant>,
+    native_aspect_ratio: Option<f64>,
+    publisher: Option<FramePublisherSink>,
+    legacy_capture: Option<(u64, Arc<Frame>)>,
+    candidate_event: Option<(u64, Option<Arc<Frame>>)>,
+}
+
+#[cfg(windows)]
+struct DeviceWorker {
+    latest: Arc<RwLock<Arc<DeviceSnapshot>>>,
+    pending: Arc<(Mutex<PendingDeviceCommands>, Condvar)>,
+    stop: Arc<AtomicBool>,
+    done: Receiver<()>,
+    worker: Option<JoinHandle<()>>,
+    last_activity_id: u64,
+    last_legacy_capture_id: u64,
+    last_candidate_event_id: u64,
+}
+
+#[cfg(windows)]
+impl DeviceWorker {
+    fn start(config: AppConfig) -> Result<Self, String> {
+        let latest = Arc::new(RwLock::new(Arc::new(DeviceSnapshot::default())));
+        let worker_latest = Arc::clone(&latest);
+        let pending = Arc::new((Mutex::new(PendingDeviceCommands::default()), Condvar::new()));
+        let worker_pending = Arc::clone(&pending);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let (done_sender, done_receiver) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("stageswap-device-owner".into())
+            .spawn(move || {
+                let now = Instant::now();
+                let mut state = RuntimeState::new_at(config, now);
+                let mut platform = DevicePlatform::new(&mut state, |state, publisher| {
+                    let snapshot = DeviceSnapshot {
+                        app: state.snapshot.clone(),
+                        warnings: state.warnings.clone(),
+                        observed_at: Some(Instant::now()),
+                        publisher,
+                        ..DeviceSnapshot::default()
+                    };
+                    *worker_latest
+                        .write()
+                        .expect("device snapshot state is not poisoned") = Arc::new(snapshot);
+                });
+                let mut pacer = FramePacer::new(
+                    now,
+                    Duration::from_nanos(1_000_000_000 / u64::from(PIPELINE_FPS)),
+                );
+                let mut last_slow_command_log = now - Duration::from_secs(60);
+                let mut legacy_capture = None;
+                let mut legacy_capture_id = 0_u64;
+                let mut candidate_event = None;
+                let mut candidate_event_id = 0_u64;
+                publish_device_snapshot(
+                    &worker_latest,
+                    &platform,
+                    &state,
+                    &legacy_capture,
+                    &candidate_event,
+                );
+                while !worker_stop.load(Ordering::Acquire) {
+                    let (commands, reference) = {
+                        let (lock, _) = &*worker_pending;
+                        lock.lock()
+                            .expect("device command state is not poisoned")
+                            .take()
+                    };
+                    if let Some(reference) = reference {
+                        state.reference = Some(reference);
+                        platform.reference_updated(&mut state);
+                    }
+                    for command in commands {
+                        let started = Instant::now();
+                        platform.command(&command, &mut state);
+                        state.command(command.clone());
+                        if matches!(
+                            command,
+                            Command::CaptureReferenceCandidate | Command::DiscardReferenceCandidate
+                        ) {
+                            candidate_event_id = candidate_event_id.wrapping_add(1).max(1);
+                            candidate_event = Some((
+                                candidate_event_id,
+                                state.snapshot.previews.reference_candidate.clone(),
+                            ));
+                        }
+                        if matches!(command, Command::CaptureReference)
+                            && let Some(frame) = state.pending_reference_capture.take()
+                        {
+                            legacy_capture_id = legacy_capture_id.wrapping_add(1).max(1);
+                            legacy_capture = Some((legacy_capture_id, frame));
+                        }
+                        let elapsed = started.elapsed();
+                        if elapsed >= Duration::from_millis(100)
+                            && started.saturating_duration_since(last_slow_command_log)
+                                >= Duration::from_secs(30)
+                        {
+                            state.record(format!("Device command took {} ms", elapsed.as_millis()));
+                            last_slow_command_log = started;
+                        }
+                    }
+                    let now = Instant::now();
+                    if pacer.is_due(now, Duration::ZERO) {
+                        pacer.advance(now);
+                        platform.refresh_inputs(&mut state, now);
+                        publish_device_snapshot(
+                            &worker_latest,
+                            &platform,
+                            &state,
+                            &legacy_capture,
+                            &candidate_event,
+                        );
+                    }
+                    let timeout = pacer
+                        .wait_duration(Instant::now())
+                        .min(Duration::from_millis(34));
+                    let (lock, changed) = &*worker_pending;
+                    let guard = lock.lock().expect("device command state is not poisoned");
+                    if !worker_stop.load(Ordering::Acquire) {
+                        let _ = changed.wait_timeout(guard, timeout);
                     }
                 }
-            }
-        }
-        if self
-            .camera
-            .as_ref()
-            .is_some_and(|camera| !camera.is_running())
-        {
-            state.snapshot.virtual_camera_state = DeviceState::Failed;
-            state
-                .snapshot
-                .virtual_camera_component
-                .mark_failed(now, "virtual camera stopped unexpectedly");
+                let _ = platform.publisher.as_ref().map(FramePublisher::invalidate);
+                drop(platform);
+                let _ = done_sender.try_send(());
+            })
+            .map_err(|error| format!("could not start device worker: {error}"))?;
+        Ok(Self {
+            latest,
+            pending,
+            stop,
+            done: done_receiver,
+            worker: Some(worker),
+            last_activity_id: 0,
+            last_legacy_capture_id: 0,
+            last_candidate_event_id: 0,
+        })
+    }
+
+    fn push(&self, command: &Command) {
+        let (lock, changed) = &*self.pending;
+        lock.lock()
+            .expect("device command state is not poisoned")
+            .push(command);
+        changed.notify_one();
+    }
+
+    fn update_reference(&self, reference: Option<GrayImage>) {
+        let Some(reference) = reference else {
+            return;
+        };
+        let (lock, changed) = &*self.pending;
+        let mut pending = lock.lock().expect("device command state is not poisoned");
+        pending.reference = Some(reference);
+        pending.discard_candidate = true;
+        drop(pending);
+        changed.notify_one();
+    }
+
+    fn snapshot(&self) -> Arc<DeviceSnapshot> {
+        Arc::clone(
+            &self
+                .latest
+                .read()
+                .expect("device snapshot state is not poisoned"),
+        )
+    }
+
+    fn signal_shutdown(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.pending.1.notify_all();
+    }
+
+    fn finish_shutdown(&mut self, timeout: Duration) -> bool {
+        finish_worker_shutdown(&self.done, &mut self.worker, timeout)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for DeviceWorker {
+    fn drop(&mut self) {
+        if self.worker.is_some() {
+            self.signal_shutdown();
+            let _ = self.finish_shutdown(WORKER_SHUTDOWN_TIMEOUT);
         }
     }
 }
 
 #[cfg(windows)]
-impl Drop for Platform {
-    fn drop(&mut self) {
-        if let Some(publisher) = &self.publisher {
-            let _ = publisher.invalidate();
+fn publish_device_snapshot(
+    destination: &RwLock<Arc<DeviceSnapshot>>,
+    platform: &DevicePlatform,
+    state: &RuntimeState,
+    legacy_capture: &Option<(u64, Arc<Frame>)>,
+    candidate_event: &Option<(u64, Option<Arc<Frame>>)>,
+) {
+    let snapshot = DeviceSnapshot {
+        app: state.snapshot.clone(),
+        warnings: state.warnings.clone(),
+        observed_at: Some(Instant::now()),
+        native_aspect_ratio: platform.webcam.native_display_aspect_ratio(),
+        publisher: platform.publisher.as_ref().map(FramePublisher::sink),
+        legacy_capture: legacy_capture.clone(),
+        candidate_event: candidate_event.clone(),
+    };
+    *destination
+        .write()
+        .expect("device snapshot state is not poisoned") = Arc::new(snapshot);
+}
+
+#[cfg(windows)]
+struct Platform {
+    worker: Option<DeviceWorker>,
+}
+
+#[cfg(windows)]
+impl Platform {
+    fn new(state: &mut RuntimeState) -> Self {
+        match DeviceWorker::start(state.config.clone()) {
+            Ok(worker) => Self {
+                worker: Some(worker),
+            },
+            Err(error) => {
+                state.set_warning(WarningSource::DeviceWorker, error.clone());
+                state.snapshot.webcam_state = DeviceState::Failed;
+                state.snapshot.screen_state = DeviceState::Failed;
+                state.snapshot.virtual_camera_state = DeviceState::Failed;
+                state.record(error);
+                Self { worker: None }
+            }
         }
+    }
+
+    fn command(&mut self, command: &Command, _state: &mut RuntimeState) {
+        if let Some(worker) = &self.worker {
+            worker.push(command);
+        }
+    }
+
+    fn refresh_inputs(&mut self, state: &mut RuntimeState, now: Instant) {
+        let Some(worker) = &mut self.worker else {
+            state.snapshot.previews.webcam = None;
+            state.snapshot.previews.screen = None;
+            state.snapshot.availability = SourceAvailability::default();
+            return;
+        };
+        let device = worker.snapshot();
+        let app = &device.app;
+        if device.observed_at.is_some_and(|observed_at| {
+            now.saturating_duration_since(observed_at) > FRAME_STALE_AFTER
+        }) {
+            state.set_warning(
+                WarningSource::DeviceWorker,
+                "Device worker is delayed; safe fallback is active",
+            );
+        } else {
+            state.clear_warning(WarningSource::DeviceWorker);
+        }
+        state.snapshot.webcam_state = app.webcam_state;
+        state.snapshot.screen_state = app.screen_state;
+        state.snapshot.virtual_camera_state = app.virtual_camera_state;
+        state.snapshot.webcam_component = app.webcam_component.clone();
+        state.snapshot.screen_component = app.screen_component.clone();
+        state.snapshot.publisher_component = app.publisher_component.clone();
+        state.snapshot.virtual_camera_component = app.virtual_camera_component.clone();
+        state.snapshot.video_devices = Arc::clone(&app.video_devices);
+        state.snapshot.selected_video_device_id = app.selected_video_device_id.clone();
+        state.snapshot.webcam_native_format = app.webcam_native_format.clone();
+        state.snapshot.webcam_output_format = app.webcam_output_format.clone();
+        state.snapshot.monitors = Arc::clone(&app.monitors);
+        state.snapshot.selected_monitor = app.selected_monitor.clone();
+        state.merge_device_warnings(&device.warnings);
+
+        let webcam_is_stale = app
+            .previews
+            .webcam
+            .as_ref()
+            .is_some_and(|frame| !frame.is_fresh_at(now, FRAME_STALE_AFTER));
+        let webcam = (!webcam_is_stale)
+            .then(|| app.previews.webcam.clone())
+            .flatten();
+        state.snapshot.previews.webcam = webcam.map(|frame| {
+            state.webcam_crop.apply(
+                frame,
+                state.config.crop_webcam_to_16_9,
+                device.native_aspect_ratio,
+            )
+        });
+        if webcam_is_stale {
+            state.snapshot.webcam_state = DeviceState::Failed;
+            state
+                .snapshot
+                .webcam_component
+                .transition(ComponentLifecycle::Stale, now);
+        }
+        let screen_is_stale = app
+            .previews
+            .screen
+            .as_ref()
+            .is_some_and(|frame| !frame.is_fresh_at(now, FRAME_STALE_AFTER));
+        state.snapshot.previews.screen = (!screen_is_stale)
+            .then(|| app.previews.screen.clone())
+            .flatten();
+        if screen_is_stale {
+            state.snapshot.screen_state = DeviceState::Failed;
+            state
+                .snapshot
+                .screen_component
+                .transition(ComponentLifecycle::Stale, now);
+        }
+        state.snapshot.availability.camera_ready = state.snapshot.previews.webcam.is_some();
+        state.snapshot.availability.screen_ready =
+            app.availability.screen_ready && state.snapshot.previews.screen.is_some();
+
+        if let Some((capture_id, frame)) = &device.legacy_capture
+            && *capture_id > worker.last_legacy_capture_id
+        {
+            state.pending_reference_capture = Some(Arc::clone(frame));
+            worker.last_legacy_capture_id = *capture_id;
+        }
+        if let Some((event_id, candidate)) = &device.candidate_event
+            && *event_id > worker.last_candidate_event_id
+        {
+            state.snapshot.previews.reference_candidate = candidate.clone();
+            worker.last_candidate_event_id = *event_id;
+        }
+
+        let first = app.recent_activity_first_id;
+        if worker.last_activity_id.saturating_add(1) < first {
+            state.record("Device activity entries were skipped");
+            worker.last_activity_id = first.saturating_sub(1);
+        }
+        for (index, activity) in app.recent_activity.iter().enumerate() {
+            let id = first.saturating_add(index as u64);
+            if id > worker.last_activity_id {
+                state.record(activity.clone());
+                worker.last_activity_id = id;
+            }
+        }
+    }
+
+    fn publish(&self, state: &mut RuntimeState, now: Instant) {
+        let Some(worker) = &self.worker else {
+            return;
+        };
+        let device = worker.snapshot();
+        let Some(frame) = state.snapshot.previews.final_output.as_deref() else {
+            return;
+        };
+        if let Some(publisher) = &device.publisher {
+            match publisher.publish(frame) {
+                Ok(()) => {
+                    state.snapshot.publisher_component.mark_ready(now);
+                    state.clear_warning(WarningSource::PublisherSink);
+                }
+                Err(error) => {
+                    state
+                        .snapshot
+                        .publisher_component
+                        .mark_failed(now, error.clone());
+                    let already_reported =
+                        state.warnings.entries[WarningSource::PublisherSink as usize].as_deref()
+                            == Some(error.as_str());
+                    state.set_warning(WarningSource::PublisherSink, error.clone());
+                    if !already_reported {
+                        state.record(format!("Frame publish failed: {error}"));
+                    }
+                }
+            }
+        }
+    }
+
+    fn reference_updated(&mut self, state: &mut RuntimeState) {
+        if let Some(worker) = &self.worker {
+            worker.update_reference(state.reference.clone());
+        }
+    }
+
+    fn signal_shutdown(&mut self) {
+        if let Some(worker) = &mut self.worker {
+            worker.signal_shutdown();
+        }
+    }
+
+    fn finish_shutdown(&mut self, timeout: Duration) -> bool {
+        self.worker
+            .as_mut()
+            .is_none_or(|worker| worker.finish_shutdown(timeout))
     }
 }
 
@@ -2096,6 +3182,7 @@ impl Platform {
     fn command(&mut self, _command: &Command, _state: &mut RuntimeState) {}
     fn refresh_inputs(&mut self, _state: &mut RuntimeState, _now: Instant) {}
     fn publish(&self, _state: &mut RuntimeState, _now: Instant) {}
+    fn reference_updated(&mut self, _state: &mut RuntimeState) {}
 }
 
 impl RuntimePorts for Platform {
@@ -2109,6 +3196,27 @@ impl RuntimePorts for Platform {
 
     fn publish(&self, state: &mut RuntimeState, now: Instant) {
         Platform::publish(self, state, now);
+    }
+
+    fn reference_updated(&mut self, state: &mut RuntimeState) {
+        Platform::reference_updated(self, state);
+    }
+
+    fn signal_shutdown(&mut self) {
+        #[cfg(windows)]
+        Platform::signal_shutdown(self);
+    }
+
+    fn finish_shutdown(&mut self, timeout: Duration) -> bool {
+        #[cfg(windows)]
+        {
+            Platform::finish_shutdown(self, timeout)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = timeout;
+            true
+        }
     }
 }
 
@@ -2216,6 +3324,7 @@ mod tests {
 
         clock.advance(Duration::from_secs(2));
         assert!(engine.step(clock.now()));
+        assert!(engine.state.snapshot.output_deadline_misses > 0);
         assert_eq!(
             engine.state.snapshot.screen_component.lifecycle,
             ComponentLifecycle::Failed
@@ -2231,6 +3340,26 @@ mod tests {
             engine.state.snapshot.webcam_component.lifecycle,
             ComponentLifecycle::Ready
         );
+    }
+
+    #[test]
+    fn shutdown_timeout_detaches_worker_and_allows_controlled_release() {
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let worker_barrier = Arc::clone(&barrier);
+        let (done_sender, done_receiver) = std_mpsc::sync_channel(1);
+        let mut worker = Some(thread::spawn(move || {
+            worker_barrier.wait();
+            let _ = done_sender.send(());
+        }));
+
+        assert!(!finish_worker_shutdown(
+            &done_receiver,
+            &mut worker,
+            Duration::from_millis(1)
+        ));
+        assert!(worker.is_none());
+        barrier.wait();
+        assert!(done_receiver.recv_timeout(Duration::from_secs(1)).is_ok());
     }
 
     #[test]
@@ -2717,6 +3846,131 @@ mod tests {
                 .unwrap(),
             &candidate
         ));
+        assert!(!directory.path().join("reference.pending.png").exists());
+    }
+
+    #[test]
+    fn reference_decode_enforces_dimension_limit_and_caps_retained_preview() {
+        let directory = tempfile::tempdir().unwrap();
+        let boundary = directory.path().join("boundary.png");
+        image::RgbaImage::new(REFERENCE_MAX_DIMENSION, 1)
+            .save(&boundary)
+            .unwrap();
+        assert!(decode_reference(&boundary).is_ok());
+
+        let oversized = directory.path().join("oversized.png");
+        image::RgbaImage::new(REFERENCE_MAX_DIMENSION + 1, 1)
+            .save(&oversized)
+            .unwrap();
+        assert!(decode_reference(&oversized).is_err());
+
+        let large = image::RgbaImage::new(2000, 1000);
+        let data = reference_data_from_rgba(&large).unwrap();
+        assert_eq!(data.preview.size, Size::new(1280, 640));
+        assert_eq!(data.detector.size, Size::new(160, 90));
+    }
+
+    #[test]
+    fn atomic_reference_replace_preserves_exact_pixels_and_cleans_pending_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("reference.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))
+            .save(&destination)
+            .unwrap();
+        let replacement = image::RgbaImage::from_pixel(3, 1, image::Rgba([9, 8, 7, 255]));
+
+        persist_rgba_atomic(&replacement, &destination).unwrap();
+
+        assert_eq!(image::open(&destination).unwrap().to_rgba8(), replacement);
+        assert!(!directory.path().join("reference.pending.png").exists());
+    }
+
+    #[test]
+    fn warning_registry_preserves_source_ownership_and_priority() {
+        let mut state = RuntimeState::new(AppConfig::default());
+        state.set_warning(WarningSource::Hdr, "hdr");
+        state.set_warning(WarningSource::VirtualCamera, "camera");
+        state.set_warning(WarningSource::PublisherSink, "publisher");
+        assert_eq!(state.snapshot.warning.as_deref(), Some("publisher"));
+
+        state.clear_warning(WarningSource::VirtualCamera);
+        assert_eq!(state.snapshot.warning.as_deref(), Some("publisher"));
+        state.clear_warning(WarningSource::PublisherSink);
+        assert_eq!(state.snapshot.warning.as_deref(), Some("hdr"));
+        state.clear_warning(WarningSource::Hdr);
+        assert!(state.snapshot.warning.is_none());
+    }
+
+    #[test]
+    fn activity_ids_keep_duplicate_messages_and_track_ring_rollover() {
+        let mut state = RuntimeState::new(AppConfig::default());
+        state.record("duplicate");
+        state.record("duplicate");
+        assert_eq!(state.snapshot.recent_activity_first_id, 1);
+        assert_eq!(state.snapshot.recent_activity.len(), 2);
+        for index in 0..ACTIVITY_LIMIT {
+            state.record(format!("event-{index}"));
+        }
+        assert_eq!(state.snapshot.recent_activity.len(), ACTIVITY_LIMIT);
+        assert_eq!(state.snapshot.recent_activity_first_id, 3);
+        assert_eq!(state.snapshot.recent_activity[0], "event-0");
+    }
+
+    #[test]
+    fn settings_only_reload_reference_when_required() {
+        let now = Instant::now();
+        let config = AppConfig::default();
+        let state = RuntimeState::new_at(config.clone(), now);
+        let mut engine = RuntimeEngine::from_parts(state, FakeRuntimePorts::default(), now);
+        assert_eq!(engine.reference_generation, 1);
+
+        assert!(engine.command(Command::UpdateSettings(Box::new(config.clone()))));
+        assert_eq!(engine.reference_generation, 1);
+        assert!(engine.command(Command::ReloadSettings(Box::new(config))));
+        assert_eq!(engine.reference_generation, 2);
+    }
+
+    #[test]
+    fn device_commands_are_bounded_coalesced_and_restart_all_subsumes_individuals() {
+        let mut pending = PendingDeviceCommands::default();
+        let first = AppConfig {
+            cursor_visible: false,
+            ..AppConfig::default()
+        };
+        let latest = AppConfig {
+            cursor_visible: true,
+            ..first.clone()
+        };
+        pending.push(&Command::UpdateSettings(Box::new(first)));
+        pending.push(&Command::UpdateSettings(Box::new(latest.clone())));
+        pending.push(&Command::RefreshVideoDevices);
+        pending.push(&Command::RefreshVideoDevices);
+        pending.push(&Command::Restart(RestartTarget::Webcam));
+        pending.push(&Command::Restart(RestartTarget::All));
+        pending.push(&Command::Restart(RestartTarget::ScreenCapture));
+
+        let (commands, reference) = pending.take();
+
+        assert!(reference.is_none());
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| matches!(command, Command::UpdateSettings(_)))
+                .count(),
+            1
+        );
+        assert!(commands.contains(&Command::UpdateSettings(Box::new(latest))));
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| matches!(command, Command::RefreshVideoDevices))
+                .count(),
+            1
+        );
+        assert!(commands.contains(&Command::Restart(RestartTarget::All)));
+        assert!(!commands.contains(&Command::Restart(RestartTarget::Webcam)));
+        assert!(!commands.contains(&Command::Restart(RestartTarget::ScreenCapture)));
+        assert!(pending.take().0.is_empty());
     }
 
     #[test]

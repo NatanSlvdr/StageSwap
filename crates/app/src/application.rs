@@ -2,7 +2,7 @@ use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle,
     TextureOptions, Vec2,
 };
-use stageswap_app::RuntimeHandle;
+use stageswap_app::{CommandDispatch, RuntimeHandle};
 use stageswap_core::{
     AdminProfileStatus, AdminProfileStore, AdminRestoreOutcome, AppConfig, AppSnapshot, Command,
     ComponentFailureKind, ConfigLoad, ConfigStore, DetectionState, DeviceState, Frame, OutputMode,
@@ -46,6 +46,7 @@ const SETUP_BOOTH_BLACK: Color32 = Color32::from_rgb(16, 18, 23);
 const SETUP_SIGNAL_DECK: Color32 = Color32::from_rgb(26, 29, 36);
 const SETUP_SIGNAL_WHITE: Color32 = Color32::from_rgb(245, 247, 250);
 const REFERENCE_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
+const COMMAND_BUSY_BANNER_DURATION: Duration = Duration::from_secs(5);
 const SETUP_REFERENCE_FLASH_DURATION: Duration = Duration::from_millis(120);
 const SETUP_REFERENCE_RAIL_WIDTH: f32 = 280.0;
 const SETUP_REFERENCE_CARD_HEIGHT: f32 = 262.0;
@@ -835,6 +836,7 @@ fn ui_preview_snapshot() -> AppSnapshot {
         webcam_fps: Some(30),
         screen_fps: Some(30),
         output_fps: Some(30),
+        recent_activity_first_id: 1,
         recent_activity: vec![
             "Reference display confirmed".into(),
             "Automatic output selected Camera".into(),
@@ -1101,8 +1103,10 @@ struct SwitcherApp {
     setup_example_textures: Option<SetupExampleTextures>,
     textures: HashMap<&'static str, PreviewTexture>,
     preview_converters: HashMap<PreviewKind, PreviewConverter>,
+    render_snapshot: Option<Arc<AppSnapshot>>,
     log: LocalLog,
-    last_activity: Option<String>,
+    last_activity_id: u64,
+    command_banner: Option<(Instant, String)>,
     #[cfg(windows)]
     last_notified_warning: Option<String>,
     #[cfg(windows)]
@@ -1176,8 +1180,10 @@ impl SwitcherApp {
             setup_example_textures: None,
             textures: HashMap::new(),
             preview_converters: HashMap::new(),
+            render_snapshot: None,
             log,
-            last_activity: None,
+            last_activity_id: 0,
+            command_banner: None,
             #[cfg(windows)]
             last_notified_warning: None,
             #[cfg(windows)]
@@ -1351,19 +1357,56 @@ impl SwitcherApp {
         }
     }
 
-    fn snapshot(&self) -> AppSnapshot {
+    fn snapshot(&self) -> Arc<AppSnapshot> {
+        if let Some(snapshot) = &self.render_snapshot {
+            return Arc::clone(snapshot);
+        }
         #[cfg(not(windows))]
         if let Some(preview) = &self.ui_preview {
-            return preview.snapshot.clone();
+            return Arc::new(preview.snapshot.clone());
         }
-        self.runtime.snapshot()
+        Arc::new(self.runtime.snapshot())
     }
 
-    fn send(&self, command: Command) {
-        let _ = self.runtime.send(command);
+    fn send(&mut self, command: Command) -> bool {
+        let dispatch = self.runtime.send(command);
+        self.handle_command_dispatch(dispatch)
     }
 
-    fn send_setup_reference_command(&mut self, command: Command) {
+    fn handle_command_dispatch(&mut self, dispatch: CommandDispatch) -> bool {
+        match dispatch {
+            CommandDispatch::Queued | CommandDispatch::Coalesced => true,
+            CommandDispatch::Busy => {
+                let message = "StageSwap is busy. Please try again.".to_owned();
+                self.log
+                    .write("warning", "runtime", "COMMAND_QUEUE_BUSY", &message);
+                self.command_banner = Some((Instant::now(), message.clone()));
+                #[cfg(windows)]
+                if self.config.show_notifications
+                    && let Err(error) = stageswap_windows::notify_warning(self.locale(), &message)
+                {
+                    self.log.write(
+                        "warning",
+                        "notification",
+                        "WINDOWS_NOTIFICATION_FAILED",
+                        &error,
+                    );
+                }
+                false
+            }
+            CommandDispatch::Closed => {
+                if !self.exit_requested {
+                    let message = "StageSwap runtime is unavailable.".to_owned();
+                    self.log
+                        .write("warning", "runtime", "COMMAND_QUEUE_CLOSED", &message);
+                    self.command_banner = Some((Instant::now(), message));
+                }
+                false
+            }
+        }
+    }
+
+    fn send_setup_reference_command(&mut self, command: Command) -> bool {
         #[cfg(not(windows))]
         if let Some(preview) = self.ui_preview.as_mut() {
             match command {
@@ -1400,10 +1443,10 @@ impl SwitcherApp {
                     debug_assert!(false, "unexpected setup reference preview command");
                 }
             }
-            return;
+            return true;
         }
 
-        self.send(command);
+        self.send(command)
     }
 
     fn toggle_disco(&mut self) {
@@ -1520,7 +1563,9 @@ impl SwitcherApp {
                 SetupAction::GoTo(destination) => destination != SetupStep::Reference,
             };
         if leaves_reference && reference_requires_decision {
-            self.send_setup_reference_command(Command::DiscardReferenceCandidate);
+            if !self.send_setup_reference_command(Command::DiscardReferenceCandidate) {
+                return;
+            }
             self.setup_reference_capture = SetupReferenceCaptureState::Idle;
         }
         match action {
@@ -1619,15 +1664,16 @@ impl SwitcherApp {
     }
 
     fn prepare_reference_capture(&mut self) {
-        self.setup_reference_capture = SetupReferenceCaptureState::PreparingCandidate {
-            started_at: Instant::now(),
-        };
-        self.send_setup_reference_command(Command::DiscardReferenceCandidate);
+        if self.send_setup_reference_command(Command::DiscardReferenceCandidate) {
+            self.setup_reference_capture = SetupReferenceCaptureState::PreparingCandidate {
+                started_at: Instant::now(),
+            };
+        }
     }
 
     fn capture_reference_candidate(&mut self) {
         let snapshot = self.snapshot();
-        self.setup_reference_capture = SetupReferenceCaptureState::CapturingCandidate {
+        let next_state = SetupReferenceCaptureState::CapturingCandidate {
             started_at: Instant::now(),
             previous_candidate_sequence: snapshot
                 .previews
@@ -1635,7 +1681,9 @@ impl SwitcherApp {
                 .as_ref()
                 .map(|frame| frame.sequence),
         };
-        self.send_setup_reference_command(Command::CaptureReferenceCandidate);
+        if self.send_setup_reference_command(Command::CaptureReferenceCandidate) {
+            self.setup_reference_capture = next_state;
+        }
     }
 
     fn cancel_reference_capture(&mut self) {
@@ -1645,14 +1693,15 @@ impl SwitcherApp {
         ) {
             return;
         }
-        self.send_setup_reference_command(Command::DiscardReferenceCandidate);
-        self.setup_reference_capture = SetupReferenceCaptureState::Idle;
-        self.dismiss_dialog();
+        if self.send_setup_reference_command(Command::DiscardReferenceCandidate) {
+            self.setup_reference_capture = SetupReferenceCaptureState::Idle;
+            self.dismiss_dialog();
+        }
     }
 
     fn confirm_reference_candidate(&mut self) {
         let snapshot = self.snapshot();
-        self.setup_reference_capture = SetupReferenceCaptureState::SavingCandidate {
+        let next_state = SetupReferenceCaptureState::SavingCandidate {
             started_at: Instant::now(),
             previous_reference_sequence: snapshot
                 .previews
@@ -1660,7 +1709,9 @@ impl SwitcherApp {
                 .as_ref()
                 .map(|frame| frame.sequence),
         };
-        self.send_setup_reference_command(Command::ConfirmReferenceCandidate);
+        if self.send_setup_reference_command(Command::ConfirmReferenceCandidate) {
+            self.setup_reference_capture = next_state;
+        }
     }
 
     fn open_admin_configuration(&mut self) {
@@ -1859,7 +1910,16 @@ impl SwitcherApp {
 
     fn root_ui(&mut self, ui: &mut egui::Ui) -> Rect {
         let context = ui.ctx().clone();
-        let disco_enabled = self.snapshot().disco_enabled;
+        let render_snapshot = self.snapshot();
+        let disco_enabled = render_snapshot.disco_enabled;
+        self.render_snapshot = Some(render_snapshot);
+        if self
+            .command_banner
+            .as_ref()
+            .is_some_and(|(shown_at, _)| shown_at.elapsed() >= COMMAND_BUSY_BANNER_DURATION)
+        {
+            self.command_banner = None;
+        }
         let content_rect = ui
             .scope(|ui| {
                 if disco_enabled {
@@ -1889,7 +1949,23 @@ impl SwitcherApp {
             })
             .inner;
         self.dialog(&context);
+        if let Some((_, message)) = &self.command_banner {
+            egui::Area::new(egui::Id::new("command-status-banner"))
+                .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 16.0))
+                .order(egui::Order::Foreground)
+                .show(&context, |ui| {
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(111, 73, 20))
+                        .corner_radius(8.0)
+                        .inner_margin(egui::Margin::symmetric(14, 8))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(message).color(Color32::WHITE).strong());
+                        });
+                });
+            context.request_repaint_after(COMMAND_BUSY_BANNER_DURATION);
+        }
         self.paint_disco_interface(&context, content_rect, disco_enabled);
+        self.render_snapshot = None;
         content_rect
     }
 
@@ -5210,22 +5286,23 @@ impl eframe::App for SwitcherApp {
         if self.settings_save_due(Instant::now()) {
             self.flush_settings();
         }
-        let first_unlogged = self
-            .last_activity
-            .as_ref()
-            .and_then(|last| {
-                snapshot
-                    .recent_activity
-                    .iter()
-                    .rposition(|activity| activity == last)
-            })
-            .map_or(0, |index| index + 1);
-        for activity in snapshot.recent_activity.iter().skip(first_unlogged) {
-            self.log
-                .write("info", "runtime", "ACTIVITY", activity.as_str());
+        let first_activity_id = snapshot.recent_activity_first_id;
+        if self.last_activity_id.saturating_add(1) < first_activity_id {
+            self.log.write(
+                "warning",
+                "runtime",
+                "ACTIVITY_GAP",
+                "Runtime activity entries were overwritten before the UI observed them",
+            );
+            self.last_activity_id = first_activity_id.saturating_sub(1);
         }
-        if let Some(activity) = snapshot.recent_activity.last() {
-            self.last_activity = Some(activity.clone());
+        for (index, activity) in snapshot.recent_activity.iter().enumerate() {
+            let activity_id = first_activity_id.saturating_add(index as u64);
+            if activity_id > self.last_activity_id {
+                self.log
+                    .write("info", "runtime", "ACTIVITY", activity.as_str());
+                self.last_activity_id = activity_id;
+            }
         }
         #[cfg(windows)]
         if self.config.show_notifications
@@ -5272,7 +5349,9 @@ impl eframe::App for SwitcherApp {
                     }
                 }
                 tray::TrayAction::SetMode(mode) => self.set_mode(mode),
-                tray::TrayAction::RescanDisplays => self.send(Command::Rescan),
+                tray::TrayAction::RescanDisplays => {
+                    self.send(Command::Rescan);
+                }
                 tray::TrayAction::RestartScreenCapture => {
                     self.send(Command::Restart(RestartTarget::ScreenCapture));
                 }
@@ -8908,7 +8987,10 @@ mod tests {
     fn settings_sidebar_navigation_is_vertical_and_non_overlapping() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
-            AppConfig::default(),
+            AppConfig {
+                show_notifications: false,
+                ..AppConfig::default()
+            },
             Vec::new(),
             ConfigStore::new(directory.path()),
         );
@@ -9380,7 +9462,7 @@ mod tests {
         .with_ui_preview(UiPreviewRequest {
             target: UiPreviewTarget::Setup(SetupStep::Reference),
         });
-        let original = app.snapshot().previews.reference.unwrap();
+        let original = app.snapshot().previews.reference.clone().unwrap();
 
         app.setup_reference_capture = SetupReferenceCaptureState::CapturingCandidate {
             started_at: Instant::now(),
@@ -9413,7 +9495,7 @@ mod tests {
         ));
 
         app.send_setup_reference_command(Command::CaptureReferenceCandidate);
-        let candidate = app.snapshot().previews.reference_candidate.unwrap();
+        let candidate = app.snapshot().previews.reference_candidate.clone().unwrap();
         app.setup_reference_capture = SetupReferenceCaptureState::SavingCandidate {
             started_at: Instant::now(),
             previous_reference_sequence: Some(original.sequence),
@@ -9432,6 +9514,27 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn busy_command_feedback_preserves_reference_dialog_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            AppConfig::default(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        );
+        app.setup_reference_capture = SetupReferenceCaptureState::Review {
+            captured_at: Instant::now(),
+        };
+
+        assert!(!app.handle_command_dispatch(CommandDispatch::Busy));
+
+        assert!(matches!(
+            app.setup_reference_capture,
+            SetupReferenceCaptureState::Review { .. }
+        ));
+        assert!(app.command_banner.is_some());
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn shared_reference_modal_preserves_cancels_and_confirms_candidates() {
@@ -9444,7 +9547,7 @@ mod tests {
         .with_ui_preview(UiPreviewRequest {
             target: UiPreviewTarget::Setup(SetupStep::Reference),
         });
-        let original = app.snapshot().previews.reference.unwrap();
+        let original = app.snapshot().previews.reference.clone().unwrap();
 
         app.begin_reference_capture();
         assert!(app.dialog_is(AppDialogKind::ReferenceCapture));
