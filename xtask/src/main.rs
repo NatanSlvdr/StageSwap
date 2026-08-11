@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use dialoguer::console::{Key, Term};
+use std::cell::RefCell;
 #[cfg(test)]
 use std::cmp::max;
 use std::collections::VecDeque;
@@ -10,13 +11,8 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-    mpsc,
-};
+use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 
 const REQUIRED_WINDOWS_SDK: &str = "10.0.22621.0";
 const APP_PACKAGE: &str = "stageswap";
@@ -170,7 +166,6 @@ struct ReleaseProgressState {
     frame_lines: usize,
     prompt_lines: usize,
     prompt_active: bool,
-    spinner_index: usize,
 }
 
 impl ReleaseProgressState {
@@ -184,7 +179,6 @@ impl ReleaseProgressState {
             frame_lines: 0,
             prompt_lines: 0,
             prompt_active: false,
-            spinner_index: 0,
         }
     }
 }
@@ -194,48 +188,24 @@ struct RenderedRow {
     stage: Option<ReleaseStage>,
     stage_status: Option<StageStatus>,
     substep: Option<SubstepState>,
-    active: bool,
 }
 
 struct ReleaseProgress {
     interactive: bool,
     color: bool,
-    state: Arc<Mutex<ReleaseProgressState>>,
-    stop_spinner: Arc<AtomicBool>,
-    spinner_thread: Option<thread::JoinHandle<()>>,
+    terminal_renderer: bool,
+    state: RefCell<ReleaseProgressState>,
 }
 
 impl ReleaseProgress {
     fn new() -> Self {
         let interactive = Term::stderr().is_term();
-        let state = Arc::new(Mutex::new(ReleaseProgressState::new()));
-        let stop_spinner = Arc::new(AtomicBool::new(false));
         let color = interactive && env::var_os("NO_COLOR").is_none();
-        let spinner_thread = if interactive {
-            let state = Arc::clone(&state);
-            let stop_spinner = Arc::clone(&stop_spinner);
-            Some(thread::spawn(move || {
-                while !stop_spinner.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(80));
-                    if stop_spinner.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let mut state = state.lock().expect("release progress state lock");
-                    if state.current_stage.is_some() && !state.prompt_active {
-                        state.spinner_index = (state.spinner_index + 1) % ACTIVE_SPINNER.len();
-                        render_frame_locked(&mut state, color);
-                    }
-                }
-            }))
-        } else {
-            None
-        };
         let progress = Self {
             interactive,
             color,
-            state,
-            stop_spinner,
-            spinner_thread,
+            terminal_renderer: interactive,
+            state: RefCell::new(ReleaseProgressState::new()),
         };
         progress.refresh();
         progress
@@ -246,9 +216,8 @@ impl ReleaseProgress {
         Self {
             interactive,
             color,
-            state: Arc::new(Mutex::new(ReleaseProgressState::new())),
-            stop_spinner: Arc::new(AtomicBool::new(true)),
-            spinner_thread: None,
+            terminal_renderer: false,
+            state: RefCell::new(ReleaseProgressState::new()),
         }
     }
 
@@ -321,7 +290,7 @@ impl ReleaseProgress {
 
     fn begin_substep(&self, stage: ReleaseStage, label: &str, progress: Option<(usize, usize)>) {
         {
-            let mut state = self.state.lock().expect("release progress state lock");
+            let mut state = self.state.borrow_mut();
             if state.current_stage != Some(stage) {
                 if let Some(previous) = state.current_stage {
                     let previous_state = &mut state.stages[previous.index()];
@@ -347,7 +316,7 @@ impl ReleaseProgress {
 
     fn set_substep_progress(&self, completed: usize, total: usize) {
         {
-            let mut state = self.state.lock().expect("release progress state lock");
+            let mut state = self.state.borrow_mut();
             if let Some(stage) = state.current_stage
                 && let Some(substep) = state.stages[stage.index()].substeps.back_mut()
             {
@@ -359,7 +328,7 @@ impl ReleaseProgress {
 
     fn finish_substep(&self, success: bool) {
         let plain_line = {
-            let mut state = self.state.lock().expect("release progress state lock");
+            let mut state = self.state.borrow_mut();
             let Some(stage) = state.current_stage else {
                 return;
             };
@@ -391,7 +360,7 @@ impl ReleaseProgress {
 
     fn complete_current_stage(&self) {
         {
-            let mut state = self.state.lock().expect("release progress state lock");
+            let mut state = self.state.borrow_mut();
             if let Some(stage) = state.current_stage
                 && state.stages[stage.index()].status == StageStatus::Active
             {
@@ -403,7 +372,7 @@ impl ReleaseProgress {
 
     fn fail_current_stage(&self) {
         {
-            let mut state = self.state.lock().expect("release progress state lock");
+            let mut state = self.state.borrow_mut();
             if let Some(stage) = state.current_stage {
                 state.stages[stage.index()].status = StageStatus::Failed;
             }
@@ -415,7 +384,7 @@ impl ReleaseProgress {
         if !self.interactive {
             return;
         }
-        let mut state = self.state.lock().expect("release progress state lock");
+        let mut state = self.state.borrow_mut();
         if !state.prompt_active {
             render_frame_locked(&mut state, self.color);
         }
@@ -455,23 +424,37 @@ impl ReleaseProgress {
         if !self.interactive {
             return;
         }
-        let mut state = self.state.lock().expect("release progress state lock");
+        let mut state = self.state.borrow_mut();
+        let term = Term::stderr();
+        let separator = "────────────────────────────────────────────────────────";
+        let separator = if self.color {
+            term.style()
+                .dim()
+                .apply_to(separator)
+                .force_styling(true)
+                .to_string()
+        } else {
+            separator.to_owned()
+        };
+        let _ = term.write_line(&separator);
+        let _ = term.flush();
         state.prompt_active = true;
-        state.prompt_lines = 0;
+        state.prompt_lines = 1;
     }
 
     fn replace_prompt(&self, lines: &[String]) -> Result<()> {
-        let mut state = self.state.lock().expect("release progress state lock");
+        let mut state = self.state.borrow_mut();
         let term = Term::stderr();
-        if state.prompt_lines > 0 {
-            term.clear_last_lines(state.prompt_lines)
+        let prompt_lines = state.prompt_lines.saturating_sub(1);
+        if prompt_lines > 0 {
+            term.clear_last_lines(prompt_lines)
                 .context("clear release prompt")?;
         }
         for line in lines {
             term.write_line(line).context("write release prompt")?;
         }
         term.flush().context("flush release prompt")?;
-        state.prompt_lines = lines.len();
+        state.prompt_lines = 1 + lines.len();
         Ok(())
     }
 
@@ -479,7 +462,7 @@ impl ReleaseProgress {
         if !self.interactive {
             return Ok(());
         }
-        let mut state = self.state.lock().expect("release progress state lock");
+        let mut state = self.state.borrow_mut();
         let term = Term::stderr();
         let lines = state.frame_lines + state.prompt_lines;
         if lines > 0 {
@@ -500,8 +483,8 @@ impl ReleaseProgress {
             term.write_str(message).context("write release prompt")?;
             term.flush().context("flush release prompt")?;
             {
-                let mut state = self.state.lock().expect("release progress state lock");
-                state.prompt_lines = 1;
+                let mut state = self.state.borrow_mut();
+                state.prompt_lines = 2;
             }
             term.read_line().context("read release prompt")
         })();
@@ -613,18 +596,11 @@ impl ReleaseProgress {
 
 impl Drop for ReleaseProgress {
     fn drop(&mut self) {
-        let terminal_renderer = self.spinner_thread.is_some();
-        self.stop_spinner.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.spinner_thread.take() {
-            let _ = thread.join();
-        }
-        if terminal_renderer {
+        if self.terminal_renderer {
             let _ = Term::stderr().show_cursor();
         }
     }
 }
-
-const ACTIVE_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 fn render_frame_locked(state: &mut ReleaseProgressState, color: bool) {
     let rows = rendered_rows(state);
@@ -633,10 +609,7 @@ fn render_frame_locked(state: &mut ReleaseProgressState, color: bool) {
         return;
     }
     for row in &rows {
-        let mut line = render_row_with_color(row, color);
-        if row.active {
-            line = format!("{} {line}", ACTIVE_SPINNER[state.spinner_index]);
-        }
+        let line = render_row_with_color(row, color);
         if term.write_line(&line).is_err() {
             return;
         }
@@ -649,19 +622,22 @@ fn render_row_with_color(row: &RenderedRow, color: bool) -> String {
     let stage_text = match (row.stage, row.stage_status) {
         (Some(stage), Some(status)) => {
             let marker = match status {
-                StageStatus::Pending => " ",
-                StageStatus::Active => "→",
+                StageStatus::Pending | StageStatus::Active => "",
                 StageStatus::Complete => "✔",
                 StageStatus::Failed => "✖",
             };
-            format!("{marker} {}", stage.label())
+            if marker.is_empty() {
+                stage.label().to_owned()
+            } else {
+                format!("{marker} {}", stage.label())
+            }
         }
         _ => String::new(),
     };
     let stage_text = format!("{stage_text:<width$}", width = STAGE_COLUMN_WIDTH);
     let substep_text = row.substep.as_ref().map(|substep| {
         let marker = match substep.status {
-            SubstepStatus::Active => " ",
+            SubstepStatus::Active => "→",
             SubstepStatus::Complete => "✔",
             SubstepStatus::Failed => "✖",
         };
@@ -704,6 +680,9 @@ fn rendered_rows(state: &ReleaseProgressState) -> Vec<RenderedRow> {
     let mut rows = Vec::new();
     for stage in ReleaseStage::ALL {
         let stage_state = &state.stages[stage.index()];
+        if stage_state.status == StageStatus::Pending && stage_state.substeps.is_empty() {
+            continue;
+        }
         let active_stage =
             state.current_stage == Some(stage) && stage_state.status == StageStatus::Active;
         let substeps = if active_stage {
@@ -730,7 +709,6 @@ fn rendered_rows(state: &ReleaseProgressState) -> Vec<RenderedRow> {
                 stage: Some(stage),
                 stage_status: Some(stage_state.status),
                 substep: None,
-                active: active_stage,
             });
             continue;
         }
@@ -738,7 +716,6 @@ fn rendered_rows(state: &ReleaseProgressState) -> Vec<RenderedRow> {
             rows.push(RenderedRow {
                 stage: (index == 0).then_some(stage),
                 stage_status: (index == 0).then_some(stage_state.status),
-                active: active_stage && substep.status == SubstepStatus::Active,
                 substep: Some(substep),
             });
         }
@@ -1934,9 +1911,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn release_progress_renders_vertical_stages_with_one_active_arrow() {
+    fn release_progress_renders_compact_steps_with_one_active_arrow() {
         let progress = ReleaseProgress::for_test(false, false);
-        let mut state = progress.state.lock().unwrap();
+        let mut state = progress.state.borrow_mut();
         state.stages[ReleaseStage::Infos.index()] = stage_state(
             StageStatus::Complete,
             [("Check release environment", SubstepStatus::Complete, None)],
@@ -1960,11 +1937,11 @@ mod tests {
         let output = lines.join("\n");
 
         assert!(lines[0].starts_with("✔ Infos"));
+        assert!(lines[1].starts_with("✔ Checks"));
         assert!(lines[1].contains("✔ Tests 223/223"));
-        assert!(lines[2].starts_with("→ Preparation"));
-        assert!(lines[2].contains("Prepare release version"));
-        assert!(lines[3].trim_start().starts_with("Build"));
-        assert!(lines[4].trim_start().starts_with("Publish"));
+        assert!(lines[2].starts_with("Preparation"));
+        assert!(lines[2].contains("→ Prepare release version"));
+        assert_eq!(lines.len(), 3);
         assert_eq!(output.matches('→').count(), 1);
         assert!(!output.contains('◈'));
         assert!(!output.contains('◆'));
@@ -1974,7 +1951,7 @@ mod tests {
     #[test]
     fn release_progress_keeps_only_the_recent_substeps_for_active_stage() {
         let progress = ReleaseProgress::for_test(false, false);
-        let mut state = progress.state.lock().unwrap();
+        let mut state = progress.state.borrow_mut();
         state.stages[ReleaseStage::Checks.index()].status = StageStatus::Active;
         state.current_stage = Some(ReleaseStage::Checks);
         for index in 1..=6 {
@@ -2008,18 +1985,19 @@ mod tests {
     #[test]
     fn release_progress_color_styles_the_current_path_without_changing_markers() {
         let progress = ReleaseProgress::for_test(true, true);
-        let mut state = progress.state.lock().unwrap();
+        let mut state = progress.state.borrow_mut();
         state.stages[ReleaseStage::Build.index()] = stage_state(
             StageStatus::Active,
             [("Build executable", SubstepStatus::Active, Some((1, 2)))],
         );
         state.current_stage = Some(ReleaseStage::Build);
-        let row = rendered_rows(&state).into_iter().nth(3).unwrap();
+        let row = rendered_rows(&state).into_iter().next().unwrap();
         drop(state);
 
         let line = progress.render_row(&row);
         assert!(line.contains("\u{1b}["));
-        assert!(line.contains("→ Build"));
+        assert!(line.contains("Build"));
+        assert!(line.contains("→ Build executable"));
         assert!(line.contains("Build executable 1/2"));
     }
 
@@ -2035,7 +2013,7 @@ mod tests {
                 Some((223, 223)),
             )],
         );
-        let row = rendered_rows(&state).into_iter().nth(1).unwrap();
+        let row = rendered_rows(&state).into_iter().next().unwrap();
 
         assert!(!progress.render_row(&row).contains('\u{1b}'));
     }
