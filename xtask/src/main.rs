@@ -87,6 +87,7 @@ enum ReleaseTrack {
 }
 
 const STAGE_COLUMN_WIDTH: usize = 12;
+const RELEASE_TITLE: &str = "StageSwap release";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReleaseStage {
@@ -113,6 +114,16 @@ impl ReleaseStage {
             Self::Preparation => "Preparation",
             Self::Build => "Build",
             Self::Publish => "Publish",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Infos => "ⓘ",
+            Self::Checks => "✓",
+            Self::Preparation => "⚙",
+            Self::Build => "⚒",
+            Self::Publish => "↗",
         }
     }
 
@@ -236,7 +247,11 @@ impl ReleaseProgress {
             terminal_renderer: interactive,
             state: RefCell::new(ReleaseProgressState::new()),
         };
-        progress.refresh();
+        if interactive {
+            progress.refresh();
+        } else {
+            eprintln!("{RELEASE_TITLE}");
+        }
         progress
     }
 
@@ -479,22 +494,6 @@ impl ReleaseProgress {
         Ok(())
     }
 
-    fn read_prompt_interactive(&self, message: &str) -> Result<String> {
-        self.begin_prompt();
-        let result = (|| {
-            let term = Term::stderr();
-            term.write_str(message).context("write release prompt")?;
-            term.flush().context("flush release prompt")?;
-            {
-                let mut state = self.state.borrow_mut();
-                state.prompt_lines = 2;
-            }
-            term.read_line().context("read release prompt")
-        })();
-        self.finish_prompt()?;
-        result
-    }
-
     fn select_prompt_interactive<T: ToString>(&self, message: &str, items: &[T]) -> Result<usize> {
         self.begin_prompt();
         let term = Term::stderr();
@@ -502,11 +501,13 @@ impl ReleaseProgress {
         let result = (|| {
             let mut selection = 0;
             loop {
-                let lines = std::iter::once(message.to_owned())
-                    .chain(items.iter().enumerate().map(|(index, item)| {
+                let choices = items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
                         let line = format!(
-                            "{} {}",
-                            if index == selection { ">" } else { " " },
+                            "{}{}",
+                            if index == selection { "> " } else { "  " },
                             item.to_string()
                         );
                         if self.color && index == selection {
@@ -520,9 +521,10 @@ impl ReleaseProgress {
                         } else {
                             line
                         }
-                    }))
+                    })
                     .collect::<Vec<_>>();
-                self.replace_prompt(&lines)?;
+                let separator = if message.ends_with('?') { " " } else { ": " };
+                self.replace_prompt(&[format!("{message}{separator}{}", choices.join("  |  "))])?;
                 match term.read_key().context("read release selection")? {
                     Key::ArrowDown | Key::Tab | Key::Char('j') => {
                         selection = (selection + 1) % items.len();
@@ -610,6 +612,20 @@ fn render_frame_locked(state: &mut ReleaseProgressState, color: bool) {
     if state.frame_lines > 0 && term.clear_last_lines(state.frame_lines).is_err() {
         return;
     }
+    let title = if color {
+        Term::stderr()
+            .style()
+            .cyan()
+            .bold()
+            .apply_to(RELEASE_TITLE)
+            .force_styling(true)
+            .to_string()
+    } else {
+        RELEASE_TITLE.to_owned()
+    };
+    if term.write_line(&title).is_err() {
+        return;
+    }
     for stage in ReleaseStage::ALL {
         let stage_state = &state.stages[stage.index()];
         let line = render_stage_line(stage, stage_state, color);
@@ -618,11 +634,16 @@ fn render_frame_locked(state: &mut ReleaseProgressState, color: bool) {
         }
     }
     let _ = term.flush();
-    state.frame_lines = ReleaseStage::ALL.len();
+    state.frame_lines = 1 + ReleaseStage::ALL.len();
 }
 
 fn render_stage_line(stage: ReleaseStage, stage_state: &StageState, color: bool) -> String {
-    let stage_text = format!("{:<width$}:", stage.label(), width = STAGE_COLUMN_WIDTH);
+    let stage_text = format!(
+        "{} {:<width$}:",
+        stage.icon(),
+        stage.label(),
+        width = STAGE_COLUMN_WIDTH
+    );
     let children = stage_state
         .substeps
         .iter()
@@ -645,10 +666,22 @@ fn render_stage_line(stage: ReleaseStage, stage_state: &StageState, color: bool)
         return format!("{stage_text}  {}", children.join(" → "));
     }
 
-    let stage = match stage_state.status {
+    let stage_label = match stage_state.status {
         StageStatus::Pending => Term::stderr().style().dim().apply_to(stage_text),
-        StageStatus::Active => Term::stderr().style().cyan().bold().apply_to(stage_text),
-        StageStatus::Complete => Term::stderr().style().dim().apply_to(stage_text),
+        StageStatus::Active => {
+            return format!(
+                "{}  {}",
+                style_active_stage(stage, stage_text),
+                stage_state
+                    .substeps
+                    .iter()
+                    .zip(children)
+                    .map(|(substep, text)| style_substep(stage, substep.status, text))
+                    .collect::<Vec<_>>()
+                    .join(" → ")
+            );
+        }
+        StageStatus::Complete => Term::stderr().style().green().dim().apply_to(stage_text),
         StageStatus::Failed => Term::stderr().style().red().bold().apply_to(stage_text),
     }
     .force_styling(true)
@@ -657,17 +690,30 @@ fn render_stage_line(stage: ReleaseStage, stage_state: &StageState, color: bool)
         .substeps
         .iter()
         .zip(children)
-        .map(|(substep, text)| {
-            let styled = match substep.status {
-                SubstepStatus::Active => Term::stderr().style().yellow().bold().apply_to(text),
-                SubstepStatus::Complete => Term::stderr().style().green().dim().apply_to(text),
-                SubstepStatus::Failed => Term::stderr().style().red().bold().apply_to(text),
-                SubstepStatus::Pending => Term::stderr().style().dim().apply_to(text),
-            };
-            styled.force_styling(true).to_string()
-        })
+        .map(|(substep, text)| style_substep(stage, substep.status, text))
         .collect::<Vec<_>>();
-    format!("{stage}  {}", children.join(" → "))
+    format!("{stage_label}  {}", children.join(" → "))
+}
+
+fn style_active_stage(stage: ReleaseStage, text: String) -> String {
+    let styled = match stage {
+        ReleaseStage::Infos => Term::stderr().style().blue().bold().apply_to(text),
+        ReleaseStage::Checks => Term::stderr().style().magenta().bold().apply_to(text),
+        ReleaseStage::Preparation => Term::stderr().style().yellow().bold().apply_to(text),
+        ReleaseStage::Build => Term::stderr().style().cyan().bold().apply_to(text),
+        ReleaseStage::Publish => Term::stderr().style().green().bold().apply_to(text),
+    };
+    styled.force_styling(true).to_string()
+}
+
+fn style_substep(stage: ReleaseStage, status: SubstepStatus, text: String) -> String {
+    let styled = match status {
+        SubstepStatus::Active => return style_active_stage(stage, text),
+        SubstepStatus::Complete => Term::stderr().style().green().dim().apply_to(text),
+        SubstepStatus::Failed => Term::stderr().style().red().bold().apply_to(text),
+        SubstepStatus::Pending => Term::stderr().style().dim().apply_to(text),
+    };
+    styled.force_styling(true).to_string()
 }
 
 fn short_substep_label(label: &str) -> &str {
@@ -730,15 +776,11 @@ fn publish_release_cli() -> Result<()> {
     }
     let tag = format!("v{version}");
     if track == ReleaseTrack::Release {
-        let expected = format!("RELEASE {tag}");
-        let confirmation = prompt(
-            &progress,
-            ReleaseStage::Infos,
-            "Confirm stable release",
-            &format!("Type '{expected}' to publish a stable release: "),
-        )?;
-        if confirmation != expected {
-            bail!("stable release confirmation did not match");
+        let confirmation = progress.step(ReleaseStage::Infos, "Confirm stable release", || {
+            confirm_prompt(&progress, &format!("Publish {tag} as a stable release?"))
+        })?;
+        if !confirmation {
+            bail!("stable release confirmation declined");
         }
     }
     let incomplete_draft = progress.step(ReleaseStage::Infos, "Check release target", || {
@@ -948,19 +990,18 @@ fn prompt_manual_version(
     })
 }
 
-fn prompt(
-    progress: &ReleaseProgress,
-    stage: ReleaseStage,
-    label: &str,
-    message: &str,
-) -> Result<String> {
-    progress.step(stage, label, || {
-        if Term::stderr().is_term() {
-            progress.read_prompt_interactive(message)
-        } else {
-            read_prompt(message)
+fn confirm_prompt(progress: &ReleaseProgress, message: &str) -> Result<bool> {
+    let selection = if Term::stderr().is_term() {
+        progress.select_prompt_interactive(message, &["No", "Yes"])?
+    } else {
+        eprintln!("{message} [y/N]");
+        match read_prompt("Confirm: ")?.to_ascii_lowercase().as_str() {
+            "" | "n" | "no" => 0,
+            "y" | "yes" => 1,
+            _ => bail!("confirmation must be yes or no"),
         }
-    })
+    };
+    Ok(selection == 1)
 }
 
 fn read_prompt(message: &str) -> Result<String> {
