@@ -1,19 +1,21 @@
 use anyhow::{Context, Result, bail};
-use dialoguer::{
-    Input, Select,
-    console::Term,
-    theme::{ColorfulTheme, SimpleTheme},
-};
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use dialoguer::console::{Key, Term};
 #[cfg(test)]
 use std::cmp::max;
+use std::collections::VecDeque;
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
+use std::thread;
 use std::time::Duration;
 
 const REQUIRED_WINDOWS_SDK: &str = "10.0.22621.0";
@@ -43,11 +45,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn build_release(
-    release_version: ReleaseVersion,
-    progress: &ReleaseProgress,
-    phase: &str,
-) -> Result<PathBuf> {
+fn build_release(release_version: ReleaseVersion, progress: &ReleaseProgress) -> Result<PathBuf> {
     let workspace = workspace_root();
     let _windows_sdk = selected_windows_sdk()?;
     let architecture = "x64";
@@ -59,7 +57,7 @@ fn build_release(
             "workspace version {application_version} does not match release version {release_version}"
         );
     }
-    let (_, executable) = build_release_pair(&workspace, target, architecture, progress, phase)?;
+    let (_, executable) = build_release_pair(&workspace, target, architecture, progress)?;
     Ok(executable)
 }
 
@@ -97,174 +95,661 @@ enum ReleaseTrack {
     Release,
 }
 
-#[derive(Clone, Copy)]
-enum StepIcon {
-    Repository,
-    GitHub,
-    Discovery,
-    Version,
+const SUBSTEP_LIMIT: usize = 5;
+const STAGE_COLUMN_WIDTH: usize = 15;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReleaseStage {
+    Infos,
     Checks,
+    Preparation,
     Build,
-    Package,
-    Git,
     Publish,
 }
 
-impl StepIcon {
-    fn glyph(self) -> &'static str {
+impl ReleaseStage {
+    const ALL: [Self; 5] = [
+        Self::Infos,
+        Self::Checks,
+        Self::Preparation,
+        Self::Build,
+        Self::Publish,
+    ];
+
+    fn label(self) -> &'static str {
         match self {
-            Self::Repository => "◈",
-            Self::GitHub => "◆",
-            Self::Discovery => "ℹ",
-            Self::Version => "✎",
-            Self::Checks => "⚙",
-            Self::Build => "⚒",
-            Self::Package => "▣",
-            Self::Git => "⇆",
-            Self::Publish => "↗",
+            Self::Infos => "Infos",
+            Self::Checks => "Checks",
+            Self::Preparation => "Preparation",
+            Self::Build => "Build",
+            Self::Publish => "Publish",
         }
     }
 
-    fn color(self) -> &'static str {
+    fn index(self) -> usize {
         match self {
-            Self::Repository => "blue",
-            Self::GitHub => "magenta",
-            Self::Discovery => "cyan",
-            Self::Version => "yellow",
-            Self::Checks => "blue",
-            Self::Build => "yellow",
-            Self::Package => "magenta",
-            Self::Git => "cyan",
-            Self::Publish => "green",
+            Self::Infos => 0,
+            Self::Checks => 1,
+            Self::Preparation => 2,
+            Self::Build => 3,
+            Self::Publish => 4,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StageStatus {
+    Pending,
+    Active,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SubstepStatus {
+    Active,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SubstepState {
+    label: String,
+    status: SubstepStatus,
+    progress: Option<(usize, usize)>,
+}
+
+struct StageState {
+    status: StageStatus,
+    substeps: VecDeque<SubstepState>,
+}
+
+struct ReleaseProgressState {
+    stages: [StageState; ReleaseStage::ALL.len()],
+    current_stage: Option<ReleaseStage>,
+    frame_lines: usize,
+    prompt_lines: usize,
+    prompt_active: bool,
+    spinner_index: usize,
+}
+
+impl ReleaseProgressState {
+    fn new() -> Self {
+        Self {
+            stages: std::array::from_fn(|_| StageState {
+                status: StageStatus::Pending,
+                substeps: VecDeque::new(),
+            }),
+            current_stage: None,
+            frame_lines: 0,
+            prompt_lines: 0,
+            prompt_active: false,
+            spinner_index: 0,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RenderedRow {
+    stage: Option<ReleaseStage>,
+    stage_status: Option<StageStatus>,
+    substep: Option<SubstepState>,
+    active: bool,
 }
 
 struct ReleaseProgress {
     interactive: bool,
     color: bool,
+    state: Arc<Mutex<ReleaseProgressState>>,
+    stop_spinner: Arc<AtomicBool>,
+    spinner_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl ReleaseProgress {
     fn new() -> Self {
         let interactive = Term::stderr().is_term();
-        Self {
+        let state = Arc::new(Mutex::new(ReleaseProgressState::new()));
+        let stop_spinner = Arc::new(AtomicBool::new(false));
+        let color = interactive && env::var_os("NO_COLOR").is_none();
+        let spinner_thread = if interactive {
+            let state = Arc::clone(&state);
+            let stop_spinner = Arc::clone(&stop_spinner);
+            Some(thread::spawn(move || {
+                while !stop_spinner.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(80));
+                    if stop_spinner.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let mut state = state.lock().expect("release progress state lock");
+                    if state.current_stage.is_some() && !state.prompt_active {
+                        state.spinner_index = (state.spinner_index + 1) % ACTIVE_SPINNER.len();
+                        render_frame_locked(&mut state, color);
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+        let progress = Self {
             interactive,
-            color: interactive && env::var_os("NO_COLOR").is_none(),
-        }
+            color,
+            state,
+            stop_spinner,
+            spinner_thread,
+        };
+        progress.refresh();
+        progress
     }
 
     #[cfg(test)]
     fn for_test(interactive: bool, color: bool) -> Self {
-        Self { interactive, color }
+        Self {
+            interactive,
+            color,
+            state: Arc::new(Mutex::new(ReleaseProgressState::new())),
+            stop_spinner: Arc::new(AtomicBool::new(true)),
+            spinner_thread: None,
+        }
     }
 
     fn step<T>(
         &self,
-        icon: StepIcon,
+        stage: ReleaseStage,
         label: &str,
         action: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
-        let spinner = self.start(icon, label);
-        let result = action();
-        match result {
+        self.begin_substep(stage, label, None);
+        match action() {
             Ok(value) => {
-                self.finish(spinner, icon, label, true);
+                self.finish_substep(true);
                 Ok(value)
             }
             Err(error) => {
-                self.finish(spinner, icon, label, false);
+                self.finish_substep(false);
                 Err(error.context(format!("{label} failed")))
             }
         }
     }
 
-    fn command(&self, icon: StepIcon, label: &str, command: Command) -> Result<()> {
-        self.step(icon, label, || run(command))
+    fn step_with_progress<T>(
+        &self,
+        stage: ReleaseStage,
+        label: &str,
+        progress: (usize, usize),
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.begin_substep(stage, label, Some(progress));
+        match action() {
+            Ok(value) => {
+                self.finish_substep(true);
+                Ok(value)
+            }
+            Err(error) => {
+                self.finish_substep(false);
+                Err(error.context(format!("{label} failed")))
+            }
+        }
     }
 
     fn command_counted(
         &self,
-        icon: StepIcon,
-        group: &str,
+        stage: ReleaseStage,
         index: usize,
         total: usize,
         label: &str,
         command: Command,
     ) -> Result<()> {
-        let label = format!("{group} [{index}/{total}] {label}");
-        self.command(icon, &label, command)
+        self.step_with_progress(stage, label, (index, total), || run(command))
     }
 
-    fn start(&self, icon: StepIcon, label: &str) -> Option<ProgressBar> {
-        if !self.interactive {
-            return None;
+    fn test_command(&self, label: &str, command: Command, total: Option<usize>) -> Result<()> {
+        self.begin_substep(ReleaseStage::Checks, label, total.map(|total| (0, total)));
+        match run_test_command(command, self, total) {
+            Ok(()) => {
+                if let Some(total) = total {
+                    self.set_substep_progress(total, total);
+                }
+                self.finish_substep(true);
+                Ok(())
+            }
+            Err(error) => {
+                self.finish_substep(false);
+                Err(error.context(format!("{label} failed")))
+            }
         }
-
-        let template = if self.color {
-            format!("{{spinner:.{}}}{{msg}}", icon.color())
-        } else {
-            "{spinner}{msg}".to_owned()
-        };
-        let style = ProgressStyle::with_template(&template)
-            .expect("release progress template must remain valid")
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", ""]);
-        let spinner = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
-        spinner.set_style(style);
-        spinner.set_message(format!(" {} {label}", icon.glyph()));
-        spinner.enable_steady_tick(Duration::from_millis(80));
-        Some(spinner)
     }
 
-    fn finish(&self, spinner: Option<ProgressBar>, icon: StepIcon, label: &str, success: bool) {
-        let message = self.status_line(icon, label, success);
-        if let Some(spinner) = spinner {
-            spinner.finish_and_clear();
+    fn begin_substep(&self, stage: ReleaseStage, label: &str, progress: Option<(usize, usize)>) {
+        {
+            let mut state = self.state.lock().expect("release progress state lock");
+            if state.current_stage != Some(stage) {
+                if let Some(previous) = state.current_stage {
+                    let previous_state = &mut state.stages[previous.index()];
+                    if previous_state.status == StageStatus::Active {
+                        previous_state.status = StageStatus::Complete;
+                    }
+                }
+                state.current_stage = Some(stage);
+                state.stages[stage.index()].status = StageStatus::Active;
+            }
+            let substeps = &mut state.stages[stage.index()].substeps;
+            if substeps.len() == SUBSTEP_LIMIT {
+                substeps.pop_front();
+            }
+            substeps.push_back(SubstepState {
+                label: label.to_owned(),
+                status: SubstepStatus::Active,
+                progress,
+            });
         }
-        eprintln!("{message}");
+        self.refresh();
     }
 
-    fn status_line(&self, icon: StepIcon, label: &str, success: bool) -> String {
-        let marker = if success { "✔" } else { "✖" };
-        let marker = if self.color {
-            let styled = if success {
-                Term::stderr().style().green().apply_to(marker)
+    fn set_substep_progress(&self, completed: usize, total: usize) {
+        {
+            let mut state = self.state.lock().expect("release progress state lock");
+            if let Some(stage) = state.current_stage
+                && let Some(substep) = state.stages[stage.index()].substeps.back_mut()
+            {
+                substep.progress = Some((completed, total));
+            }
+        }
+        self.refresh();
+    }
+
+    fn finish_substep(&self, success: bool) {
+        let plain_line = {
+            let mut state = self.state.lock().expect("release progress state lock");
+            let Some(stage) = state.current_stage else {
+                return;
+            };
+            let stage_state = &mut state.stages[stage.index()];
+            if let Some(substep) = stage_state.substeps.back_mut() {
+                substep.status = if success {
+                    SubstepStatus::Complete
+                } else {
+                    SubstepStatus::Failed
+                };
+            }
+            if !success {
+                stage_state.status = StageStatus::Failed;
+            }
+            if self.interactive {
+                None
             } else {
-                Term::stderr().style().red().apply_to(marker)
-            };
-            styled.force_styling(true).to_string()
-        } else {
-            marker.to_owned()
+                stage_state
+                    .substeps
+                    .back()
+                    .map(|substep| self.plain_line(stage, stage_state.status, substep))
+            }
         };
-        let icon = if self.color {
-            let styled = match icon.color() {
-                "blue" => Term::stderr().style().blue().apply_to(icon.glyph()),
-                "cyan" => Term::stderr().style().cyan().apply_to(icon.glyph()),
-                "green" => Term::stderr().style().green().apply_to(icon.glyph()),
-                "magenta" => Term::stderr().style().magenta().apply_to(icon.glyph()),
-                "yellow" => Term::stderr().style().yellow().apply_to(icon.glyph()),
-                _ => Term::stderr().style().apply_to(icon.glyph()),
-            };
-            styled.force_styling(true).to_string()
-        } else {
-            icon.glyph().to_owned()
-        };
-        let error = if success {
-            String::new()
-        } else if self.color {
-            let styled = Term::stderr().style().red().apply_to("— error");
-            format!(" {}", styled.force_styling(true))
-        } else {
-            " — error".to_owned()
-        };
-        format!("{marker} {icon} {label}{error}")
+        self.refresh();
+        if let Some(line) = plain_line {
+            eprintln!("{line}");
+        }
     }
+
+    fn complete_current_stage(&self) {
+        {
+            let mut state = self.state.lock().expect("release progress state lock");
+            if let Some(stage) = state.current_stage
+                && state.stages[stage.index()].status == StageStatus::Active
+            {
+                state.stages[stage.index()].status = StageStatus::Complete;
+            }
+        }
+        self.refresh();
+    }
+
+    fn fail_current_stage(&self) {
+        {
+            let mut state = self.state.lock().expect("release progress state lock");
+            if let Some(stage) = state.current_stage {
+                state.stages[stage.index()].status = StageStatus::Failed;
+            }
+        }
+        self.refresh();
+    }
+
+    fn refresh(&self) {
+        if !self.interactive {
+            return;
+        }
+        let mut state = self.state.lock().expect("release progress state lock");
+        if !state.prompt_active {
+            render_frame_locked(&mut state, self.color);
+        }
+    }
+
+    #[cfg(test)]
+    fn render_row(&self, row: &RenderedRow) -> String {
+        render_row_with_color(row, self.color)
+    }
+
+    fn plain_line(
+        &self,
+        stage: ReleaseStage,
+        status: StageStatus,
+        substep: &SubstepState,
+    ) -> String {
+        let marker = if status == StageStatus::Failed {
+            "✖"
+        } else {
+            "✔"
+        };
+        let stage_text = format!("{marker} {}", stage.label());
+        let stage_text = format!("{stage_text:<width$}", width = STAGE_COLUMN_WIDTH);
+        let substep_marker = if substep.status == SubstepStatus::Failed {
+            "✖"
+        } else {
+            "✔"
+        };
+        let label = match substep.progress {
+            Some((completed, total)) => format!("{} {completed}/{total}", substep.label),
+            None => substep.label.clone(),
+        };
+        format!("{stage_text}  {substep_marker} {label}")
+    }
+
+    fn begin_prompt(&self) {
+        if !self.interactive {
+            return;
+        }
+        let mut state = self.state.lock().expect("release progress state lock");
+        state.prompt_active = true;
+        state.prompt_lines = 0;
+    }
+
+    fn replace_prompt(&self, lines: &[String]) -> Result<()> {
+        let mut state = self.state.lock().expect("release progress state lock");
+        let term = Term::stderr();
+        if state.prompt_lines > 0 {
+            term.clear_last_lines(state.prompt_lines)
+                .context("clear release prompt")?;
+        }
+        for line in lines {
+            term.write_line(line).context("write release prompt")?;
+        }
+        term.flush().context("flush release prompt")?;
+        state.prompt_lines = lines.len();
+        Ok(())
+    }
+
+    fn finish_prompt(&self) -> Result<()> {
+        if !self.interactive {
+            return Ok(());
+        }
+        let mut state = self.state.lock().expect("release progress state lock");
+        let term = Term::stderr();
+        let lines = state.frame_lines + state.prompt_lines;
+        if lines > 0 {
+            term.clear_last_lines(lines)
+                .context("clear release prompt frame")?;
+        }
+        state.frame_lines = 0;
+        state.prompt_lines = 0;
+        state.prompt_active = false;
+        render_frame_locked(&mut state, self.color);
+        Ok(())
+    }
+
+    fn read_prompt_interactive(&self, message: &str) -> Result<String> {
+        self.begin_prompt();
+        let result = (|| {
+            let term = Term::stderr();
+            term.write_str(message).context("write release prompt")?;
+            term.flush().context("flush release prompt")?;
+            {
+                let mut state = self.state.lock().expect("release progress state lock");
+                state.prompt_lines = 1;
+            }
+            term.read_line().context("read release prompt")
+        })();
+        self.finish_prompt()?;
+        result
+    }
+
+    fn select_prompt_interactive<T: ToString>(&self, message: &str, items: &[T]) -> Result<usize> {
+        self.begin_prompt();
+        let term = Term::stderr();
+        term.hide_cursor().context("hide release prompt cursor")?;
+        let result = (|| {
+            let mut selection = 0;
+            loop {
+                let lines = std::iter::once(message.to_owned())
+                    .chain(items.iter().enumerate().map(|(index, item)| {
+                        let line = format!(
+                            "{} {}",
+                            if index == selection { ">" } else { " " },
+                            item.to_string()
+                        );
+                        if self.color && index == selection {
+                            Term::stderr()
+                                .style()
+                                .yellow()
+                                .bold()
+                                .apply_to(line)
+                                .force_styling(true)
+                                .to_string()
+                        } else {
+                            line
+                        }
+                    }))
+                    .collect::<Vec<_>>();
+                self.replace_prompt(&lines)?;
+                match term.read_key().context("read release selection")? {
+                    Key::ArrowDown | Key::Tab | Key::Char('j') => {
+                        selection = (selection + 1) % items.len();
+                    }
+                    Key::ArrowUp | Key::BackTab | Key::Char('k') => {
+                        selection = selection.checked_sub(1).unwrap_or(items.len() - 1);
+                    }
+                    Key::Enter | Key::Char(' ') => break,
+                    Key::Escape | Key::Char('q') => bail!("release selection cancelled"),
+                    Key::CtrlC => bail!("release selection interrupted"),
+                    _ => {}
+                }
+            }
+            Ok(selection)
+        })();
+        term.show_cursor().context("show release prompt cursor")?;
+        self.finish_prompt()?;
+        result
+    }
+
+    fn edit_prompt_interactive(&self, message: &str, initial: &str) -> Result<String> {
+        self.begin_prompt();
+        let term = Term::stderr();
+        term.hide_cursor().context("hide release prompt cursor")?;
+        let result = (|| {
+            let mut chars = initial.chars().collect::<Vec<_>>();
+            let mut position = chars.len();
+            loop {
+                let value = chars.iter().collect::<String>();
+                let line = format!("{message}{value}");
+                self.replace_prompt(&[line])?;
+                let left = value.chars().count().saturating_sub(position);
+                if left > 0 {
+                    term.move_cursor_left(left)
+                        .context("move release version cursor")?;
+                }
+                term.flush().context("flush release version prompt")?;
+                let old_position = position;
+                let old_length = chars.len();
+                match term.read_key().context("read release version")? {
+                    Key::Enter => {
+                        term.write_str("\n")
+                            .context("finish release version prompt")?;
+                        break Ok(value);
+                    }
+                    Key::ArrowLeft if position > 0 => position -= 1,
+                    Key::ArrowRight if position < chars.len() => position += 1,
+                    Key::Home => position = 0,
+                    Key::End => position = chars.len(),
+                    Key::Backspace if position > 0 => {
+                        position -= 1;
+                        chars.remove(position);
+                    }
+                    Key::Del if position < chars.len() => {
+                        chars.remove(position);
+                    }
+                    Key::Char(chr) if !chr.is_ascii_control() => {
+                        chars.insert(position, chr);
+                        position += 1;
+                    }
+                    Key::Escape => break Err(anyhow::anyhow!("release version edit cancelled")),
+                    Key::CtrlC => break Err(anyhow::anyhow!("release version edit interrupted")),
+                    _ => {}
+                }
+                term.move_cursor_right(old_length.saturating_sub(old_position))
+                    .context("move release version cursor to line end")?;
+            }
+        })();
+        term.show_cursor().context("show release prompt cursor")?;
+        self.finish_prompt()?;
+        result
+    }
+}
+
+impl Drop for ReleaseProgress {
+    fn drop(&mut self) {
+        let terminal_renderer = self.spinner_thread.is_some();
+        self.stop_spinner.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.spinner_thread.take() {
+            let _ = thread.join();
+        }
+        if terminal_renderer {
+            let _ = Term::stderr().show_cursor();
+        }
+    }
+}
+
+const ACTIVE_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn render_frame_locked(state: &mut ReleaseProgressState, color: bool) {
+    let rows = rendered_rows(state);
+    let term = Term::stderr();
+    if state.frame_lines > 0 && term.clear_last_lines(state.frame_lines).is_err() {
+        return;
+    }
+    for row in &rows {
+        let mut line = render_row_with_color(row, color);
+        if row.active {
+            line = format!("{} {line}", ACTIVE_SPINNER[state.spinner_index]);
+        }
+        if term.write_line(&line).is_err() {
+            return;
+        }
+    }
+    let _ = term.flush();
+    state.frame_lines = rows.len();
+}
+
+fn render_row_with_color(row: &RenderedRow, color: bool) -> String {
+    let stage_text = match (row.stage, row.stage_status) {
+        (Some(stage), Some(status)) => {
+            let marker = match status {
+                StageStatus::Pending => " ",
+                StageStatus::Active => "→",
+                StageStatus::Complete => "✔",
+                StageStatus::Failed => "✖",
+            };
+            format!("{marker} {}", stage.label())
+        }
+        _ => String::new(),
+    };
+    let stage_text = format!("{stage_text:<width$}", width = STAGE_COLUMN_WIDTH);
+    let substep_text = row.substep.as_ref().map(|substep| {
+        let marker = match substep.status {
+            SubstepStatus::Active => " ",
+            SubstepStatus::Complete => "✔",
+            SubstepStatus::Failed => "✖",
+        };
+        let label = match substep.progress {
+            Some((completed, total)) => format!("{} {completed}/{total}", substep.label),
+            None => substep.label.clone(),
+        };
+        format!("{marker} {label}")
+    });
+
+    if !color {
+        return format!(
+            "{}{}",
+            stage_text,
+            substep_text.map_or_else(String::new, |text| format!("  {text}"))
+        );
+    }
+
+    let stage = match row.stage_status.unwrap_or(StageStatus::Pending) {
+        StageStatus::Pending => Term::stderr().style().dim().apply_to(stage_text),
+        StageStatus::Active => Term::stderr().style().cyan().bold().apply_to(stage_text),
+        StageStatus::Complete => Term::stderr().style().green().apply_to(stage_text),
+        StageStatus::Failed => Term::stderr().style().red().apply_to(stage_text),
+    }
+    .force_styling(true)
+    .to_string();
+    let substep = substep_text.map_or_else(String::new, |text| {
+        let styled = match row.substep.as_ref().map(|value| value.status) {
+            Some(SubstepStatus::Active) => Term::stderr().style().yellow().bold().apply_to(text),
+            Some(SubstepStatus::Complete) => Term::stderr().style().green().apply_to(text),
+            Some(SubstepStatus::Failed) => Term::stderr().style().red().apply_to(text),
+            None => Term::stderr().style().apply_to(text),
+        };
+        format!("  {}", styled.force_styling(true))
+    });
+    format!("{stage}{substep}")
+}
+
+fn rendered_rows(state: &ReleaseProgressState) -> Vec<RenderedRow> {
+    let mut rows = Vec::new();
+    for stage in ReleaseStage::ALL {
+        let stage_state = &state.stages[stage.index()];
+        let active_stage =
+            state.current_stage == Some(stage) && stage_state.status == StageStatus::Active;
+        let substeps = if active_stage {
+            stage_state
+                .substeps
+                .iter()
+                .rev()
+                .take(SUBSTEP_LIMIT)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+        } else {
+            stage_state
+                .substeps
+                .back()
+                .cloned()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        if substeps.is_empty() {
+            rows.push(RenderedRow {
+                stage: Some(stage),
+                stage_status: Some(stage_state.status),
+                substep: None,
+                active: active_stage,
+            });
+            continue;
+        }
+        for (index, substep) in substeps.into_iter().enumerate() {
+            rows.push(RenderedRow {
+                stage: (index == 0).then_some(stage),
+                stage_status: (index == 0).then_some(stage_state.status),
+                active: active_stage && substep.status == SubstepStatus::Active,
+                substep: Some(substep),
+            });
+        }
+    }
+    rows
 }
 
 fn publish_release_cli() -> Result<()> {
     let progress = ReleaseProgress::new();
     let workspace = workspace_root();
-    let branch = progress.step(StepIcon::Repository, "Check release environment", || {
+    let branch = progress.step(ReleaseStage::Infos, "Check release environment", || {
         preflight_repository(&workspace)?;
         let mut github_auth = Command::new("gh");
         github_auth.args(["auth", "status"]);
@@ -277,32 +762,37 @@ fn publish_release_cli() -> Result<()> {
         Ok(branch)
     })?;
 
-    let track = prompt_track()?;
+    let track = prompt_track(&progress)?;
     if track == ReleaseTrack::Release && branch != "main" {
         bail!("stable releases must be published from main");
     }
 
     let (published, current) =
-        progress.step(StepIcon::Discovery, "Load release context", || {
+        progress.step(ReleaseStage::Infos, "Load release context", || {
             let published = published_versions()?;
             let current = read_workspace_version(&workspace.join("Cargo.toml"))?;
             Ok((published, current))
         })?;
     let highest = published.iter().copied().max();
     let version_suggestions = VersionSuggestions::new(current, highest)?;
-    let version = prompt_version(version_suggestions)?;
+    let version = prompt_version(&progress, version_suggestions)?;
     if highest.is_some_and(|highest| version <= highest) {
         bail!("release version {version} must be newer than every published version");
     }
     let tag = format!("v{version}");
     if track == ReleaseTrack::Release {
         let expected = format!("RELEASE {tag}");
-        let confirmation = prompt(&format!("Type '{expected}' to publish a stable release: "))?;
+        let confirmation = prompt(
+            &progress,
+            ReleaseStage::Infos,
+            "Confirm stable release",
+            &format!("Type '{expected}' to publish a stable release: "),
+        )?;
         if confirmation != expected {
             bail!("stable release confirmation did not match");
         }
     }
-    let incomplete_draft = progress.step(StepIcon::GitHub, "Check release target", || {
+    let incomplete_draft = progress.step(ReleaseStage::Infos, "Check release target", || {
         let incomplete_draft = incomplete_draft_exists(&tag)?;
         if !incomplete_draft {
             ensure_tag_absent(&workspace, &tag)?;
@@ -318,7 +808,7 @@ fn publish_release_cli() -> Result<()> {
     let outcome = (|| -> Result<PathBuf> {
         version_transaction = if version != current {
             Some(
-                progress.step(StepIcon::Version, "Prepare release version", || {
+                progress.step(ReleaseStage::Preparation, "Prepare release version", || {
                     let transaction = VersionTransaction::begin(&manifest, &lockfile, version)?;
                     run(cargo_metadata(&workspace))?;
                     Ok(transaction)
@@ -327,21 +817,22 @@ fn publish_release_cli() -> Result<()> {
         } else {
             None
         };
-        let verification =
-            progress.step(StepIcon::Package, "Prepare verification package", || {
-                tempfile::tempdir().context("create release verification directory")
-            })?;
-        let executable = build_release(version, &progress, "Build verification package")?;
+        let verification = progress.step(
+            ReleaseStage::Preparation,
+            "Prepare verification package",
+            || tempfile::tempdir().context("create release verification directory"),
+        )?;
+        let executable = build_release(version, &progress)?;
         let verification_artifact =
-            progress.step(StepIcon::Package, "Package verification build", || {
+            progress.step(ReleaseStage::Build, "Package verification build", || {
                 package_release(&executable, version, verification.path(), &workspace)
             })?;
-        progress.step(StepIcon::Package, "Validate verification package", || {
+        progress.step(ReleaseStage::Build, "Validate verification package", || {
             validate_release_outputs(&verification_artifact, version)
         })?;
 
         let message = format!("Release {tag}");
-        progress.step(StepIcon::Git, "Commit release version", || {
+        progress.step(ReleaseStage::Publish, "Commit release version", || {
             run(git(&workspace, &["add", "Cargo.toml", "Cargo.lock"]))?;
             run(git(
                 &workspace,
@@ -353,17 +844,17 @@ fn publish_release_cli() -> Result<()> {
         }
         let output = workspace.join("dist");
         let artifact = progress.step(
-            StepIcon::Package,
+            ReleaseStage::Publish,
             "Package release (reuse verified build)",
             || {
                 clear_local_release_outputs(&output, version)?;
                 package_release(&executable, version, &output, &workspace)
             },
         )?;
-        progress.step(StepIcon::Package, "Validate release package", || {
+        progress.step(ReleaseStage::Publish, "Validate release package", || {
             validate_release_outputs(&artifact, version)
         })?;
-        progress.step(StepIcon::Publish, "Publish release", || {
+        progress.step(ReleaseStage::Publish, "Publish release", || {
             run(git(&workspace, &["push", "origin", &branch]))?;
             let revision = capture(git(&workspace, &["rev-parse", "HEAD"]))?;
             if incomplete_draft {
@@ -376,10 +867,12 @@ fn publish_release_cli() -> Result<()> {
 
     match outcome {
         Ok(artifact) => {
+            progress.complete_current_stage();
             println!("published {tag} from {}", artifact.display());
             Ok(())
         }
         Err(error) => {
+            progress.fail_current_stage();
             if let Some(transaction) = version_transaction.as_mut()
                 && let Err(rollback_error) = transaction.rollback()
             {
@@ -413,41 +906,27 @@ fn preflight_repository(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-fn prompt_track() -> Result<ReleaseTrack> {
-    if Term::stderr().is_term() {
-        let selection = select_prompt("Release track", &["Development (default)", "Release"])?;
-        return match selection {
-            0 => Ok(ReleaseTrack::Development),
-            1 => Ok(ReleaseTrack::Release),
-            _ => bail!("release track selection was out of range"),
-        };
+fn prompt_track(progress: &ReleaseProgress) -> Result<ReleaseTrack> {
+    let selection = progress.step(ReleaseStage::Infos, "Select release track", || {
+        if Term::stderr().is_term() {
+            progress
+                .select_prompt_interactive("Release track", &["Development (default)", "Release"])
+        } else {
+            eprintln!("Release track:");
+            eprintln!("  1. Development (default)");
+            eprintln!("  2. Release");
+            match read_prompt("Select [1]: ")?.as_str() {
+                "" | "1" => Ok(0),
+                "2" => Ok(1),
+                _ => bail!("release track must be 1 or 2"),
+            }
+        }
+    })?;
+    match selection {
+        0 => Ok(ReleaseTrack::Development),
+        1 => Ok(ReleaseTrack::Release),
+        _ => bail!("release track selection was out of range"),
     }
-
-    eprintln!("Release track:");
-    eprintln!("  1. Development (default)");
-    eprintln!("  2. Release");
-    match prompt("Select [1]: ")?.as_str() {
-        "" | "1" => Ok(ReleaseTrack::Development),
-        "2" => Ok(ReleaseTrack::Release),
-        _ => bail!("release track must be 1 or 2"),
-    }
-}
-
-fn select_prompt<T: ToString>(message: &str, items: &[T]) -> Result<usize> {
-    let selection = if env::var_os("NO_COLOR").is_none() {
-        Select::with_theme(&ColorfulTheme::default())
-            .with_prompt(message)
-            .items(items)
-            .default(0)
-            .interact_on(&Term::stderr())
-    } else {
-        Select::with_theme(&SimpleTheme)
-            .with_prompt(message)
-            .items(items)
-            .default(0)
-            .interact_on(&Term::stderr())
-    };
-    selection.with_context(|| format!("select {message}"))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -470,55 +949,78 @@ impl VersionSuggestions {
     }
 }
 
-fn prompt_version(suggestions: VersionSuggestions) -> Result<ReleaseVersion> {
+fn prompt_version(
+    progress: &ReleaseProgress,
+    suggestions: VersionSuggestions,
+) -> Result<ReleaseVersion> {
     let items = [
         format!("Patch ({})", suggestions.patch),
         format!("Minor ({})", suggestions.minor),
         format!("Major ({})", suggestions.major),
         format!("Manual (edit {})", suggestions.patch),
     ];
-    if Term::stderr().is_term() {
-        return match select_prompt("Version bump", &items)? {
-            0 => Ok(suggestions.patch),
-            1 => Ok(suggestions.minor),
-            2 => Ok(suggestions.major),
-            3 => prompt_manual_version(suggestions.patch),
-            _ => bail!("version bump selection was out of range"),
-        };
-    }
-
-    eprintln!("Version bump:");
-    for (index, item) in items.iter().enumerate() {
-        eprintln!("  {}. {item}", index + 1);
-    }
-    match prompt("Select [1]: ")?.as_str() {
-        "" | "1" => Ok(suggestions.patch),
-        "2" => Ok(suggestions.minor),
-        "3" => Ok(suggestions.major),
-        "4" => prompt_manual_version(suggestions.patch),
-        _ => bail!("version bump must be 1, 2, 3, or 4"),
+    let selection = progress.step(ReleaseStage::Infos, "Select version bump", || {
+        if Term::stderr().is_term() {
+            progress.select_prompt_interactive("Version bump", &items)
+        } else {
+            eprintln!("Version bump:");
+            for (index, item) in items.iter().enumerate() {
+                eprintln!("  {}. {item}", index + 1);
+            }
+            match read_prompt("Select [1]: ")?.as_str() {
+                "" | "1" => Ok(0),
+                "2" => Ok(1),
+                "3" => Ok(2),
+                "4" => Ok(3),
+                _ => bail!("version bump must be 1, 2, 3, or 4"),
+            }
+        }
+    })?;
+    match selection {
+        0 => Ok(suggestions.patch),
+        1 => Ok(suggestions.minor),
+        2 => Ok(suggestions.major),
+        3 => prompt_manual_version(progress, suggestions.patch),
+        _ => bail!("version bump selection was out of range"),
     }
 }
 
-fn prompt_manual_version(suggested: ReleaseVersion) -> Result<ReleaseVersion> {
-    let value = if Term::stderr().is_term() {
-        if env::var_os("NO_COLOR").is_none() {
-            Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("Version")
-                .with_initial_text(suggested.to_string())
-                .interact_text()
-                .context("read version prompt")?
+fn prompt_manual_version(
+    progress: &ReleaseProgress,
+    suggested: ReleaseVersion,
+) -> Result<ReleaseVersion> {
+    progress.step(ReleaseStage::Infos, "Edit release version", || {
+        let value = if Term::stderr().is_term() {
+            progress.edit_prompt_interactive("Version: ", &suggested.to_string())?
         } else {
-            Input::<String>::with_theme(&SimpleTheme)
-                .with_prompt("Version")
-                .with_initial_text(suggested.to_string())
-                .interact_text()
-                .context("read version prompt")?
+            read_prompt(&format!("Version [{suggested}]: "))?
+        };
+        parse_version_input(&value, suggested)
+    })
+}
+
+fn prompt(
+    progress: &ReleaseProgress,
+    stage: ReleaseStage,
+    label: &str,
+    message: &str,
+) -> Result<String> {
+    progress.step(stage, label, || {
+        if Term::stderr().is_term() {
+            progress.read_prompt_interactive(message)
+        } else {
+            read_prompt(message)
         }
-    } else {
-        prompt(&format!("Version [{suggested}]: "))?
-    };
-    parse_version_input(&value, suggested)
+    })
+}
+
+fn read_prompt(message: &str) -> Result<String> {
+    eprint!("{message}");
+    io::stderr().flush().context("flush prompt")?;
+    let mut value = String::new();
+    io::stdin().read_line(&mut value).context("read prompt")?;
+    eprintln!();
+    Ok(value.trim().to_owned())
 }
 
 fn parse_version_input(value: &str, suggested: ReleaseVersion) -> Result<ReleaseVersion> {
@@ -527,15 +1029,6 @@ fn parse_version_input(value: &str, suggested: ReleaseVersion) -> Result<Release
     } else {
         ReleaseVersion::parse(value.trim())
     }
-}
-
-fn prompt(message: &str) -> Result<String> {
-    eprint!("{message}");
-    io::stderr().flush().context("flush prompt")?;
-    let mut value = String::new();
-    io::stdin().read_line(&mut value).context("read prompt")?;
-    eprintln!();
-    Ok(value.trim().to_owned())
 }
 
 fn published_versions() -> Result<Vec<ReleaseVersion>> {
@@ -631,14 +1124,7 @@ fn run_checks(workspace: &Path, progress: &ReleaseProgress) -> Result<()> {
     format
         .current_dir(workspace)
         .args(["fmt", "--all", "--", "--check"]);
-    progress.command_counted(
-        StepIcon::Checks,
-        "Run validation checks",
-        1,
-        TOTAL,
-        "Check formatting",
-        format,
-    )?;
+    progress.command_counted(ReleaseStage::Checks, 1, TOTAL, "Check formatting", format)?;
     let mut clippy = Command::new("cargo");
     clippy.current_dir(workspace).args([
         "clippy",
@@ -648,14 +1134,7 @@ fn run_checks(workspace: &Path, progress: &ReleaseProgress) -> Result<()> {
         "-D",
         "warnings",
     ]);
-    progress.command_counted(
-        StepIcon::Checks,
-        "Run validation checks",
-        2,
-        TOTAL,
-        "Run host Clippy",
-        clippy,
-    )?;
+    progress.command_counted(ReleaseStage::Checks, 2, TOTAL, "Run host Clippy", clippy)?;
     let mut windows_clippy = Command::new("cargo");
     windows_clippy.current_dir(workspace).args([
         "clippy",
@@ -668,8 +1147,7 @@ fn run_checks(workspace: &Path, progress: &ReleaseProgress) -> Result<()> {
         "warnings",
     ]);
     progress.command_counted(
-        StepIcon::Checks,
-        "Run validation checks",
+        ReleaseStage::Checks,
         3,
         TOTAL,
         "Run Windows-target Clippy",
@@ -679,14 +1157,8 @@ fn run_checks(workspace: &Path, progress: &ReleaseProgress) -> Result<()> {
     tests
         .current_dir(workspace)
         .args(["test", "--workspace", "--all-targets"]);
-    progress.command_counted(
-        StepIcon::Checks,
-        "Run validation checks",
-        4,
-        TOTAL,
-        "Run workspace tests",
-        tests,
-    )
+    let total_tests = discover_test_count(workspace);
+    progress.test_command("Run workspace tests", tests, total_tests)
 }
 
 fn validate_release_outputs(artifact: &Path, version: ReleaseVersion) -> Result<()> {
@@ -792,16 +1264,145 @@ fn command_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
     diagnostics
 }
 
+fn discover_test_count(workspace: &Path) -> Option<usize> {
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(workspace)
+        .args(["test", "--workspace", "--all-targets", "--", "--list"]);
+    capture(command)
+        .ok()
+        .and_then(|output| parse_test_list_count(&output))
+}
+
+fn parse_test_list_count(output: &str) -> Option<usize> {
+    let mut total = 0;
+    let mut found_summary = false;
+    for line in output.lines() {
+        let mut words = line.split_whitespace();
+        let Some(count) = words.next().and_then(|value| value.parse::<usize>().ok()) else {
+            continue;
+        };
+        let Some(kind) = words.next() else {
+            continue;
+        };
+        if matches!(kind.trim_end_matches(','), "test" | "tests") && line.contains("benchmark") {
+            total += count;
+            found_summary = true;
+        }
+    }
+    found_summary.then_some(total)
+}
+
+#[derive(Clone, Copy)]
+enum ChildStream {
+    Stdout,
+    Stderr,
+}
+
+struct ChildLine {
+    stream: ChildStream,
+    bytes: Vec<u8>,
+}
+
+fn run_test_command(
+    mut command: Command,
+    progress: &ReleaseProgress,
+    total: Option<usize>,
+) -> Result<()> {
+    let description = format!("{command:?}");
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("could not run {description}"))?;
+    let stdout = child.stdout.take().context("capture test stdout")?;
+    let stderr = child.stderr.take().context("capture test stderr")?;
+    let (sender, receiver) = mpsc::channel();
+    let stdout_thread = spawn_child_reader(stdout, ChildStream::Stdout, sender.clone());
+    let stderr_thread = spawn_child_reader(stderr, ChildStream::Stderr, sender);
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let mut completed = 0;
+    for line in receiver {
+        match line.stream {
+            ChildStream::Stdout => {
+                if parse_test_completion(&line.bytes) {
+                    completed += 1;
+                    if let Some(total) = total {
+                        progress.set_substep_progress(completed.min(total), total);
+                    }
+                }
+                stdout_bytes.extend_from_slice(&line.bytes);
+            }
+            ChildStream::Stderr => stderr_bytes.extend_from_slice(&line.bytes),
+        }
+    }
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+    let status = child
+        .wait()
+        .with_context(|| format!("wait for {description}"))?;
+    if !status.success() {
+        bail!(
+            "command failed ({}): {description}{}",
+            status,
+            command_diagnostics(&stdout_bytes, &stderr_bytes)
+        );
+    }
+    Ok(())
+}
+
+fn spawn_child_reader<R>(
+    reader: R,
+    stream: ChildStream,
+    sender: mpsc::Sender<ChildLine>,
+) -> thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut bytes = Vec::new();
+        loop {
+            bytes.clear();
+            match reader.read_until(b'\n', &mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if sender
+                        .send(ChildLine {
+                            stream,
+                            bytes: bytes.clone(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn parse_test_completion(bytes: &[u8]) -> bool {
+    let line = String::from_utf8_lossy(bytes);
+    let line = line.trim();
+    let Some(line) = line.strip_prefix("test ") else {
+        return false;
+    };
+    let Some((_, status)) = line.rsplit_once(" ... ") else {
+        return false;
+    };
+    matches!(status.trim(), "ok" | "FAILED" | "ignored")
+}
+
 fn build_release_pair(
     workspace: &Path,
     target: &str,
     architecture: &str,
     progress: &ReleaseProgress,
-    phase: &str,
 ) -> Result<(PathBuf, PathBuf)> {
     progress.command_counted(
-        StepIcon::Build,
-        phase,
+        ReleaseStage::Build,
         1,
         2,
         "Build media-source DLL",
@@ -816,8 +1417,7 @@ fn build_release_pair(
         .canonicalize()
         .context("canonicalize media-source DLL")?;
     progress.command_counted(
-        StepIcon::Build,
-        phase,
+        ReleaseStage::Build,
         2,
         2,
         "Build StageSwap executable",
@@ -1334,38 +1934,138 @@ mod tests {
     use super::*;
 
     #[test]
-    fn release_progress_plain_status_has_no_terminal_controls() {
+    fn release_progress_renders_vertical_stages_with_one_active_arrow() {
         let progress = ReleaseProgress::for_test(false, false);
+        let mut state = progress.state.lock().unwrap();
+        state.stages[ReleaseStage::Infos.index()] = stage_state(
+            StageStatus::Complete,
+            [("Check release environment", SubstepStatus::Complete, None)],
+        );
+        state.stages[ReleaseStage::Checks.index()] = stage_state(
+            StageStatus::Complete,
+            [("Tests", SubstepStatus::Complete, Some((223, 223)))],
+        );
+        state.stages[ReleaseStage::Preparation.index()] = stage_state(
+            StageStatus::Active,
+            [("Prepare release version", SubstepStatus::Active, None)],
+        );
+        state.current_stage = Some(ReleaseStage::Preparation);
+        let rows = rendered_rows(&state);
+        drop(state);
 
-        assert_eq!(
-            progress.status_line(StepIcon::Checks, "Run workspace tests", true),
-            "✔ ⚙ Run workspace tests"
-        );
-        assert_eq!(
-            progress.status_line(StepIcon::Checks, "Run workspace tests", false),
-            "✖ ⚙ Run workspace tests — error"
-        );
+        let lines = rows
+            .iter()
+            .map(|row| progress.render_row(row))
+            .collect::<Vec<_>>();
+        let output = lines.join("\n");
+
+        assert!(lines[0].starts_with("✔ Infos"));
+        assert!(lines[1].contains("✔ Tests 223/223"));
+        assert!(lines[2].starts_with("→ Preparation"));
+        assert!(lines[2].contains("Prepare release version"));
+        assert!(lines[3].trim_start().starts_with("Build"));
+        assert!(lines[4].trim_start().starts_with("Publish"));
+        assert_eq!(output.matches('→').count(), 1);
+        assert!(!output.contains('◈'));
+        assert!(!output.contains('◆'));
+        assert!(!output.contains('\u{1b}'));
     }
 
     #[test]
-    fn release_progress_honors_color_suppression_on_a_terminal() {
-        let progress = ReleaseProgress::for_test(true, false);
+    fn release_progress_keeps_only_the_recent_substeps_for_active_stage() {
+        let progress = ReleaseProgress::for_test(false, false);
+        let mut state = progress.state.lock().unwrap();
+        state.stages[ReleaseStage::Checks.index()].status = StageStatus::Active;
+        state.current_stage = Some(ReleaseStage::Checks);
+        for index in 1..=6 {
+            state.stages[ReleaseStage::Checks.index()]
+                .substeps
+                .push_back(SubstepState {
+                    label: format!("Check {index}"),
+                    status: if index == 6 {
+                        SubstepStatus::Active
+                    } else {
+                        SubstepStatus::Complete
+                    },
+                    progress: None,
+                });
+        }
+        let rows = rendered_rows(&state);
+        drop(state);
 
-        assert!(
-            !progress
-                .status_line(StepIcon::Checks, "Run workspace tests", true)
-                .contains('\u{1b}')
-        );
+        let output = rows
+            .iter()
+            .map(|row| progress.render_row(row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!output.contains("Check 1"));
+        for index in 2..=6 {
+            assert!(output.contains(&format!("Check {index}")));
+        }
+        assert_eq!(output.matches('→').count(), 1);
     }
 
     #[test]
-    fn release_progress_color_status_styles_the_marker() {
+    fn release_progress_color_styles_the_current_path_without_changing_markers() {
         let progress = ReleaseProgress::for_test(true, true);
-        let line = progress.status_line(StepIcon::Checks, "Run workspace tests", true);
+        let mut state = progress.state.lock().unwrap();
+        state.stages[ReleaseStage::Build.index()] = stage_state(
+            StageStatus::Active,
+            [("Build executable", SubstepStatus::Active, Some((1, 2)))],
+        );
+        state.current_stage = Some(ReleaseStage::Build);
+        let row = rendered_rows(&state).into_iter().nth(3).unwrap();
+        drop(state);
 
+        let line = progress.render_row(&row);
         assert!(line.contains("\u{1b}["));
-        assert!(line.contains("✔"));
-        assert!(line.contains("Run workspace tests"));
+        assert!(line.contains("→ Build"));
+        assert!(line.contains("Build executable 1/2"));
+    }
+
+    #[test]
+    fn release_progress_plain_rendering_has_no_terminal_controls() {
+        let progress = ReleaseProgress::for_test(false, false);
+        let mut state = ReleaseProgressState::new();
+        state.stages[ReleaseStage::Checks.index()] = stage_state(
+            StageStatus::Complete,
+            [(
+                "Run workspace tests",
+                SubstepStatus::Complete,
+                Some((223, 223)),
+            )],
+        );
+        let row = rendered_rows(&state).into_iter().nth(1).unwrap();
+
+        assert!(!progress.render_row(&row).contains('\u{1b}'));
+    }
+
+    #[test]
+    fn test_progress_parsers_count_listed_and_completed_tests() {
+        let listed = "47 tests, 0 benchmarks\n101 tests, 0 benchmarks\n43 tests, 0 benchmarks\n8 tests, 0 benchmarks\n1 test, 0 benchmarks\n1 test, 0 benchmarks\n22 tests, 0 benchmarks\n";
+        assert_eq!(parse_test_list_count(listed), Some(223));
+        assert!(parse_test_completion(b"test runtime::works ... ok\n"));
+        assert!(parse_test_completion(b"test runtime::fails ... FAILED\n"));
+        assert!(parse_test_completion(
+            b"test runtime::ignored ... ignored\n"
+        ));
+        assert!(!parse_test_completion(b"test result: ok. 1 passed\n"));
+    }
+
+    type TestSubstep = (&'static str, SubstepStatus, Option<(usize, usize)>);
+
+    fn stage_state<const N: usize>(status: StageStatus, substeps: [TestSubstep; N]) -> StageState {
+        StageState {
+            status,
+            substeps: substeps
+                .into_iter()
+                .map(|(label, status, progress)| SubstepState {
+                    label: label.to_owned(),
+                    status,
+                    progress,
+                })
+                .collect(),
+        }
     }
 
     #[test]
