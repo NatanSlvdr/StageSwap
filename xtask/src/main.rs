@@ -821,10 +821,7 @@ fn publish_release_cli() -> Result<()> {
     match outcome {
         Ok(artifact) => {
             progress.complete_current_stage();
-            let message = format!(
-                "🎉 Release {tag} published successfully from {}",
-                artifact.display()
-            );
+            let message = format!("🎉 Release {tag} published successfully!");
             if Term::stdout().is_term() && env::var_os("NO_COLOR").is_none() {
                 println!(
                     "{}",
@@ -838,6 +835,7 @@ fn publish_release_cli() -> Result<()> {
             } else {
                 println!("{message}");
             }
+            println!("  {}", artifact.display());
             Ok(())
         }
         Err(error) => {
@@ -1173,8 +1171,8 @@ fn publish_github_release(
 ) -> Result<()> {
     let tag = format!("v{version}");
     let title = match track {
-        ReleaseTrack::Development => format!("StageSwap {tag} Beta"),
-        ReleaseTrack::Release => format!("StageSwap {tag}"),
+        ReleaseTrack::Development => format!("{tag} Beta"),
+        ReleaseTrack::Release => tag.clone(),
     };
     let checksum = artifact.with_file_name(format!("{}{}.exe.sha256", RELEASE_PREFIX, version));
     let mut command = Command::new("gh");
