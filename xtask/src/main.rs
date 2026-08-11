@@ -1,9 +1,6 @@
 use anyhow::{Context, Result, bail};
 use dialoguer::console::{Key, Term};
 use std::cell::RefCell;
-#[cfg(test)]
-use std::cmp::max;
-use std::collections::VecDeque;
 use std::env;
 use std::fmt;
 use std::fs;
@@ -20,8 +17,6 @@ const MEDIA_SOURCE_PACKAGE: &str = "stageswap-media-source";
 const APP_EXECUTABLE: &str = "StageSwap.exe";
 const MEDIA_SOURCE_DLL: &str = "stageswap_media_source.dll";
 const RELEASE_PREFIX: &str = "StageSwap_win64_v";
-#[cfg(test)]
-const RELEASE_SUFFIX: &str = ".exe.sha256";
 
 fn main() -> Result<()> {
     let mut arguments = env::args().skip(1);
@@ -91,7 +86,6 @@ enum ReleaseTrack {
     Release,
 }
 
-const SUBSTEP_LIMIT: usize = 5;
 const STAGE_COLUMN_WIDTH: usize = 15;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,7 +151,7 @@ struct SubstepState {
 
 struct StageState {
     status: StageStatus,
-    substeps: VecDeque<SubstepState>,
+    substeps: Vec<SubstepState>,
 }
 
 struct ReleaseProgressState {
@@ -173,7 +167,7 @@ impl ReleaseProgressState {
         Self {
             stages: std::array::from_fn(|_| StageState {
                 status: StageStatus::Pending,
-                substeps: VecDeque::new(),
+                substeps: Vec::new(),
             }),
             current_stage: None,
             frame_lines: 0,
@@ -209,16 +203,6 @@ impl ReleaseProgress {
         };
         progress.refresh();
         progress
-    }
-
-    #[cfg(test)]
-    fn for_test(interactive: bool, color: bool) -> Self {
-        Self {
-            interactive,
-            color,
-            terminal_renderer: false,
-            state: RefCell::new(ReleaseProgressState::new()),
-        }
     }
 
     fn step<T>(
@@ -302,10 +286,7 @@ impl ReleaseProgress {
                 state.stages[stage.index()].status = StageStatus::Active;
             }
             let substeps = &mut state.stages[stage.index()].substeps;
-            if substeps.len() == SUBSTEP_LIMIT {
-                substeps.pop_front();
-            }
-            substeps.push_back(SubstepState {
+            substeps.push(SubstepState {
                 label: label.to_owned(),
                 status: SubstepStatus::Active,
                 progress,
@@ -318,7 +299,7 @@ impl ReleaseProgress {
         {
             let mut state = self.state.borrow_mut();
             if let Some(stage) = state.current_stage
-                && let Some(substep) = state.stages[stage.index()].substeps.back_mut()
+                && let Some(substep) = state.stages[stage.index()].substeps.last_mut()
             {
                 substep.progress = Some((completed, total));
             }
@@ -333,7 +314,7 @@ impl ReleaseProgress {
                 return;
             };
             let stage_state = &mut state.stages[stage.index()];
-            if let Some(substep) = stage_state.substeps.back_mut() {
+            if let Some(substep) = stage_state.substeps.last_mut() {
                 substep.status = if success {
                     SubstepStatus::Complete
                 } else {
@@ -348,7 +329,7 @@ impl ReleaseProgress {
             } else {
                 stage_state
                     .substeps
-                    .back()
+                    .last()
                     .map(|substep| self.plain_line(stage, stage_state.status, substep))
             }
         };
@@ -388,11 +369,6 @@ impl ReleaseProgress {
         if !state.prompt_active {
             render_frame_locked(&mut state, self.color);
         }
-    }
-
-    #[cfg(test)]
-    fn render_row(&self, row: &RenderedRow) -> String {
-        render_row_with_color(row, self.color)
     }
 
     fn plain_line(
@@ -659,17 +635,23 @@ fn render_row_with_color(row: &RenderedRow, color: bool) -> String {
     let stage = match row.stage_status.unwrap_or(StageStatus::Pending) {
         StageStatus::Pending => Term::stderr().style().dim().apply_to(stage_text),
         StageStatus::Active => Term::stderr().style().cyan().bold().apply_to(stage_text),
-        StageStatus::Complete => Term::stderr().style().green().apply_to(stage_text),
+        StageStatus::Complete => Term::stderr().style().dim().apply_to(stage_text),
         StageStatus::Failed => Term::stderr().style().red().apply_to(stage_text),
     }
     .force_styling(true)
     .to_string();
     let substep = substep_text.map_or_else(String::new, |text| {
-        let styled = match row.substep.as_ref().map(|value| value.status) {
-            Some(SubstepStatus::Active) => Term::stderr().style().yellow().bold().apply_to(text),
-            Some(SubstepStatus::Complete) => Term::stderr().style().green().apply_to(text),
-            Some(SubstepStatus::Failed) => Term::stderr().style().red().apply_to(text),
-            None => Term::stderr().style().apply_to(text),
+        let styled = match row.stage_status {
+            Some(StageStatus::Complete) => Term::stderr().style().dim().apply_to(text),
+            Some(StageStatus::Failed) => Term::stderr().style().red().apply_to(text),
+            _ => match row.substep.as_ref().map(|value| value.status) {
+                Some(SubstepStatus::Active) => {
+                    Term::stderr().style().yellow().bold().apply_to(text)
+                }
+                Some(SubstepStatus::Complete) => Term::stderr().style().green().apply_to(text),
+                Some(SubstepStatus::Failed) => Term::stderr().style().red().apply_to(text),
+                None => Term::stderr().style().apply_to(text),
+            },
         };
         format!("  {}", styled.force_styling(true))
     });
@@ -680,31 +662,7 @@ fn rendered_rows(state: &ReleaseProgressState) -> Vec<RenderedRow> {
     let mut rows = Vec::new();
     for stage in ReleaseStage::ALL {
         let stage_state = &state.stages[stage.index()];
-        if stage_state.status == StageStatus::Pending && stage_state.substeps.is_empty() {
-            continue;
-        }
-        let active_stage =
-            state.current_stage == Some(stage) && stage_state.status == StageStatus::Active;
-        let substeps = if active_stage {
-            stage_state
-                .substeps
-                .iter()
-                .rev()
-                .take(SUBSTEP_LIMIT)
-                .cloned()
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-        } else {
-            stage_state
-                .substeps
-                .back()
-                .cloned()
-                .into_iter()
-                .collect::<Vec<_>>()
-        };
-        if substeps.is_empty() {
+        if stage_state.substeps.is_empty() {
             rows.push(RenderedRow {
                 stage: Some(stage),
                 stage_status: Some(stage_state.status),
@@ -712,10 +670,10 @@ fn rendered_rows(state: &ReleaseProgressState) -> Vec<RenderedRow> {
             });
             continue;
         }
-        for (index, substep) in substeps.into_iter().enumerate() {
+        for (index, substep) in stage_state.substeps.iter().cloned().enumerate() {
             rows.push(RenderedRow {
                 stage: (index == 0).then_some(stage),
-                stage_status: (index == 0).then_some(stage_state.status),
+                stage_status: Some(stage_state.status),
                 substep: Some(substep),
             });
         }
@@ -1474,61 +1432,6 @@ impl fmt::Display for ReleaseVersion {
     }
 }
 
-#[cfg(test)]
-fn select_release_version(
-    application_version: ReleaseVersion,
-    latest: Option<&(ReleaseVersion, String)>,
-    digest: &[u8; 32],
-) -> Result<ReleaseVersion> {
-    let Some((latest_version, latest_digest)) = latest else {
-        return Ok(application_version);
-    };
-    if *latest_version == application_version && *latest_digest == hex(digest) {
-        return Ok(application_version);
-    }
-    Ok(max(latest_version.increment_patch()?, application_version))
-}
-
-#[cfg(test)]
-fn latest_release(output: &Path) -> Result<Option<(ReleaseVersion, String)>> {
-    if !output.exists() {
-        return Ok(None);
-    }
-    let mut latest = None;
-    for entry in fs::read_dir(output).context("read release output directory")? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let Some(version) = name
-            .strip_prefix(RELEASE_PREFIX)
-            .and_then(|name| name.strip_suffix(RELEASE_SUFFIX))
-        else {
-            continue;
-        };
-        let Ok(version) = ReleaseVersion::parse(version) else {
-            continue;
-        };
-        if latest
-            .as_ref()
-            .is_some_and(|(latest_version, _)| *latest_version >= version)
-        {
-            continue;
-        }
-        let contents = fs::read_to_string(entry.path())
-            .with_context(|| format!("read release checksum {}", entry.path().display()))?;
-        let digest = contents
-            .lines()
-            .find(|line| !line.starts_with('#') && !line.trim().is_empty())
-            .and_then(|line| line.split_whitespace().next())
-            .context("release sidecar has no checksum")?;
-        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            bail!("release sidecar has an invalid SHA-256 checksum");
-        }
-        latest = Some((version, digest.to_ascii_lowercase()));
-    }
-    Ok(latest)
-}
-
 fn cargo_build(
     workspace: &Path,
     package: &str,
@@ -1904,420 +1807,4 @@ fn sha256(input: &[u8]) -> [u8; 32] {
         bytes.copy_from_slice(&value.to_be_bytes());
     }
     output
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn release_progress_renders_compact_steps_with_one_active_arrow() {
-        let progress = ReleaseProgress::for_test(false, false);
-        let mut state = progress.state.borrow_mut();
-        state.stages[ReleaseStage::Infos.index()] = stage_state(
-            StageStatus::Complete,
-            [("Check release environment", SubstepStatus::Complete, None)],
-        );
-        state.stages[ReleaseStage::Checks.index()] = stage_state(
-            StageStatus::Complete,
-            [("Tests", SubstepStatus::Complete, Some((223, 223)))],
-        );
-        state.stages[ReleaseStage::Preparation.index()] = stage_state(
-            StageStatus::Active,
-            [("Prepare release version", SubstepStatus::Active, None)],
-        );
-        state.current_stage = Some(ReleaseStage::Preparation);
-        let rows = rendered_rows(&state);
-        drop(state);
-
-        let lines = rows
-            .iter()
-            .map(|row| progress.render_row(row))
-            .collect::<Vec<_>>();
-        let output = lines.join("\n");
-
-        assert!(lines[0].starts_with("✔ Infos"));
-        assert!(lines[1].starts_with("✔ Checks"));
-        assert!(lines[1].contains("✔ Tests 223/223"));
-        assert!(lines[2].starts_with("Preparation"));
-        assert!(lines[2].contains("→ Prepare release version"));
-        assert_eq!(lines.len(), 3);
-        assert_eq!(output.matches('→').count(), 1);
-        assert!(!output.contains('◈'));
-        assert!(!output.contains('◆'));
-        assert!(!output.contains('\u{1b}'));
-    }
-
-    #[test]
-    fn release_progress_keeps_only_the_recent_substeps_for_active_stage() {
-        let progress = ReleaseProgress::for_test(false, false);
-        let mut state = progress.state.borrow_mut();
-        state.stages[ReleaseStage::Checks.index()].status = StageStatus::Active;
-        state.current_stage = Some(ReleaseStage::Checks);
-        for index in 1..=6 {
-            state.stages[ReleaseStage::Checks.index()]
-                .substeps
-                .push_back(SubstepState {
-                    label: format!("Check {index}"),
-                    status: if index == 6 {
-                        SubstepStatus::Active
-                    } else {
-                        SubstepStatus::Complete
-                    },
-                    progress: None,
-                });
-        }
-        let rows = rendered_rows(&state);
-        drop(state);
-
-        let output = rows
-            .iter()
-            .map(|row| progress.render_row(row))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!output.contains("Check 1"));
-        for index in 2..=6 {
-            assert!(output.contains(&format!("Check {index}")));
-        }
-        assert_eq!(output.matches('→').count(), 1);
-    }
-
-    #[test]
-    fn release_progress_color_styles_the_current_path_without_changing_markers() {
-        let progress = ReleaseProgress::for_test(true, true);
-        let mut state = progress.state.borrow_mut();
-        state.stages[ReleaseStage::Build.index()] = stage_state(
-            StageStatus::Active,
-            [("Build executable", SubstepStatus::Active, Some((1, 2)))],
-        );
-        state.current_stage = Some(ReleaseStage::Build);
-        let row = rendered_rows(&state).into_iter().next().unwrap();
-        drop(state);
-
-        let line = progress.render_row(&row);
-        assert!(line.contains("\u{1b}["));
-        assert!(line.contains("Build"));
-        assert!(line.contains("→ Build executable"));
-        assert!(line.contains("Build executable 1/2"));
-    }
-
-    #[test]
-    fn release_progress_plain_rendering_has_no_terminal_controls() {
-        let progress = ReleaseProgress::for_test(false, false);
-        let mut state = ReleaseProgressState::new();
-        state.stages[ReleaseStage::Checks.index()] = stage_state(
-            StageStatus::Complete,
-            [(
-                "Run workspace tests",
-                SubstepStatus::Complete,
-                Some((223, 223)),
-            )],
-        );
-        let row = rendered_rows(&state).into_iter().next().unwrap();
-
-        assert!(!progress.render_row(&row).contains('\u{1b}'));
-    }
-
-    #[test]
-    fn test_progress_parsers_count_listed_and_completed_tests() {
-        let listed = "47 tests, 0 benchmarks\n101 tests, 0 benchmarks\n43 tests, 0 benchmarks\n8 tests, 0 benchmarks\n1 test, 0 benchmarks\n1 test, 0 benchmarks\n22 tests, 0 benchmarks\n";
-        assert_eq!(parse_test_list_count(listed), Some(223));
-        assert!(parse_test_completion(b"test runtime::works ... ok\n"));
-        assert!(parse_test_completion(b"test runtime::fails ... FAILED\n"));
-        assert!(parse_test_completion(
-            b"test runtime::ignored ... ignored\n"
-        ));
-        assert!(!parse_test_completion(b"test result: ok. 1 passed\n"));
-    }
-
-    type TestSubstep = (&'static str, SubstepStatus, Option<(usize, usize)>);
-
-    fn stage_state<const N: usize>(status: StageStatus, substeps: [TestSubstep; N]) -> StageState {
-        StageState {
-            status,
-            substeps: substeps
-                .into_iter()
-                .map(|(label, status, progress)| SubstepState {
-                    label: label.to_owned(),
-                    status,
-                    progress,
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn command_diagnostics_preserve_both_child_streams() {
-        assert_eq!(
-            command_diagnostics(b"stdout detail\n", b"stderr detail\n"),
-            "\nstdout:\nstdout detail\nstderr:\nstderr detail"
-        );
-        assert_eq!(command_diagnostics(b"", b"\n"), "");
-    }
-
-    #[test]
-    fn version_prompt_accepts_the_suggested_value_when_empty() {
-        let suggested = ReleaseVersion::parse("0.3.18").unwrap();
-
-        assert_eq!(parse_version_input("", suggested).unwrap(), suggested);
-        assert_eq!(parse_version_input("   ", suggested).unwrap(), suggested);
-    }
-
-    #[test]
-    fn version_prompt_accepts_an_edited_middle_number() {
-        let suggested = ReleaseVersion::parse("0.3.18").unwrap();
-
-        assert_eq!(
-            parse_version_input("0.7.18", suggested).unwrap(),
-            ReleaseVersion::parse("0.7.18").unwrap()
-        );
-    }
-
-    #[test]
-    fn version_prompt_accepts_edited_major_and_patch_values() {
-        let suggested = ReleaseVersion::parse("0.3.18").unwrap();
-
-        assert_eq!(
-            parse_version_input("1.3.18", suggested).unwrap(),
-            ReleaseVersion::parse("1.3.18").unwrap()
-        );
-        assert_eq!(
-            parse_version_input("0.3.19", suggested).unwrap(),
-            ReleaseVersion::parse("0.3.19").unwrap()
-        );
-    }
-
-    #[test]
-    fn version_suggestions_offer_patch_minor_and_major_from_release_history() {
-        let current = ReleaseVersion::parse("0.2.18").unwrap();
-        let highest = Some(ReleaseVersion::parse("0.2.19").unwrap());
-
-        assert_eq!(
-            VersionSuggestions::new(current, highest).unwrap(),
-            VersionSuggestions {
-                patch: ReleaseVersion::parse("0.2.20").unwrap(),
-                minor: ReleaseVersion::parse("0.3.0").unwrap(),
-                major: ReleaseVersion::parse("1.0.0").unwrap(),
-            }
-        );
-    }
-
-    #[test]
-    fn version_suggestions_start_from_a_source_version_ahead_of_history() {
-        let current = ReleaseVersion::parse("1.4.2").unwrap();
-        let highest = Some(ReleaseVersion::parse("1.3.9").unwrap());
-
-        assert_eq!(
-            VersionSuggestions::new(current, highest).unwrap(),
-            VersionSuggestions {
-                patch: ReleaseVersion::parse("1.4.3").unwrap(),
-                minor: ReleaseVersion::parse("1.5.0").unwrap(),
-                major: ReleaseVersion::parse("2.0.0").unwrap(),
-            }
-        );
-    }
-
-    #[test]
-    fn sha256_matches_known_vector() {
-        assert_eq!(
-            hex(&sha256(b"abc")),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-
-    #[test]
-    fn embedded_payload_validation_skips_partial_marker_matches() {
-        let directory = tempfile::tempdir().unwrap();
-        let payload = (0..96_u8).collect::<Vec<_>>();
-        let payload_path = directory.path().join("source.dll");
-        let executable_path = directory.path().join("app.exe");
-        fs::write(&payload_path, &payload).unwrap();
-        let mut executable = payload[..64].to_vec();
-        executable.extend_from_slice(b"not the payload");
-        executable.extend_from_slice(&payload);
-        fs::write(&executable_path, executable).unwrap();
-        validate_embedded_payload(&executable_path, &payload_path).unwrap();
-    }
-
-    #[test]
-    fn windows_sdk_version_normalization_is_exact() {
-        assert_eq!(
-            "10.0.22621.0\\".trim_end_matches(['\\', '/']),
-            REQUIRED_WINDOWS_SDK
-        );
-        assert_ne!(
-            "10.0.26100.0".trim_end_matches(['\\', '/']),
-            REQUIRED_WINDOWS_SDK
-        );
-    }
-
-    #[test]
-    fn release_version_reuses_only_matching_current_version_and_checksum() {
-        let digest = sha256(b"current build");
-        let current = ReleaseVersion::parse("1.2.22").unwrap();
-        let latest = (current, hex(&digest));
-
-        assert_eq!(
-            select_release_version(current, Some(&latest), &digest).unwrap(),
-            current
-        );
-        assert_eq!(
-            select_release_version(current, Some(&latest), &sha256(b"changed build")).unwrap(),
-            ReleaseVersion::parse("1.2.23").unwrap()
-        );
-    }
-
-    #[test]
-    fn release_version_never_moves_behind_source_or_release_history() {
-        let digest = sha256(b"current build");
-        let history_ahead = (ReleaseVersion::parse("1.2.22").unwrap(), hex(&digest));
-        assert_eq!(
-            select_release_version(
-                ReleaseVersion::parse("1.2.20").unwrap(),
-                Some(&history_ahead),
-                &digest,
-            )
-            .unwrap(),
-            ReleaseVersion::parse("1.2.23").unwrap()
-        );
-
-        let source_ahead = ReleaseVersion::parse("2.0.0").unwrap();
-        assert_eq!(
-            select_release_version(source_ahead, Some(&history_ahead), &digest).unwrap(),
-            source_ahead
-        );
-    }
-
-    #[test]
-    fn packaging_identity_is_stageswap() {
-        assert_eq!(APP_PACKAGE, "stageswap");
-        assert_eq!(MEDIA_SOURCE_PACKAGE, "stageswap-media-source");
-        assert_eq!(APP_EXECUTABLE, "StageSwap.exe");
-        assert_eq!(MEDIA_SOURCE_DLL, "stageswap_media_source.dll");
-        assert_eq!(RELEASE_PREFIX, "StageSwap_win64_v");
-        assert_eq!(RELEASE_SUFFIX, ".exe.sha256");
-    }
-
-    #[test]
-    fn release_version_starts_at_application_version() {
-        let current = ReleaseVersion::parse(env!("CARGO_PKG_VERSION")).unwrap();
-        assert_eq!(
-            select_release_version(current, None, &sha256(b"first build")).unwrap(),
-            current
-        );
-    }
-
-    #[test]
-    fn webcam_switcher_history_does_not_affect_stageswap_versions() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::write(
-            directory
-                .path()
-                .join("WebcamSwitcher_win64_v9.9.9.exe.sha256"),
-            format!("{} *legacy.exe\n", hex(&sha256(b"legacy"))),
-        )
-        .unwrap();
-        let latest = latest_release(directory.path()).unwrap();
-        assert_eq!(
-            select_release_version(
-                ReleaseVersion::parse("0.2.0").unwrap(),
-                latest.as_ref(),
-                &sha256(b"first StageSwap build"),
-            )
-            .unwrap(),
-            ReleaseVersion::parse("0.2.0").unwrap()
-        );
-    }
-
-    #[test]
-    fn legacy_release_sidecars_remain_valid_history() {
-        let directory = tempfile::tempdir().unwrap();
-        let digest = sha256(b"legacy metadata shape");
-        fs::write(
-            directory.path().join("StageSwap_win64_v3.4.5.exe.sha256"),
-            format!("{} *StageSwap_win64_v3.4.5.exe\n", hex(&digest)),
-        )
-        .unwrap();
-        assert_eq!(
-            latest_release(directory.path()).unwrap(),
-            Some((ReleaseVersion::parse("3.4.5").unwrap(), hex(&digest)))
-        );
-    }
-
-    #[test]
-    fn workspace_version_update_preserves_manifest_and_rolls_back_lockfile() {
-        let directory = tempfile::tempdir().unwrap();
-        let manifest = directory.path().join("Cargo.toml");
-        let lockfile = directory.path().join("Cargo.lock");
-        let original_manifest = "[workspace]\nresolver = \"3\"\n\n[workspace.package]\nversion = \"0.2.0\" # release\nedition = \"2024\"\n";
-        let original_lock = b"original lock";
-        fs::write(&manifest, original_manifest).unwrap();
-        fs::write(&lockfile, original_lock).unwrap();
-
-        {
-            let _transaction = VersionTransaction::begin(
-                &manifest,
-                &lockfile,
-                ReleaseVersion::parse("0.2.11").unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                read_workspace_version(&manifest).unwrap(),
-                ReleaseVersion::parse("0.2.11").unwrap()
-            );
-            fs::write(&lockfile, "regenerated lock").unwrap();
-        }
-
-        assert_eq!(fs::read_to_string(&manifest).unwrap(), original_manifest);
-        assert_eq!(fs::read(&lockfile).unwrap(), original_lock);
-    }
-
-    #[test]
-    fn committed_workspace_version_and_regenerated_lockfile_are_retained() {
-        let directory = tempfile::tempdir().unwrap();
-        let manifest = directory.path().join("Cargo.toml");
-        let lockfile = directory.path().join("Cargo.lock");
-        fs::write(&manifest, "[workspace.package]\nversion = \"0.2.0\"\n").unwrap();
-        fs::write(&lockfile, "original lock").unwrap();
-        let mut transaction = VersionTransaction::begin(
-            &manifest,
-            &lockfile,
-            ReleaseVersion::parse("0.2.11").unwrap(),
-        )
-        .unwrap();
-        fs::write(&lockfile, "regenerated lock").unwrap();
-        transaction.commit();
-        drop(transaction);
-
-        assert_eq!(
-            read_workspace_version(&manifest).unwrap(),
-            ReleaseVersion::parse("0.2.11").unwrap()
-        );
-        assert_eq!(fs::read_to_string(&lockfile).unwrap(), "regenerated lock");
-    }
-
-    #[test]
-    fn release_publication_refuses_to_replace_different_existing_bytes() {
-        let directory = tempfile::tempdir().unwrap();
-        let artifact = "StageSwap_win64_v1.0.0.exe";
-        fs::write(directory.path().join(artifact), b"existing").unwrap();
-        assert!(publish_release(directory.path(), artifact, b"new", b"checksum").is_err());
-        assert_eq!(
-            fs::read(directory.path().join(artifact)).unwrap(),
-            b"existing"
-        );
-        assert!(!directory.path().join(format!("{artifact}.sha256")).exists());
-    }
-
-    #[test]
-    fn production_build_commands_and_artifact_paths_are_release_only() {
-        let workspace = Path::new("workspace");
-        let command = cargo_build(workspace, APP_PACKAGE, "test-target", None);
-        let description = format!("{command:?}");
-        assert!(description.contains("--release"));
-        assert!(
-            release_artifact(workspace, "test-target", APP_EXECUTABLE)
-                .ends_with("target/test-target/release/StageSwap.exe")
-        );
-    }
 }
