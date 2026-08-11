@@ -107,7 +107,7 @@ The publisher requires a clean branch matching its pushed upstream. Stable relea
 
 ### Release and deployment
 
-Releases are unsigned versioned executables with SHA-256 sidecars. The underlying interactive command is `cargo run --release -p xtask -- publish-release`; the wrapper supplies the pinned macOS cross-compilation environment.
+Releases are unsigned versioned executables with SHA-256 sidecars. The underlying interactive command is `cargo run --quiet --release -p xtask -- publish-release`; the wrapper supplies the pinned macOS cross-compilation environment.
 
 `StageSwap_win64_vX.Y.Z.exe` self-deploys per-user or can run once without installation. `--cleanup` removes startup and the virtual-camera deployment; `--uninstall` also removes the managed app and shortcuts. Both preserve user data, and deployment never modifies Automatic Screen Camera data.
 

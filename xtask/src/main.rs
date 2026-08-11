@@ -1,4 +1,6 @@
 use anyhow::{Context, Result, bail};
+use dialoguer::{Input, console::Term};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 #[cfg(test)]
 use std::cmp::max;
 use std::env;
@@ -8,6 +10,7 @@ use std::io::{self, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 const REQUIRED_WINDOWS_SDK: &str = "10.0.22621.0";
 const APP_PACKAGE: &str = "stageswap";
@@ -75,14 +78,102 @@ enum ReleaseTrack {
     Release,
 }
 
+struct ReleaseProgress {
+    interactive: bool,
+    color: bool,
+}
+
+impl ReleaseProgress {
+    fn new() -> Self {
+        let interactive = Term::stderr().is_term();
+        Self {
+            interactive,
+            color: interactive && env::var_os("NO_COLOR").is_none(),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(interactive: bool, color: bool) -> Self {
+        Self { interactive, color }
+    }
+
+    fn step<T>(&self, label: &str, action: impl FnOnce() -> Result<T>) -> Result<T> {
+        let spinner = self.start(label);
+        let result = action();
+        match result {
+            Ok(value) => {
+                self.finish(spinner, label, true);
+                Ok(value)
+            }
+            Err(error) => {
+                self.finish(spinner, label, false);
+                Err(error.context(format!("{label} failed")))
+            }
+        }
+    }
+
+    fn command(&self, label: &str, command: Command) -> Result<()> {
+        self.step(label, || run(command))
+    }
+
+    fn start(&self, label: &str) -> Option<ProgressBar> {
+        if !self.interactive {
+            return None;
+        }
+
+        let template = if self.color {
+            "{spinner:.cyan}{msg}"
+        } else {
+            "{spinner}{msg}"
+        };
+        let style = ProgressStyle::with_template(template)
+            .expect("release progress template must remain valid")
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", ""]);
+        let spinner = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
+        spinner.set_style(style);
+        spinner.set_message(format!(" {label}"));
+        spinner.enable_steady_tick(Duration::from_millis(80));
+        Some(spinner)
+    }
+
+    fn finish(&self, spinner: Option<ProgressBar>, label: &str, success: bool) {
+        let message = self.status_line(label, success);
+        if let Some(spinner) = spinner {
+            spinner.finish_with_message(message);
+        } else {
+            eprintln!("{message}");
+        }
+    }
+
+    fn status_line(&self, label: &str, success: bool) -> String {
+        let marker = if success { "✔" } else { "✖" };
+        let marker = if self.color {
+            let styled = if success {
+                Term::stderr().style().green().apply_to(marker)
+            } else {
+                Term::stderr().style().red().apply_to(marker)
+            };
+            styled.force_styling(true).to_string()
+        } else {
+            marker.to_owned()
+        };
+        format!("{marker} {label}")
+    }
+}
+
 fn publish_release_cli() -> Result<()> {
+    let progress = ReleaseProgress::new();
     let workspace = workspace_root();
-    preflight_repository(&workspace)?;
-    run(Command::new("gh").args(["auth", "status"]))?;
+    preflight_repository(&workspace, &progress)?;
+    let mut github_auth = Command::new("gh");
+    github_auth.args(["auth", "status"]);
+    progress.command("Verify GitHub authentication", github_auth)?;
 
     let track = prompt_track()?;
-    let branch = capture(git(&workspace, &["branch", "--show-current"]))?;
-    let branch = branch.trim();
+    let branch = progress.step("Read current branch", || {
+        capture(git(&workspace, &["branch", "--show-current"]))
+    })?;
+    let branch = branch.trim().to_owned();
     if branch.is_empty() {
         bail!("publish-release requires a checked-out branch");
     }
@@ -90,9 +181,11 @@ fn publish_release_cli() -> Result<()> {
         bail!("stable releases must be published from main");
     }
 
-    let published = published_versions()?;
+    let published = progress.step("Read published releases", published_versions)?;
     let highest = published.iter().copied().max();
-    let current = read_workspace_version(&workspace.join("Cargo.toml"))?;
+    let current = progress.step("Read workspace version", || {
+        read_workspace_version(&workspace.join("Cargo.toml"))
+    })?;
     let suggested = match highest {
         Some(highest) if current <= highest => highest.increment_patch()?,
         _ => current,
@@ -109,44 +202,75 @@ fn publish_release_cli() -> Result<()> {
             bail!("stable release confirmation did not match");
         }
     }
-    let incomplete_draft = incomplete_draft_exists(&tag)?;
+    let incomplete_draft =
+        progress.step("Inspect GitHub release", || incomplete_draft_exists(&tag))?;
     if !incomplete_draft {
-        ensure_tag_absent(&workspace, &tag)?;
+        progress.step("Check release tag", || ensure_tag_absent(&workspace, &tag))?;
     }
 
     let manifest = workspace.join("Cargo.toml");
     let lockfile = workspace.join("Cargo.lock");
-    let mut version_transaction = (version != current)
-        .then(|| VersionTransaction::begin(&manifest, &lockfile, version))
-        .transpose()?;
+    let mut version_transaction = if version != current {
+        Some(progress.step("Update workspace version", || {
+            VersionTransaction::begin(&manifest, &lockfile, version)
+        })?)
+    } else {
+        None
+    };
     let outcome = (|| -> Result<PathBuf> {
         if version_transaction.is_some() {
-            run(&mut cargo_metadata(&workspace))?;
+            progress.command("Refresh Cargo metadata", cargo_metadata(&workspace))?;
         }
-        run_checks(&workspace)?;
-        let verification = tempfile::tempdir().context("create release verification directory")?;
-        let verification_artifact = build_package(version, verification.path())?;
-        validate_release_outputs(&verification_artifact, version)?;
+        run_checks(&workspace, &progress)?;
+        let verification = progress.step("Create verification workspace", || {
+            tempfile::tempdir().context("create release verification directory")
+        })?;
+        let verification_artifact = progress.step("Build verification package", || {
+            build_package(version, verification.path())
+        })?;
+        progress.step("Validate verification package", || {
+            validate_release_outputs(&verification_artifact, version)
+        })?;
 
-        run(&mut git(&workspace, &["add", "Cargo.toml", "Cargo.lock"]))?;
+        progress.command(
+            "Stage release version",
+            git(&workspace, &["add", "Cargo.toml", "Cargo.lock"]),
+        )?;
         let message = format!("Release {tag}");
-        run(&mut git(
-            &workspace,
-            &["commit", "--allow-empty", "-m", &message],
-        ))?;
+        progress.command(
+            "Commit release version",
+            git(&workspace, &["commit", "--allow-empty", "-m", &message]),
+        )?;
         if let Some(transaction) = version_transaction.as_mut() {
             transaction.commit();
         }
         let output = workspace.join("dist");
-        clear_local_release_outputs(&output, version)?;
-        let artifact = build_package(version, &output)?;
-        validate_release_outputs(&artifact, version)?;
-        run(&mut git(&workspace, &["push", "origin", branch]))?;
-        let revision = capture(git(&workspace, &["rev-parse", "HEAD"]))?;
+        progress.step("Prepare release output", || {
+            clear_local_release_outputs(&output, version)
+        })?;
+        let artifact =
+            progress.step("Build release package", || build_package(version, &output))?;
+        progress.step("Validate release package", || {
+            validate_release_outputs(&artifact, version)
+        })?;
+        progress.command(
+            "Push release commit",
+            git(&workspace, &["push", "origin", &branch]),
+        )?;
+        let revision = progress.step("Read release revision", || {
+            capture(git(&workspace, &["rev-parse", "HEAD"]))
+        })?;
         if incomplete_draft {
-            cleanup_incomplete_draft(&tag)?;
+            cleanup_incomplete_draft(&tag, &progress)?;
         }
-        publish_github_release(track, version, revision.trim(), &artifact, &workspace)?;
+        publish_github_release(
+            track,
+            version,
+            revision.trim(),
+            &artifact,
+            &workspace,
+            &progress,
+        )?;
         Ok(artifact)
     })();
 
@@ -168,31 +292,33 @@ fn publish_release_cli() -> Result<()> {
     }
 }
 
-fn preflight_repository(workspace: &Path) -> Result<()> {
-    let status = capture(git(
-        workspace,
-        &["status", "--porcelain", "--untracked-files=all"],
-    ))?;
-    if !status.trim().is_empty() {
-        bail!("publish-release requires a clean worktree");
-    }
-    let remote = capture(git(workspace, &["remote", "get-url", "origin"]))?;
-    if !remote.contains("NatanSlvdr/StageSwap") {
-        bail!("origin does not point to NatanSlvdr/StageSwap");
-    }
-    run(&mut git(workspace, &["fetch", "origin"]))?;
-    let head = capture(git(workspace, &["rev-parse", "HEAD"]))?;
-    let upstream = capture(git(workspace, &["rev-parse", "@{upstream}"]))?;
-    if head.trim() != upstream.trim() {
-        bail!("the current branch must exactly match its pushed upstream before publishing");
-    }
-    Ok(())
+fn preflight_repository(workspace: &Path, progress: &ReleaseProgress) -> Result<()> {
+    progress.step("Verify repository state", || {
+        let status = capture(git(
+            workspace,
+            &["status", "--porcelain", "--untracked-files=all"],
+        ))?;
+        if !status.trim().is_empty() {
+            bail!("publish-release requires a clean worktree");
+        }
+        let remote = capture(git(workspace, &["remote", "get-url", "origin"]))?;
+        if !remote.contains("NatanSlvdr/StageSwap") {
+            bail!("origin does not point to NatanSlvdr/StageSwap");
+        }
+        run(git(workspace, &["fetch", "origin"]))?;
+        let head = capture(git(workspace, &["rev-parse", "HEAD"]))?;
+        let upstream = capture(git(workspace, &["rev-parse", "@{upstream}"]))?;
+        if head.trim() != upstream.trim() {
+            bail!("the current branch must exactly match its pushed upstream before publishing");
+        }
+        Ok(())
+    })
 }
 
 fn prompt_track() -> Result<ReleaseTrack> {
-    println!("Release track:");
-    println!("  1. Development (default)");
-    println!("  2. Release");
+    eprintln!("Release track:");
+    eprintln!("  1. Development (default)");
+    eprintln!("  2. Release");
     match prompt("Select [1]: ")?.as_str() {
         "" | "1" => Ok(ReleaseTrack::Development),
         "2" => Ok(ReleaseTrack::Release),
@@ -201,17 +327,29 @@ fn prompt_track() -> Result<ReleaseTrack> {
 }
 
 fn prompt_version(suggested: ReleaseVersion) -> Result<ReleaseVersion> {
-    let value = prompt(&format!("Version [{suggested}]: "))?;
-    if value.is_empty() {
+    let value = if Term::stderr().is_term() {
+        Input::<String>::new()
+            .with_prompt("Version")
+            .with_initial_text(suggested.to_string())
+            .interact_text()
+            .context("read version prompt")?
+    } else {
+        prompt(&format!("Version [{suggested}]: "))?
+    };
+    parse_version_input(&value, suggested)
+}
+
+fn parse_version_input(value: &str, suggested: ReleaseVersion) -> Result<ReleaseVersion> {
+    if value.trim().is_empty() {
         Ok(suggested)
     } else {
-        ReleaseVersion::parse(&value)
+        ReleaseVersion::parse(value.trim())
     }
 }
 
 fn prompt(message: &str) -> Result<String> {
-    print!("{message}");
-    io::stdout().flush().context("flush prompt")?;
+    eprint!("{message}");
+    io::stderr().flush().context("flush prompt")?;
     let mut value = String::new();
     io::stdin().read_line(&mut value).context("read prompt")?;
     Ok(value.trim().to_owned())
@@ -278,8 +416,7 @@ fn incomplete_draft_exists(tag: &str) -> Result<bool> {
     }
 }
 
-fn cleanup_incomplete_draft(tag: &str) -> Result<()> {
-    println!("removing incomplete draft {tag} before retrying");
+fn cleanup_incomplete_draft(tag: &str, progress: &ReleaseProgress) -> Result<()> {
     let mut delete = Command::new("gh");
     delete.args([
         "release",
@@ -290,7 +427,7 @@ fn cleanup_incomplete_draft(tag: &str) -> Result<()> {
         "--yes",
         "--cleanup-tag",
     ]);
-    run(&mut delete)
+    progress.command("Remove incomplete GitHub release", delete)
 }
 
 fn ensure_tag_absent(workspace: &Path, tag: &str) -> Result<()> {
@@ -305,12 +442,12 @@ fn ensure_tag_absent(workspace: &Path, tag: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_checks(workspace: &Path) -> Result<()> {
+fn run_checks(workspace: &Path, progress: &ReleaseProgress) -> Result<()> {
     let mut format = Command::new("cargo");
     format
         .current_dir(workspace)
         .args(["fmt", "--all", "--", "--check"]);
-    run(&mut format)?;
+    progress.command("Check formatting", format)?;
     let mut clippy = Command::new("cargo");
     clippy.current_dir(workspace).args([
         "clippy",
@@ -320,7 +457,7 @@ fn run_checks(workspace: &Path) -> Result<()> {
         "-D",
         "warnings",
     ]);
-    run(&mut clippy)?;
+    progress.command("Run host Clippy", clippy)?;
     let mut windows_clippy = Command::new("cargo");
     windows_clippy.current_dir(workspace).args([
         "clippy",
@@ -332,12 +469,12 @@ fn run_checks(workspace: &Path) -> Result<()> {
         "-D",
         "warnings",
     ]);
-    run(&mut windows_clippy)?;
+    progress.command("Run Windows-target Clippy", windows_clippy)?;
     let mut tests = Command::new("cargo");
     tests
         .current_dir(workspace)
         .args(["test", "--workspace", "--all-targets"]);
-    run(&mut tests)
+    progress.command("Run workspace tests", tests)
 }
 
 fn validate_release_outputs(artifact: &Path, version: ReleaseVersion) -> Result<()> {
@@ -374,6 +511,7 @@ fn publish_github_release(
     revision: &str,
     artifact: &Path,
     workspace: &Path,
+    progress: &ReleaseProgress,
 ) -> Result<()> {
     let tag = format!("v{version}");
     let title = match track {
@@ -404,7 +542,7 @@ fn publish_github_release(
             command.arg("--latest");
         }
     }
-    run(&mut command)
+    progress.command("Publish GitHub release", command)
 }
 
 fn git(workspace: &Path, arguments: &[&str]) -> Command {
@@ -419,14 +557,28 @@ fn capture(mut command: Command) -> Result<String> {
         .output()
         .with_context(|| format!("could not run {description}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
-            "command failed ({}): {description}\n{}",
+            "command failed ({}): {description}{}",
             output.status,
-            stderr.trim()
+            command_diagnostics(&output.stdout, &output.stderr)
         );
     }
     String::from_utf8(output.stdout).context("command output was not valid UTF-8")
+}
+
+fn command_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let mut diagnostics = String::new();
+    if !stdout.trim().is_empty() {
+        diagnostics.push_str("\nstdout:\n");
+        diagnostics.push_str(stdout.trim());
+    }
+    if !stderr.trim().is_empty() {
+        diagnostics.push_str("\nstderr:\n");
+        diagnostics.push_str(stderr.trim());
+    }
+    diagnostics
 }
 
 fn build_release_pair(
@@ -434,12 +586,7 @@ fn build_release_pair(
     target: &str,
     architecture: &str,
 ) -> Result<(PathBuf, PathBuf)> {
-    run(&mut cargo_build(
-        workspace,
-        MEDIA_SOURCE_PACKAGE,
-        target,
-        None,
-    ))?;
+    run(cargo_build(workspace, MEDIA_SOURCE_PACKAGE, target, None))?;
     let dll = release_artifact(workspace, target, MEDIA_SOURCE_DLL);
     if !dll.is_file() {
         bail!("media-source build did not produce {}", dll.display());
@@ -448,7 +595,7 @@ fn build_release_pair(
     let embedded_dll = dll
         .canonicalize()
         .context("canonicalize media-source DLL")?;
-    run(&mut cargo_build(
+    run(cargo_build(
         workspace,
         APP_PACKAGE,
         target,
@@ -796,13 +943,17 @@ fn validate_embedded_payload(executable: &Path, payload: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run(command: &mut Command) -> Result<()> {
+fn run(mut command: Command) -> Result<()> {
     let description = format!("{command:?}");
-    let status = command
-        .status()
+    let output = command
+        .output()
         .with_context(|| format!("could not run {description}"))?;
-    if !status.success() {
-        bail!("command failed ({status}): {description}");
+    if !output.status.success() {
+        bail!(
+            "command failed ({}): {description}{}",
+            output.status,
+            command_diagnostics(&output.stdout, &output.stderr)
+        );
     }
     Ok(())
 }
@@ -937,6 +1088,68 @@ fn sha256(input: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_progress_plain_status_has_no_terminal_controls() {
+        let progress = ReleaseProgress::for_test(false, false);
+
+        assert_eq!(
+            progress.status_line("Run workspace tests", true),
+            "✔ Run workspace tests"
+        );
+        assert_eq!(
+            progress.status_line("Run workspace tests", false),
+            "✖ Run workspace tests"
+        );
+    }
+
+    #[test]
+    fn release_progress_honors_color_suppression_on_a_terminal() {
+        let progress = ReleaseProgress::for_test(true, false);
+
+        assert!(
+            !progress
+                .status_line("Run workspace tests", true)
+                .contains('\u{1b}')
+        );
+    }
+
+    #[test]
+    fn release_progress_color_status_styles_the_marker() {
+        let progress = ReleaseProgress::for_test(true, true);
+        let line = progress.status_line("Run workspace tests", true);
+
+        assert!(line.contains("\u{1b}["));
+        assert!(line.contains("✔"));
+        assert!(line.contains("Run workspace tests"));
+    }
+
+    #[test]
+    fn command_diagnostics_preserve_both_child_streams() {
+        assert_eq!(
+            command_diagnostics(b"stdout detail\n", b"stderr detail\n"),
+            "\nstdout:\nstdout detail\nstderr:\nstderr detail"
+        );
+        assert_eq!(command_diagnostics(b"", b"\n"), "");
+    }
+
+    #[test]
+    fn version_prompt_accepts_the_suggested_value_when_empty() {
+        let suggested = ReleaseVersion::parse("0.3.18").unwrap();
+
+        assert_eq!(parse_version_input("", suggested).unwrap(), suggested);
+        assert_eq!(parse_version_input("   ", suggested).unwrap(), suggested);
+    }
+
+    #[test]
+    fn version_prompt_accepts_an_edited_middle_number() {
+        let suggested = ReleaseVersion::parse("0.3.18").unwrap();
+
+        assert_eq!(
+            parse_version_input("0.7.18", suggested).unwrap(),
+            ReleaseVersion::parse("0.7.18").unwrap()
+        );
+    }
 
     #[test]
     fn sha256_matches_known_vector() {
