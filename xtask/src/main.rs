@@ -184,6 +184,7 @@ enum SubstepStatus {
     Pending,
     Active,
     Complete,
+    Skipped,
     Failed,
 }
 
@@ -274,37 +275,6 @@ impl ReleaseProgress {
         }
     }
 
-    fn step_with_progress<T>(
-        &self,
-        stage: ReleaseStage,
-        label: &str,
-        progress: (usize, usize),
-        action: impl FnOnce() -> Result<T>,
-    ) -> Result<T> {
-        self.begin_substep(stage, label, Some(progress));
-        match action() {
-            Ok(value) => {
-                self.finish_substep(true);
-                Ok(value)
-            }
-            Err(error) => {
-                self.finish_substep(false);
-                Err(error.context(format!("{label} failed")))
-            }
-        }
-    }
-
-    fn command_counted(
-        &self,
-        stage: ReleaseStage,
-        index: usize,
-        total: usize,
-        label: &str,
-        command: Command,
-    ) -> Result<()> {
-        self.step_with_progress(stage, label, (index, total), || run(command))
-    }
-
     fn test_command(&self, label: &str, command: Command, total: Option<usize>) -> Result<()> {
         self.begin_substep(ReleaseStage::Checks, label, total.map(|total| (0, total)));
         match run_test_command(command, self, total) {
@@ -331,8 +301,12 @@ impl ReleaseProgress {
                     if previous_state.status == StageStatus::Active {
                         previous_state.status = StageStatus::Complete;
                         for substep in &mut previous_state.substeps {
-                            if substep.status == SubstepStatus::Active {
-                                substep.status = SubstepStatus::Complete;
+                            match substep.status {
+                                SubstepStatus::Active => substep.status = SubstepStatus::Complete,
+                                SubstepStatus::Pending => substep.status = SubstepStatus::Skipped,
+                                SubstepStatus::Complete
+                                | SubstepStatus::Skipped
+                                | SubstepStatus::Failed => {}
                             }
                         }
                     }
@@ -409,8 +383,12 @@ impl ReleaseProgress {
             {
                 state.stages[stage.index()].status = StageStatus::Complete;
                 for substep in &mut state.stages[stage.index()].substeps {
-                    if substep.status == SubstepStatus::Active {
-                        substep.status = SubstepStatus::Complete;
+                    match substep.status {
+                        SubstepStatus::Active => substep.status = SubstepStatus::Complete,
+                        SubstepStatus::Pending => substep.status = SubstepStatus::Skipped,
+                        SubstepStatus::Complete
+                        | SubstepStatus::Skipped
+                        | SubstepStatus::Failed => {}
                     }
                 }
             }
@@ -649,7 +627,7 @@ fn render_stage_line(stage: ReleaseStage, stage_state: &StageState, color: bool)
         .iter()
         .map(|substep| {
             let marker = match substep.status {
-                SubstepStatus::Pending | SubstepStatus::Active => "",
+                SubstepStatus::Pending | SubstepStatus::Active | SubstepStatus::Skipped => "",
                 SubstepStatus::Complete => "",
                 SubstepStatus::Failed => "✖ ",
             };
@@ -667,25 +645,11 @@ fn render_stage_line(stage: ReleaseStage, stage_state: &StageState, color: bool)
     }
 
     let stage_label = match stage_state.status {
-        StageStatus::Pending => Term::stderr().style().dim().apply_to(stage_text),
-        StageStatus::Active => {
-            return format!(
-                "{}  {}",
-                style_active_stage(stage, stage_text),
-                stage_state
-                    .substeps
-                    .iter()
-                    .zip(children)
-                    .map(|(substep, text)| style_substep(stage, substep.status, text))
-                    .collect::<Vec<_>>()
-                    .join(" → ")
-            );
+        StageStatus::Active => style_active_stage(stage, stage_text),
+        StageStatus::Pending | StageStatus::Complete | StageStatus::Failed => {
+            style_stage_category(stage, stage_text)
         }
-        StageStatus::Complete => Term::stderr().style().green().dim().apply_to(stage_text),
-        StageStatus::Failed => Term::stderr().style().red().bold().apply_to(stage_text),
-    }
-    .force_styling(true)
-    .to_string();
+    };
     let children = stage_state
         .substeps
         .iter()
@@ -706,12 +670,25 @@ fn style_active_stage(stage: ReleaseStage, text: String) -> String {
     styled.force_styling(true).to_string()
 }
 
+fn style_stage_category(stage: ReleaseStage, text: String) -> String {
+    let styled = match stage {
+        ReleaseStage::Infos => Term::stderr().style().blue().apply_to(text),
+        ReleaseStage::Checks => Term::stderr().style().magenta().apply_to(text),
+        ReleaseStage::Preparation => Term::stderr().style().yellow().apply_to(text),
+        ReleaseStage::Build => Term::stderr().style().cyan().apply_to(text),
+        ReleaseStage::Publish => Term::stderr().style().green().apply_to(text),
+    };
+    styled.force_styling(true).to_string()
+}
+
 fn style_substep(stage: ReleaseStage, status: SubstepStatus, text: String) -> String {
     let styled = match status {
         SubstepStatus::Active => return style_active_stage(stage, text),
         SubstepStatus::Complete => Term::stderr().style().green().dim().apply_to(text),
         SubstepStatus::Failed => Term::stderr().style().red().bold().apply_to(text),
-        SubstepStatus::Pending => Term::stderr().style().dim().apply_to(text),
+        SubstepStatus::Pending | SubstepStatus::Skipped => {
+            Term::stderr().style().dim().apply_to(text)
+        }
     };
     styled.force_styling(true).to_string()
 }
@@ -1109,12 +1086,11 @@ fn ensure_tag_absent(workspace: &Path, tag: &str) -> Result<()> {
 }
 
 fn run_checks(workspace: &Path, progress: &ReleaseProgress) -> Result<()> {
-    const TOTAL: usize = 4;
     let mut format = Command::new("cargo");
     format
         .current_dir(workspace)
         .args(["fmt", "--all", "--", "--check"]);
-    progress.command_counted(ReleaseStage::Checks, 1, TOTAL, "Check formatting", format)?;
+    progress.step(ReleaseStage::Checks, "Check formatting", || run(format))?;
     let mut clippy = Command::new("cargo");
     clippy.current_dir(workspace).args([
         "clippy",
@@ -1124,7 +1100,7 @@ fn run_checks(workspace: &Path, progress: &ReleaseProgress) -> Result<()> {
         "-D",
         "warnings",
     ]);
-    progress.command_counted(ReleaseStage::Checks, 2, TOTAL, "Run host Clippy", clippy)?;
+    progress.step(ReleaseStage::Checks, "Run host Clippy", || run(clippy))?;
     let mut windows_clippy = Command::new("cargo");
     windows_clippy.current_dir(workspace).args([
         "clippy",
@@ -1136,13 +1112,9 @@ fn run_checks(workspace: &Path, progress: &ReleaseProgress) -> Result<()> {
         "-D",
         "warnings",
     ]);
-    progress.command_counted(
-        ReleaseStage::Checks,
-        3,
-        TOTAL,
-        "Run Windows-target Clippy",
-        windows_clippy,
-    )?;
+    progress.step(ReleaseStage::Checks, "Run Windows-target Clippy", || {
+        run(windows_clippy)
+    })?;
     let mut tests = Command::new("cargo");
     tests
         .current_dir(workspace)
@@ -1391,13 +1363,9 @@ fn build_release_pair(
     architecture: &str,
     progress: &ReleaseProgress,
 ) -> Result<(PathBuf, PathBuf)> {
-    progress.command_counted(
-        ReleaseStage::Build,
-        1,
-        2,
-        "Build media-source DLL",
-        cargo_build(workspace, MEDIA_SOURCE_PACKAGE, target, None),
-    )?;
+    progress.step(ReleaseStage::Build, "Build media-source DLL", || {
+        run(cargo_build(workspace, MEDIA_SOURCE_PACKAGE, target, None))
+    })?;
     let dll = release_artifact(workspace, target, MEDIA_SOURCE_DLL);
     if !dll.is_file() {
         bail!("media-source build did not produce {}", dll.display());
@@ -1406,13 +1374,14 @@ fn build_release_pair(
     let embedded_dll = dll
         .canonicalize()
         .context("canonicalize media-source DLL")?;
-    progress.command_counted(
-        ReleaseStage::Build,
-        2,
-        2,
-        "Build StageSwap executable",
-        cargo_build(workspace, APP_PACKAGE, target, Some(&embedded_dll)),
-    )?;
+    progress.step(ReleaseStage::Build, "Build StageSwap executable", || {
+        run(cargo_build(
+            workspace,
+            APP_PACKAGE,
+            target,
+            Some(&embedded_dll),
+        ))
+    })?;
     let executable = release_artifact(workspace, target, APP_EXECUTABLE);
     validate_pe_path(&executable, architecture)?;
     validate_embedded_payload(&executable, &dll)?;
