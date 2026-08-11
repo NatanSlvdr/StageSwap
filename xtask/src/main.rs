@@ -125,6 +125,39 @@ impl ReleaseStage {
             Self::Publish => 4,
         }
     }
+
+    fn substep_labels(self) -> &'static [&'static str] {
+        match self {
+            Self::Infos => &[
+                "Check release environment",
+                "Select release track",
+                "Load release context",
+                "Select version bump",
+                "Edit release version",
+                "Confirm stable release",
+                "Check release target",
+            ],
+            Self::Checks => &[
+                "Check formatting",
+                "Run host Clippy",
+                "Run Windows-target Clippy",
+                "Run workspace tests",
+            ],
+            Self::Preparation => &["Prepare release version", "Prepare verification package"],
+            Self::Build => &[
+                "Build media-source DLL",
+                "Build StageSwap executable",
+                "Package verification build",
+                "Validate verification package",
+            ],
+            Self::Publish => &[
+                "Commit release version",
+                "Package release (reuse verified build)",
+                "Validate release package",
+                "Publish release",
+            ],
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,6 +170,7 @@ enum StageStatus {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SubstepStatus {
+    Pending,
     Active,
     Complete,
     Failed,
@@ -165,9 +199,17 @@ struct ReleaseProgressState {
 impl ReleaseProgressState {
     fn new() -> Self {
         Self {
-            stages: std::array::from_fn(|_| StageState {
+            stages: std::array::from_fn(|index| StageState {
                 status: StageStatus::Pending,
-                substeps: Vec::new(),
+                substeps: ReleaseStage::ALL[index]
+                    .substep_labels()
+                    .iter()
+                    .map(|label| SubstepState {
+                        label: (*label).to_owned(),
+                        status: SubstepStatus::Pending,
+                        progress: None,
+                    })
+                    .collect(),
             }),
             current_stage: None,
             frame_lines: 0,
@@ -273,17 +315,27 @@ impl ReleaseProgress {
                     let previous_state = &mut state.stages[previous.index()];
                     if previous_state.status == StageStatus::Active {
                         previous_state.status = StageStatus::Complete;
+                        for substep in &mut previous_state.substeps {
+                            if substep.status == SubstepStatus::Active {
+                                substep.status = SubstepStatus::Complete;
+                            }
+                        }
                     }
                 }
                 state.current_stage = Some(stage);
                 state.stages[stage.index()].status = StageStatus::Active;
             }
             let substeps = &mut state.stages[stage.index()].substeps;
-            substeps.push(SubstepState {
-                label: label.to_owned(),
-                status: SubstepStatus::Active,
-                progress,
-            });
+            if let Some(substep) = substeps.iter_mut().find(|substep| substep.label == label) {
+                substep.status = SubstepStatus::Active;
+                substep.progress = progress;
+            } else {
+                substeps.push(SubstepState {
+                    label: label.to_owned(),
+                    status: SubstepStatus::Active,
+                    progress,
+                });
+            }
         }
         self.refresh();
     }
@@ -292,7 +344,11 @@ impl ReleaseProgress {
         {
             let mut state = self.state.borrow_mut();
             if let Some(stage) = state.current_stage
-                && let Some(substep) = state.stages[stage.index()].substeps.last_mut()
+                && let Some(substep) = state.stages[stage.index()]
+                    .substeps
+                    .iter_mut()
+                    .rev()
+                    .find(|substep| substep.status == SubstepStatus::Active)
             {
                 substep.progress = Some((completed, total));
             }
@@ -307,7 +363,12 @@ impl ReleaseProgress {
                 return;
             };
             let stage_state = &mut state.stages[stage.index()];
-            if let Some(substep) = stage_state.substeps.last_mut() {
+            if let Some(substep) = stage_state
+                .substeps
+                .iter_mut()
+                .rev()
+                .find(|substep| substep.status == SubstepStatus::Active)
+            {
                 substep.status = if success {
                     SubstepStatus::Complete
                 } else {
@@ -332,6 +393,11 @@ impl ReleaseProgress {
                 && state.stages[stage.index()].status == StageStatus::Active
             {
                 state.stages[stage.index()].status = StageStatus::Complete;
+                for substep in &mut state.stages[stage.index()].substeps {
+                    if substep.status == SubstepStatus::Active {
+                        substep.status = SubstepStatus::Complete;
+                    }
+                }
             }
         }
         self.refresh();
@@ -562,7 +628,7 @@ fn render_stage_line(stage: ReleaseStage, stage_state: &StageState, color: bool)
         .iter()
         .map(|substep| {
             let marker = match substep.status {
-                SubstepStatus::Active => "→ ",
+                SubstepStatus::Pending | SubstepStatus::Active => "",
                 SubstepStatus::Complete => "",
                 SubstepStatus::Failed => "✖ ",
             };
@@ -576,7 +642,7 @@ fn render_stage_line(stage: ReleaseStage, stage_state: &StageState, color: bool)
         .collect::<Vec<_>>();
 
     if !color {
-        return format!("{stage_text}  {}", children.join("  "));
+        return format!("{stage_text}  {}", children.join(" → "));
     }
 
     let stage = match stage_state.status {
@@ -596,11 +662,12 @@ fn render_stage_line(stage: ReleaseStage, stage_state: &StageState, color: bool)
                 SubstepStatus::Active => Term::stderr().style().yellow().bold().apply_to(text),
                 SubstepStatus::Complete => Term::stderr().style().green().dim().apply_to(text),
                 SubstepStatus::Failed => Term::stderr().style().red().bold().apply_to(text),
+                SubstepStatus::Pending => Term::stderr().style().dim().apply_to(text),
             };
             styled.force_styling(true).to_string()
         })
         .collect::<Vec<_>>();
-    format!("{stage}  {}", children.join("  "))
+    format!("{stage}  {}", children.join(" → "))
 }
 
 fn short_substep_label(label: &str) -> &str {
