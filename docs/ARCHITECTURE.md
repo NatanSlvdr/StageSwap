@@ -1,43 +1,106 @@
 # Architecture
 
-`StageSwap_win64_vX.Y.Z.exe` is a native, installerless self-deploying application. A downloaded copy can run once or atomically install itself at `%LocalAppData%\Programs\StageSwap\StageSwap.exe`; the managed copy owns the per-user Start Menu and Desktop shortcuts and is the only path eligible for Windows startup. It embeds an x64 Media Foundation source DLL. First managed or run-once launch validates native Windows architecture, elevates only to extract and register that DLL, and then runs the tray application unelevated. Each distinct payload is extracted to a content-versioned `StageSwapSource-<content-hash>.dll` before COM registration switches to it, so an older DLL locked by a camera process never blocks an upgrade. Unlocked stale copies are removed immediately and locked copies are scheduled for deletion at reboot. `--cleanup` unregisters and removes only StageSwap-owned deployment resources; `--uninstall` additionally removes the managed executable and shortcuts while retaining user data. There is no Setup, uninstall entry, migration path, or cross-architecture deployment.
+This document explains how StageSwap implements its product contract. For build and release commands, see [Development](DEVELOPMENT.md). For user-visible timing and limits, see the wiki [Technical reference](https://github.com/NatanSlvdr/StageSwap/wiki/Technical-reference).
 
-The application pipeline is fixed at 1280×720 BGRA and 30 fps:
+## System boundaries
 
-1. Windows Graphics Capture receives a transient D3D texture and immediately copies it to a staging texture and CPU `Frame`.
-2. Media Foundation ranks progressive RGB32, NV12, YUY2, and MJPEG webcam formats, preferring exact RGB32 1280×720 at 30 fps and then safe native size/rate fallbacks. Advanced video processing converts the selected input to RGB32; optional default stride and sample-size metadata use checked RGB32 defaults, while actual `IMF2DBuffer2` pitch is honored during row-aware copying for positive, negative, and padded rows. CPU aspect-fit normalization then produces the immutable BGRA 1280×720 frame contract. The optional centered crop derives its zoom from the native display aspect ratio, leaves native 16:9 or unknown-aspect signals unchanged, and feeds both webcam preview and composed output.
-3. CPU code generates 160×90 grayscale comparison images directly from BGRA, rejects stale webcam frames, and treats the last valid screen frame as session-valid until that capture reports an error, closes, or is replaced. Cached aspect-fit scaling uses black letterboxing and blends only during transitions. Steady 720p sources reuse their immutable pixel storage.
-4. A monotonic deadline pacer publishes at 30 fps without accumulating drift or catch-up frames; missed intervals are advanced with constant-time arithmetic. The UI-facing mailbox is bounded, processes at most eight commands per output cycle, keeps actions ordered, coalesces settings and output mode as last-wins values, and gives shutdown an independent signal. The named-pipe publisher retains only the latest header and shared pixel buffer, so a slow consumer cannot create a queue or force an extra full-frame clone.
-5. The Media Foundation source reads the pipe and prefers RGB32 1280×720 at 30 fps. It uses Media Foundation's ten-sample video allocator, copies through 2D buffers, and timestamps every requested sample from the current QPC-correlated Media Foundation clock. When the pipe is disconnected, invalidated, or stale, it emits the shared black off frame with the centered 256×256 StageSwap app icon. Selectable NV12 720p remains a compatibility fallback for Windows Camera and Zoom; it declares limited-range BT.601 metadata matching the CPU conversion and caches one conversion per immutable publisher sequence. 1080p is excluded without evidence.
+StageSwap is a local-only, native Windows 11 x64 application. It visually observes a selected display; it does not integrate with or control JW Library. Frames are never recorded or uploaded.
 
-The app runtime owns the platform/time boundary. `RuntimeEngine::step(now)` receives a monotonic clock and app-domain snapshots while Windows capture, publishing, and virtual-camera operations remain adapters. Production uses real monotonic time; deterministic tests use a virtual clock and scripted component ports without sleeps. Runtime snapshots retain the compatibility `DeviceState` values and add `Stopped`, `Starting`, `WaitingForFirstFrame`, `Ready`, `Stale`, `Restarting`, and `Failed` component lifecycle metadata, first-frame deadlines, categorized failures, last-success time, and retry state. Webcam readiness requires a current-generation frame that remains fresh; screen readiness requires a frame from the live capture session, even when that frame is visually unchanged for more than one second. Screen processing errors and unexpectedly terminated capture workers clear readiness. Publisher readiness requires a successful publication; virtual-camera readiness follows successful Media Foundation startup.
+The workspace keeps platform-independent policy separate from Windows adapters:
 
-The executable also embeds an `asInvoker`, Per-Monitor-V2 Windows manifest and version resource. An owner-only local control pipe lets duplicate launches show the existing dashboard and lets an approved replacement request a confirmation-free graceful shutdown. Replacement stages and verifies the candidate before closing the old app, waits ten seconds without force-termination, retains the previous executable until the new instance reports ready, and rolls back startup failures. First launch and `--startup` verify the native architecture and installed payload. Elevation is requested only when StageSwap's machine-wide payload registration needs changing. StageSwap uses its own CLSID, pipe attribute, mutex, frame and control pipes, startup value, storage, and deployment directory. It never migrates or removes Automatic Screen Camera resources, and cleanup leaves StageSwap configuration, references, and logs intact.
+| Crate | Responsibility |
+| --- | --- |
+| `stageswap-core` | Immutable frames, configuration, detection, source decisions, and transitions |
+| `stageswap` | Runtime ownership, UI, setup, settings, composition, diagnostics, and update orchestration |
+| `stageswap-windows` | Media Foundation webcam input, Windows Graphics Capture, deployment, IPC, and native helpers |
+| `stageswap-media-source` | Media Foundation virtual-camera source DLL |
+| `stageswap-i18n` | User-interface translations |
+| `xtask` | Packaging, PE validation, release checks, checksums, and publishing |
 
-The Updates settings page owns a separate bounded worker using native WinHTTP. It checks the public `NatanSlvdr/StageSwap` releases once after startup and on explicit requests, filters exact numeric tags and versioned x64 assets by the selected Stable/Beta channel, and never downloads automatically. User-approved downloads are bounded, staged under `%LocalAppData%\StageSwap\updates`, and accepted only when release metadata, filename, SHA-256 sidecar, and any supplied GitHub digest agree. The verified candidate launches with `--install-request`, so updates reuse the same graceful replacement, readiness, and rollback transaction as manually downloaded executables. Notification state is separate from schema-1 configuration and suppresses repeat toasts per channel/version.
+Direct Windows APIs, COM, and unavoidable unsafe code belong in the Windows and media-source crates. The runtime uses synchronous bounded channels and no Tokio.
 
-Settings also expose a concealed per-user admin baseline through a secondary-button double-click on the Settings logo. The independently versioned admin profile stores a validated `AppConfig`, an optional immutable reference-image snapshot, and an auto-restore policy that is deliberately outside the ordinary config schema. Saving or replacing a baseline never changes that policy. The admin window can also load the profile manually regardless of that policy, applying the restored settings and reference to the running session after the same transactional validation and replacement used at startup. When auto-restore is enabled, startup validates the complete baseline before replacing the working reference and config, rolls the reference back if config replacement fails, and otherwise lets session settings remain editable until the next launch. Invalid admin data fails open with a local warning and leaves the working configuration unchanged.
+## Video and decision flow
 
-Local JSONL diagnostics retain errors, warnings, recovery outcomes, and infrequent lifecycle states by default. Settings → Diagnostics exposes the persisted `verbose_logging` preference for troubleshooting; when enabled, recurring runtime telemetry such as publisher heartbeats, slow-command timing, and repeated screen-recovery checks is included in both the activity stream and logs. Changing the preference applies to new activity without restarting the runtime or rewriting existing log files.
+```text
+Webcam (Media Foundation) ─┐
+                           ├─ normalize to immutable BGRA 1280×720 ─┐
+Screen (Graphics Capture) ─┘                                        │
+                                                                    ├─ compose/blend ─ publish at 30 fps
+Screen thumbnail ─ compare with reference ─ debounce ─ source choice ┘
+```
 
-The webcam selection model is deliberately small. Configuration stores one Media Foundation symbolic link. The current implementation opens that exact identifier at startup and when settings change; it does not poll for webcams or replace a disconnected device. Device invalidation, generic driver failure, and stale capture retry that same saved identifier at 500 ms, 1 second, and 2 seconds. Access/privacy denial, contention, unsupported formats, incompatible type changes, and exhausted retries retain the explicit selection/restart path.
+The internal and published contract is immutable CPU BGRA at 1280×720 and 30 fps.
 
-Webcam sample requests use a bounded failure circuit breaker. Terminal source-reader errors and repeated callback/copy failures clear the frame and stop the callback loop. Recoverable failures enter the bounded same-device retry sequence and count as recovered only after a current-generation first frame arrives; terminal or exhausted failures wait for an explicit restart. Media-type-change flags trigger complete revalidation and conversion-plan updates. Diagnostics retain native/output format descriptions, HRESULT, device tag, capture generation, and recovery eligibility; privacy failures link to Windows camera privacy settings and contention guidance names common competing applications.
+1. Windows Graphics Capture copies each transient D3D texture into a staging texture and then into a CPU `Frame`.
+2. Media Foundation ranks progressive RGB32, NV12, YUY2, and MJPEG webcam modes. It prefers RGB32 1280×720 at 30 fps, honors actual row pitch, and normalizes compatible input into the fixed frame contract.
+3. Optional webcam cropping uses the native aspect ratio to create a centered 16:9 crop. Native 16:9 and unknown-aspect input stays unchanged. The crop feeds both preview and output.
+4. Detection derives a 160×90 grayscale image from the screen every 250 ms. Five matches select the webcam; three mismatches select the screen.
+5. Composition uses aspect-fit scaling, black letterboxing, configurable missing-source fallback, and a reversible 500 ms blend.
+6. A monotonic deadline pacer publishes at 30 fps without catch-up bursts or accumulated drift.
 
-Automatic detection checks the selected screen every 250 ms. Five matches select webcam; three mismatches select screen. Missing reference or invalid capture selects webcam, unavailable screen falls back to webcam, and unavailable webcam produces the placeholder.
+## Runtime ownership and backpressure
 
-Monitor descriptors contain a GDI display name, friendly label, geometry, and runtime-only `HMONITOR`. Configuration remembers the friendly label of every accepted manual, fallback, or reference-driven selection. Startup restores the first exact label match, otherwise selects the first non-primary display, or the sole primary display when no secondary exists. Bounded, coalescing workers find the display containing the saved visual reference and enumerate physical video devices without blocking the 30 fps owner loop. Automatic rescans are enabled by default and run at startup, when Settings opens, after reference changes, and every 30 seconds; disabling them invalidates unfinished automatic results. Explicit Rescan remains available and includes the confirmation pass even while automatic rescans are disabled. Manual video-device refreshes replace a pending request instead of queueing work. The outer runtime records user commands once; worker results forward only discovery outcomes and failures. The highest score above the threshold must win twice.
+`RuntimeEngine::step(now)` owns timing and state transitions. Production supplies a monotonic clock and Windows adapters; deterministic tests use a virtual clock and scripted component ports.
 
-Black-or-unavailable recovery is scheduled independently of reference discovery and never starts the all-display scan worker. When enabled, it samples only the selected-screen capture every 30 seconds. A 160×90 thumbnail is near-black when at least 99% of its pixels have luma at or below 16; a missing frame means that the selected capture has no session-valid frame. The age of an unchanged but visible frame does not make it missing. Two consecutive failed checks in any combination restart screen capture. A valid non-black check clears the confirmation. Monitor changes, setting changes, and restarts clear the confirmation and start a fresh interval. If restart fails because the selected monitor is still absent, the failure is logged and scheduled checks continue retrying the stored selection; capture resumes when that same display identity becomes available. Explicit Rescan only performs reference discovery. Recovery does not enumerate or reselect monitors, and no EDID, history, score margin, ambiguity logic, or physical-monitor identity exists.
+The runtime mailbox is bounded. It processes at most eight ordered commands per output cycle, coalesces settings and output-mode changes as last-wins values, and gives shutdown an independent signal. The named-pipe publisher retains only the newest header and shared pixel buffer, so a slow consumer cannot build a queue or force another full-frame clone.
 
-Windows Graphics Capture support is checked before capture starts. Every screen start/stop has a generation; callbacks from earlier generations cannot publish or clear replacement state, while current-generation closure, frame-processing errors, and an unexpectedly finished capture worker immediately clear the frame and report failure. The selected active display's advanced-color state is inspected before capture. HDR or greater-than-8-bit displays are detect-and-warn only: StageSwap does not tone-map them, and automatic matching/reference capture remain unavailable until HDR is disabled. Screen automatic restart uses bounded backoff and only retries the stored selected display.
+Lifecycle snapshots distinguish stopped, starting, waiting for first frame, ready, stale, restarting, and failed states. Webcam readiness requires a fresh frame from the current generation. Screen readiness requires a session-valid frame from the live capture, even if its pixels have not changed. Capture errors, closure, and replacement invalidate the relevant generation.
 
-The dashboard is not part of the output clock. Each visible preview has a dedicated latest-only conversion worker: pending frames are replaced rather than queued, bounded 480×270 textures are prepared off the egui thread, and the visible egui window repaints at a fixed 30 fps cadence to upload completed images. Webcam, screen, and output FPS are measured by the always-running runtime pipelines rather than preview presentation, so their dashboard counters remain meaningful after tray-hidden operation. Background UI logic remains throttled to 250 ms while hidden in the tray. While automation is stopped, the runtime keeps publishing the same shared off frame used by the Media Foundation source at 30 fps. The executable, window, and tray reuse one embedded icon. The tray Recovery submenu exposes display rescan, screen restart, virtual-camera restart, restart all, and the existing confirmation-gated reference-capture flow; enabled states mirror the runtime snapshot.
+Dashboard rendering does not own the output clock. Visible previews use dedicated latest-only conversion workers and bounded display-sized textures. Runtime-owned FPS measurements remain meaningful while the dashboard is hidden; hidden UI work is throttled to 250 ms.
 
-The managed Start-with-Windows toggle updates only StageSwap's HKCU Run value before persisting the preference and reverts the UI on registry failure. Managed startup reconciles saved intent with the actual value. Run-once mode disables the control, never deletes an installed startup value, and never rewrites the saved preference. A read-only registration-status helper supports tests and diagnostics.
+## Capture, discovery, and recovery
 
-A session-only disco easter egg is toggled by five primary clicks within 3 seconds on the Diagnostics tab in Settings; the secondary-button double-click on the Settings logo remains independently reserved for the admin profile. Disco state is runtime-only and never enters the user or admin configuration. When enabled, a lazily allocated CPU effect decorates only the final composed frame, after detection and source selection, while the stopped off frame remains canonical. The disabled path keeps the compositor's original immutable pixel storage without an extra frame copy. The visible egui overlay lowers a procedurally lit mirrored disco ball, then derives rotating rays, colored beams, projected reflection spots, subtle double-hit light pulses, confetti, sparkles, ambient halos, and a dance floor from its motion without owning input; matching bounded brightness lifts are applied only to active disco video frames. UI decoration is omitted from tray-hidden logic and does not increase that cadence.
+### Webcam
 
-There is no general hot-plug recovery or device-reselection worker. The runtime loop provides bounded same-identity webcam recovery and the selected-screen black-or-unavailable check described above, and users can manually restart each retained component or all components. Device-change and DPI messages do not directly trigger video recovery; D3D device removal requires application relaunch.
+Configuration stores one Media Foundation symbolic link. Startup and settings changes open that exact device; StageSwap does not continuously enumerate webcams or silently choose a replacement.
 
-The deliberately excluded behavior is: continuous webcam enumeration or replacement-device selection, general display hot-plug discovery or reselection, sleep/resume recovery, GPU-device recreation, automatic camera-contention resolution, HDR tone mapping, persisted physical monitor identity, and dynamic output-format changes. Webcam and screen recovery retry only their stored identities.
+Device invalidation, driver failure, and stale capture retry the saved webcam after 500 ms, 1 second, and 2 seconds. Recovery succeeds only after a fresh frame arrives. Privacy denial, contention, unsupported formats, incompatible media-type changes, and exhausted retries wait for explicit user action. Compatible media-type changes are fully revalidated.
+
+### Screen
+
+Monitor descriptors include the GDI display name, friendly label, geometry, and runtime-only monitor handle. Startup restores the first exact friendly-label match, otherwise the first non-primary display, or the sole primary display when no secondary exists.
+
+Reference discovery scans without pausing output. It runs at startup, when Settings opens, after reference changes, every 30 seconds by default, and on explicit rescan. The same highest-scoring display above the threshold must win twice. Disabling automatic scans cancels unfinished automatic results but leaves explicit rescans available.
+
+Selected-screen recovery is independent of discovery. Every 30 seconds it checks only the selected capture. Two consecutive missing or near-black checks restart that capture; any valid non-black check clears the confirmation. Recovery retains the stored display identity and never enumerates or selects a replacement monitor.
+
+Capture sessions are generation-tagged so callbacks from an old session cannot publish or clear replacement state. Windows Graphics Capture capability and the selected display’s advanced-color state are checked before capture. HDR and greater-than-8-bit displays are warn-only: there is no tone mapping, and reference capture and automatic matching remain unavailable until the display is SDR.
+
+## Virtual camera and stopped state
+
+The app publishes frames through a strict bounded local named-pipe protocol. The Media Foundation source prefers RGB32 1280×720 at 30 fps and exposes NV12 720p for Windows Camera and Zoom compatibility. NV12 uses limited-range BT.601 metadata and caches one conversion per immutable publisher sequence. 1080p is intentionally excluded.
+
+Requested samples are timestamped from the current QPC-correlated Media Foundation clock. When the publisher is disconnected, invalid, or stale, the source generates the canonical black off frame with the centered StageSwap icon. The running app publishes that same frame at 30 fps while automatic switching is stopped.
+
+## Deployment and updates
+
+`StageSwap_win64_vX.Y.Z.exe` can run once or install itself per user at `%LocalAppData%\Programs\StageSwap\StageSwap.exe`. The managed copy owns the Start Menu and Desktop shortcuts and is the only executable eligible for Windows startup.
+
+The executable embeds the x64 Media Foundation source DLL. First managed or run-once launch validates native architecture and elevates only when machine-wide camera registration must change; the tray application then runs unelevated. Payloads use content-versioned DLL filenames so a locked older DLL cannot block an update. Unlocked stale copies are removed immediately; locked copies are scheduled for deletion at reboot.
+
+A local owner-only control pipe lets duplicate launches show the existing dashboard and lets an approved replacement request graceful shutdown. Replacement stages and verifies the candidate, waits up to ten seconds without force-termination, retains the previous executable until the new instance reports ready, and rolls back startup failure.
+
+The Updates page checks the public GitHub Releases API once at startup and on demand. Stable ignores prereleases; Beta accepts both tracks. Downloads never start automatically. User-approved candidates are bounded, staged locally, and accepted only when release metadata, the versioned filename, the SHA-256 sidecar, and any GitHub digest agree. Installation reuses the replacement and rollback transaction.
+
+`--cleanup` removes StageSwap-owned startup and virtual-camera deployment resources. `--uninstall` also removes the managed executable and shortcuts. Both preserve user data and never modify Automatic Screen Camera resources.
+
+## Persistence, diagnostics, and administration
+
+Configuration schema 1, `reference.png`, update-notification state, and JSONL logs live below `%LocalAppData%\StageSwap`. Configuration and reference replacement use validation, backup, writable flushes, and atomic replacement. Logs retain errors, warnings, recovery outcomes, and infrequent lifecycle states for 14 days by default. Verbose logging adds recurring telemetry only for new activity.
+
+A concealed per-user admin profile can store a validated configuration, optional immutable reference snapshot, and an independently controlled auto-restore policy. Startup validates the complete baseline before replacement and rolls back the reference if configuration replacement fails. Invalid admin data fails open with a warning and leaves the working configuration unchanged.
+
+## Deliberate exclusions
+
+StageSwap does not implement:
+
+- continuous webcam discovery or replacement-device selection;
+- general display hot-plug discovery or automatic monitor reselection;
+- sleep/resume or docking recovery;
+- D3D device recreation;
+- HDR tone mapping;
+- automatic camera-contention resolution;
+- persisted physical-monitor identity;
+- dynamic output formats, 1080p, audio, OBS integration, or a kernel driver.
+
+These exclusions are product boundaries, not undocumented fallback behavior. Webcam and screen recovery retry only their stored identities.

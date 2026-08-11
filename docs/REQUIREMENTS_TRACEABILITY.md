@@ -1,20 +1,56 @@
 # Requirements traceability
 
-| Contract | Rust implementation | Verification |
-|---|---|---|
-| Immutable BGRA frame, fixed 720p30 | `stageswap-core::Frame`, app compositor | invalid-frame, fit, blend tests |
-| Saved-then-unique webcam, tiered progressive input negotiation, bounded same-device recovery without rediscovery | `MediaFoundationVideoInput`, `WebcamRecovery`, `choose_video_device` | ranking/optional-metadata/stride/recovery-state tests, x64 build, native RGB32/MJPEG/YUY2/NV12 checks |
-| Windows Graphics Capture, cursor option, capability/HDR preflight, session-valid screen health, generation-safe failure handling | `WindowsGraphicsScreenInput`, `DevicePlatform` | lifecycle/error/old-frame tests, x64 build, native SDR/HDR/restart-race checks |
-| Reference detection 250 ms, 5/3 debounce | runtime detector, `DebouncedDetector` | debounce test and switching checks |
-| Two-scan monitor selection and nonblocking discovery | `MonitorTracker`, bounded monitor/video-device workers | coalescing/shutdown/nonblocking tests, monitor test, and multi-monitor checks |
-| Fallbacks and reversible fade | `decide`, `TransitionController`, `Frame::blend` | decision and reversal tests |
-| Isolated schema 1, writable-flushed candidate, backup, atomic Windows save | `ConfigStore`, `persist_rgba_atomic`, `save_config_atomic` | round-trip/corruption/rollback tests and native writable-flush check |
-| Hidden admin baseline and optional launch restore | `AdminProfileStore`, Settings admin window | profile, rollback, startup, toggle, and gesture tests |
-| Strict 40-byte bounded IPC and two-second expiry | `FrameHeader`, `SharedFrameCache`, `FramePublisher` | IPC tests |
-| Rust COM source and required interfaces | `stageswap-media-source::com_server` | Windows COM/source-state tests |
-| RGB32/NV12 1280×720@30 output with limited BT.601 metadata and sequence cache | `MediaStream` media types and NV12 cache | color/grayscale metadata tests, MF probe, Windows Camera, Zoom |
-| Native self-deploying x64 | deployment module, embedded manifest/version, and `xtask publish-release` | PE/payload validation, first-run and cleanup |
-| Manual Stable/Beta GitHub updates | update worker, WinHTTP adapter, checksum verification, replacement bootstrap | release-selection/config/checksum tests and native update/rollback checks |
-| Deterministic lifecycle, deadlines, bounded mailbox, and constant-time pacing | `RuntimeEngine`, runtime clock, component status, runtime mailbox, `FramePacer` | virtual-clock lifecycle tests, command flood/coalescing/shutdown tests, long-gap pacer tests |
-| UI, tray, previews, notifications, logs, recovery submenu, four restarts | `stageswap` | reduced `smoke_` UI coverage, consolidated `contract_`/`flow_` interaction and state tests, tray mapping tests, native ignored tests, and UI-preview/manual screenshot evidence |
-| Transactional managed startup and run-once preservation | deployment startup helpers and General Settings | registry status/transition tests and native Windows checks |
+This index connects product contracts to their primary implementation areas and verification evidence. It complements the narrative [architecture](ARCHITECTURE.md); it is not a substitute for native Windows release validation.
+
+## Video contract and source selection
+
+| Contract | Primary implementation | Verification evidence |
+| --- | --- | --- |
+| Immutable CPU BGRA frames at 1280×720 and 30 fps | `stageswap-core::Frame`; app compositor and pacer | Invalid-frame, aspect-fit, blend, immutable-storage, and pacing tests |
+| Visual comparison every 250 ms with five-match/three-mismatch debounce | Runtime detector; `DebouncedDetector` | Detector threshold/debounce tests and runtime switching flows |
+| Missing reference or screen falls back to webcam; missing webcam uses the configured placeholder | `decide`; compositor fallback policy | Decision-table and composition contract tests |
+| Reversible 500 ms source transition with black letterboxing | `TransitionController`; `Frame::blend`; aspect-fit cache | Transition reversal, blend boundary, and fit tests |
+| Stopped automation publishes the canonical StageSwap off frame at 30 fps | Runtime stopped state; shared off-frame generator | Stopped-output and publisher fallback tests |
+
+## Capture and recovery
+
+| Contract | Primary implementation | Verification evidence |
+| --- | --- | --- |
+| Saved webcam identity, tiered RGB32/NV12/YUY2/MJPEG negotiation, row-aware normalization | `MediaFoundationVideoInput`; video format ranking and copy plan | Ranking, optional-metadata, stride, conversion, x64-build, and native format checks |
+| Compatible media-type changes are revalidated; eligible failure retries the same webcam three times | Capture callback; `WebcamRecovery` | Media-type-change, circuit-breaker, generation, and recovery-state tests |
+| Windows Graphics Capture with cursor option, capability/HDR preflight, and session-valid readiness | `WindowsGraphicsScreenInput`; `DevicePlatform` | Lifecycle, closure, processing-error, old-generation, SDR/HDR, and native capture checks |
+| Reference discovery is bounded, nonblocking, and requires the same winning display twice | `MonitorTracker`; monitor-scan worker | Ranking, confirmation, coalescing, shutdown, and multi-monitor tests |
+| Selected-screen recovery checks only the stored display and restarts after two black/missing samples | Runtime recovery scheduler; screen lifecycle | Interval, threshold, confirmation-reset, retry, and stored-identity tests |
+
+## Runtime, IPC, and virtual camera
+
+| Contract | Primary implementation | Verification evidence |
+| --- | --- | --- |
+| Deterministic lifecycle, bounded mailbox, ordered actions, coalesced settings, independent shutdown | `RuntimeEngine`; runtime mailbox | Virtual-clock lifecycle, command-flood, ordering, coalescing, and shutdown tests |
+| Deadline-based output pacing without drift or catch-up bursts | `FramePacer` | Long-gap and missed-deadline tests |
+| Strict 40-byte bounded frame IPC with two-second expiry and latest-frame retention | `FrameHeader`; `SharedFrameCache`; `FramePublisher` | Header, validation, expiry, and slow-consumer IPC tests |
+| Rust Media Foundation COM source implements the required source and stream interfaces | `stageswap-media-source::com_server` | Windows COM/source-state tests and PE validation |
+| RGB32 and NV12 1280×720 at 30 fps; limited-range BT.601 NV12 metadata; no 1080p | `MediaStream` media types and NV12 sequence cache | Color/grayscale conversion and metadata tests; Media Foundation probe; Windows Camera and Zoom checks |
+
+## Configuration, UI, and diagnostics
+
+| Contract | Primary implementation | Verification evidence |
+| --- | --- | --- |
+| Schema 1 configuration and atomic, rollback-safe configuration/reference persistence | `ConfigStore`; `persist_rgba_atomic`; `save_config_atomic` | Round-trip, migration, corruption, writable-flush, and rollback tests |
+| Hidden admin baseline supports validated manual or startup restore | `AdminProfileStore`; Settings admin window | Profile, gesture, policy, transactional restore, rollback, and invalid-data tests |
+| Dashboard, six settings categories, setup, tray controls, notifications, previews, three focused restarts, and restart-all | `stageswap` application and tray modules | Focused `smoke_`, `contract_`, and `flow_` tests; deterministic previews; native review |
+| Runtime-owned FPS and latest-only preview conversion remain valid while hidden | Runtime metrics; preview workers | Mailbox, conversion, hidden-state, and UI flow tests |
+| Fourteen-day JSONL logs and runtime-applied verbose logging | Diagnostics/logging modules | Retention, serialization, malformed-entry, preference, and activity-stream tests |
+
+## Deployment and updates
+
+| Contract | Primary implementation | Verification evidence |
+| --- | --- | --- |
+| Native self-deploying Windows x64 executable with content-versioned source DLL | Deployment module; embedded resources; `xtask` | PE/payload validation, architecture checks, first-run, registration, and native installation evidence |
+| Managed startup is transactional; run-once mode preserves installed startup state | Deployment startup helpers; General Settings | Registry status, transition, rollback, reconciliation, and native Windows checks |
+| Cleanup removes deployment resources; uninstall also removes managed app/shortcuts while preserving user data | Deployment cleanup/uninstall paths | Ownership-boundary, argument, filesystem, registry, and native removal checks |
+| Stable/Beta GitHub updates are manual, verified, replaceable, and rollback-safe | Update worker; WinHTTP adapter; replacement bootstrap | Release selection, configuration, checksum/digest, staged replacement, readiness, and rollback tests |
+
+## Release evidence boundaries
+
+Host tests and cross-target linting cannot prove physical capture, native UI, COM registration, virtual-camera enumeration, or Zoom compatibility. Those contracts require the native Windows evidence described in [Development](DEVELOPMENT.md) and the repository release process.

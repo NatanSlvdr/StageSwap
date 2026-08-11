@@ -1,0 +1,93 @@
+# Development
+
+This guide covers local engineering, deterministic UI review, Windows validation, packaging, and releases. Product usage belongs in the [StageSwap wiki](https://github.com/NatanSlvdr/StageSwap/wiki); agent-specific operating guidance remains in [`AGENTS.md`](../AGENTS.md).
+
+## Prerequisites and workspace
+
+StageSwap uses Rust edition 2024 and is pinned to Rust 1.97.1 in `rust-toolchain.toml`. The toolchain includes `rustfmt`, Clippy, and the `x86_64-pc-windows-msvc` target.
+
+| Path | Purpose |
+| --- | --- |
+| `crates/core` | Platform-independent frames, configuration, detection, and transitions |
+| `crates/app` | Application runtime, UI, orchestration, composition, and updates |
+| `crates/i18n` | English, French, and Spanish UI strings |
+| `crates/windows` | Windows capture, deployment, IPC, and native adapters |
+| `crates/media-source` | Media Foundation virtual-camera source DLL |
+| `xtask` | Packaging, PE validation, checksums, and release publishing |
+| `scripts` | Local packaging and release-evidence helpers |
+
+The default workspace members are `stageswap-core` and `xtask`, allowing useful host development on non-Windows systems.
+
+## Local checks
+
+Before pushing to `main`, run:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+```
+
+Cross-target linting catches Windows-only compilation issues available to the host toolchain:
+
+```bash
+cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+```
+
+Tests use the prefixes `contract_`, `flow_`, `smoke_`, and `native_`. Add coverage for stable contracts, cross-component transitions, deterministic boundaries, migrations, malformed input, and costly failure paths. Prefer extending a focused existing test over adding near-duplicate coverage.
+
+Keep environment-dependent Windows, COM, camera, display, tray, and virtual-camera checks separate from the host-visible suite. UI tests should protect meaningful state, containment, accessibility-relevant behavior, and representative interactions—not exact pixels or exhaustive layout variants.
+
+## Deterministic UI previews
+
+Launch the real Settings UI with mock devices, displays, imagery, and healthy runtime state:
+
+```bash
+cargo run -p stageswap --bin StageSwap -- --ui-preview
+```
+
+Open a specific page with `general`, `webcam`, `screen`, `matching`, `updates`, or `diagnostics`:
+
+```bash
+cargo run -p stageswap --bin StageSwap -- --ui-preview matching
+```
+
+Setup previews are `setup-1` through `setup-5`. The reference step accepts `captured`, `empty`, `review`, or `missing-screen`:
+
+```bash
+cargo run -p stageswap --bin StageSwap -- --ui-preview setup-4 --ui-setup-reference-state review
+```
+
+Dialog previews are `dialog-exit`, `dialog-clear-logs`, `dialog-admin`, `dialog-replace-baseline`, `dialog-load-admin-config`, and `dialog-remove-baseline`. Add `--ui-language en-US`, `--ui-language fr-FR`, or `--ui-language es` to inspect a supported locale.
+
+Preview mode uses temporary configuration and never writes the normal `reference.png`. The setup reference controls modify only in-memory mock frames.
+
+## Platform validation
+
+macOS supports host checks, deterministic UI previews, and cross-compilation. It cannot validate:
+
+- an interactive Windows desktop or exact Windows font rendering;
+- physical webcam or Windows Graphics Capture behavior;
+- HDR detection and hardware-specific media-type negotiation;
+- virtual-camera enumeration in Windows Camera and Zoom;
+- native dialogs, tray behavior, registry startup, elevation, replacement, cleanup, or uninstall.
+
+Use a native Windows 11 x64 machine for those checks. Release evidence should identify which results are host, cross-target, deterministic-preview, or native.
+
+## Packaging and releases
+
+The supported interactive release entry point is:
+
+```bash
+./scripts/publish-release.sh
+```
+
+The wrapper supplies the pinned macOS cross-compilation environment and invokes `cargo run --quiet --release -p xtask -- publish-release`. It checks the repository, builds Windows x64 artifacts, validates PE files and embedded payloads, commits and pushes the selected version, and publishes the executable with its SHA-256 sidecar.
+
+The publisher defaults to the Development/Beta track. Stable releases require explicit confirmation and must come from `main`; development releases may come from another synchronized branch. The branch must be clean and match its pushed upstream. Every `vX.Y.Z` must be newer than all existing StageSwap releases.
+
+Never use the publisher merely to test a documentation or packaging change: it commits, pushes, and creates a GitHub release.
+
+## Contribution and reporting policy
+
+Pull requests are not currently accepted. Report reproducible problems through [GitHub issues](https://github.com/NatanSlvdr/StageSwap/issues) with the StageSwap and Windows versions, selected device types, reproduction steps, expected and actual behavior, and reviewed diagnostic logs when relevant. Do not attach camera or display frames without checking them for private content.
