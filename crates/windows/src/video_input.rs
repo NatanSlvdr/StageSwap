@@ -1197,6 +1197,7 @@ mod tests {
         assert!(is_managed_virtual_camera("Automatic Screen Camera"));
         assert!(is_managed_virtual_camera("stageswap"));
         assert!(is_managed_virtual_camera("StageSwap Virtual Camera"));
+        assert!(is_managed_virtual_camera("Stageswap Camera"));
         assert!(!is_managed_virtual_camera("USB Webcam"));
     }
 }

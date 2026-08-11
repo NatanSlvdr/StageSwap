@@ -58,7 +58,7 @@ StageSwap requires a 64-bit Windows 11 computer, a webcam, a secondary screen co
 
 <p align="center"><em>Reference image settings capture or import the saved image and adjust required similarity.</em></p>
 
-7. Select **StageSwap** as the camera in Zoom.
+7. Select **Stageswap Camera** as the camera in Zoom.
 8. Select **Start automatic switching**.
 
 > [!NOTE]

@@ -2953,7 +2953,7 @@ impl SwitcherApp {
             ui,
             width,
             "IMPORTANT",
-            "In Zoom, select StageSwap (the virtual camera) as your camera before the meeting.",
+            "In Zoom, select Stageswap Camera as your camera before the meeting.",
         );
         if !(webcam_ready && screen_ready && reference_ready) {
             ui.add_space(18.0);
@@ -7339,7 +7339,7 @@ const fn component_health_guidance(
         virtual_camera,
         DeviceState::Failed | DeviceState::Unavailable
     ) {
-        "The virtual camera needs attention. Restart it here, then reselect StageSwap in Zoom if necessary."
+        "The virtual camera needs attention. Restart it here, then reselect Stageswap Camera in Zoom if necessary."
     } else if matches!(webcam, DeviceState::Initializing)
         || matches!(screen, DeviceState::Initializing)
         || matches!(virtual_camera, DeviceState::Initializing)

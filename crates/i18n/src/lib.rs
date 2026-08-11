@@ -282,7 +282,7 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Clear…" => ("Effacer…", "Borrar…"),
         "The webcam needs attention. Choose or refresh the camera in Webcam, then restart it here if needed." => ("La webcam nécessite votre attention. Choisissez ou actualisez la caméra dans Webcam, puis redémarrez-la ici si nécessaire.", "La cámara web requiere atención. Elige o actualiza la cámara en Cámara web y reiníciala aquí si es necesario."),
         "Screen capture needs attention. Choose a display in Screen, then restart capture here if needed." => ("La capture d’écran nécessite votre attention. Choisissez un écran dans Écran, puis redémarrez la capture ici si nécessaire.", "La captura de pantalla requiere atención. Elige una pantalla en Pantalla y reinicia la captura aquí si es necesario."),
-        "The virtual camera needs attention. Restart it here, then reselect StageSwap in Zoom if necessary." => ("La caméra virtuelle nécessite votre attention. Redémarrez-la ici, puis sélectionnez de nouveau StageSwap dans Zoom si nécessaire.", "La cámara virtual requiere atención. Reiníciala aquí y vuelve a seleccionar StageSwap en Zoom si es necesario."),
+        "The virtual camera needs attention. Restart it here, then reselect Stageswap Camera in Zoom if necessary." => ("La caméra virtuelle nécessite votre attention. Redémarrez-la ici, puis sélectionnez de nouveau Stageswap Camera dans Zoom si nécessaire.", "La cámara virtual requiere atención. Reiníciala aquí y vuelve a seleccionar Stageswap Camera en Zoom si es necesario."),
         "One or more components are still starting. Wait briefly before using a tool." => ("Un ou plusieurs composants sont encore en cours de démarrage. Patientez un instant avant d’utiliser un outil.", "Uno o varios componentes todavía se están iniciando. Espera un momento antes de usar una herramienta."),
         "The video components are ready, but Auto mode needs a captured or imported reference image." => ("Les composants vidéo sont prêts, mais le mode Auto nécessite une image de référence capturée ou importée.", "Los componentes de video están listos, pero el modo Auto necesita una imagen de referencia capturada o importada."),
         "The components are ready; StageSwap is checking the reference image." => ("Les composants sont prêts ; StageSwap vérifie l’image de référence.", "Los componentes están listos; StageSwap está comprobando la imagen de referencia."),
@@ -376,7 +376,7 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Reference image ready" => ("Image de référence prête", "Imagen de referencia lista"),
         "Reference image not captured" => ("Image de référence non capturée", "Imagen de referencia no capturada"),
         "IMPORTANT" => ("ATTENTION", "IMPORTANTE"),
-        "In Zoom, select StageSwap (the virtual camera) as your camera before the meeting." => ("Dans Zoom, sélectionnez StageSwap (la caméra virtuelle) comme caméra avant la réunion.", "En Zoom, selecciona StageSwap (la cámara virtual) como cámara antes de la reunión."),
+        "In Zoom, select Stageswap Camera as your camera before the meeting." => ("Dans Zoom, sélectionnez Stageswap Camera comme caméra avant la réunion.", "En Zoom, selecciona Stageswap Camera como cámara antes de la reunión."),
         "Some setup is missing. StageSwap will start, but Auto mode may not work as expected. You can finish the guided setup later in Settings." => ("Certains éléments ne sont pas configurés. StageSwap va démarrer, mais le mode Auto risque de ne pas fonctionner comme prévu. Vous pourrez terminer la configuration guidée plus tard dans Paramètres.", "Faltan algunos elementos de la configuración. StageSwap se iniciará, pero es posible que el modo Auto no funcione como esperas. Puedes terminar la configuración guiada más tarde en Ajustes."),
         "Guided setup" => ("Configuration guidée", "Configuración guiada"),
         "Choose the webcam and secondary screen, then capture the screen JW Library shows when no media is playing." => ("Choisissez la webcam et l’écran secondaire, puis capturez l’écran affiché par JW Library lorsqu’aucun média n’est en cours de lecture.", "Elige la cámara web y la pantalla secundaria y captura la pantalla que muestra JW Library cuando no se reproduce contenido multimedia."),
@@ -641,7 +641,7 @@ mod tests {
             "Reference image ready",
             "Reference image not captured",
             "IMPORTANT",
-            "In Zoom, select StageSwap (the virtual camera) as your camera before the meeting.",
+            "In Zoom, select Stageswap Camera as your camera before the meeting.",
             "Choose the webcam and secondary screen, then capture the screen JW Library shows when no media is playing.",
             "Live secondary screen",
             "No secondary screen image — choose a screen or use Tools in Diagnostics.",
@@ -661,7 +661,7 @@ mod tests {
             "Include detailed runtime activity and periodic health checks in local logs. Enable this only while troubleshooting.",
             "StageSwap is an independent, unofficial project and is not affiliated with or endorsed by the publisher of JW Library. The name JW Library is used only to describe compatibility.",
             "Screen only",
-            "The virtual camera needs attention. Restart it here, then reselect StageSwap in Zoom if necessary.",
+            "The virtual camera needs attention. Restart it here, then reselect Stageswap Camera in Zoom if necessary.",
         ];
 
         for source in strings {

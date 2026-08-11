@@ -73,7 +73,10 @@ impl MediaSource {
                 &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
                 &KSCATEGORY_VIDEO_CAMERA,
             )?;
-            attributes.SetString(&MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, w!("StageSwap"))?;
+            attributes.SetString(
+                &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+                w!("Stageswap Camera"),
+            )?;
         }
         let pipe_name = match read_string_attribute(activation, &PIPE_ATTRIBUTE) {
             Ok(pipe_name) if !pipe_name.is_empty() => pipe_name,

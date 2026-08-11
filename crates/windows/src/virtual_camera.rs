@@ -18,6 +18,7 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_core::{Error, GUID, HRESULT, Interface, PCSTR, PCWSTR, PWSTR, Ref, implement};
 
 const SOURCE_ID: &str = "{4ABA794D-7B23-449C-8467-CE74A41C2820}";
+const VIRTUAL_CAMERA_NAME: &str = "Stageswap Camera";
 const PIPE_ATTRIBUTE: GUID = GUID::from_u128(0x75c753a0_587b_4064_bb77_f0171fcd4ad7);
 const PIPE_NAME_PREFIX: &str = r"\\.\pipe\StageSwap.FinalFrame.";
 
@@ -220,7 +221,7 @@ impl VirtualCameraController {
     }
 
     fn open(&mut self) -> Result<(), String> {
-        let friendly = wide("StageSwap");
+        let friendly = wide(VIRTUAL_CAMERA_NAME);
         let source = wide(SOURCE_ID);
         let camera = create_virtual_camera(PCWSTR(friendly.as_ptr()), PCWSTR(source.as_ptr()))?;
         let pipe = wide(&self.pipe_name);
@@ -296,7 +297,7 @@ fn remove_virtual_camera_for_source(source_id: &str) -> Result<(), String> {
         return Err(format!("could not initialize Media Foundation: {error}"));
     }
     let result = (|| {
-        let friendly = wide("StageSwap");
+        let friendly = wide(VIRTUAL_CAMERA_NAME);
         let source = wide(source_id);
         let camera = create_virtual_camera(PCWSTR(friendly.as_ptr()), PCWSTR(source.as_ptr()))
             .map_err(|error| format!("could not open virtual camera registration: {error}"))?;
