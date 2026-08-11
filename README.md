@@ -102,7 +102,7 @@ Anything visible on the selected secondary screen can appear in Zoom while Auto 
 
 ## Updates and removal
 
-To update, open a newer downloaded build and confirm the replacement. The installed copy is updated and the existing settings and reference are retained.
+StageSwap checks GitHub once when it starts. Open **Settings → Updates** to choose the recommended **Stable releases** channel or opt into **Beta**, check manually, and install an available update. Downloads are never started or installed automatically. StageSwap verifies the versioned SHA-256 sidecar before using the existing rollback-safe replacement flow; settings and the reference image are retained.
 
 To remove StageSwap, exit it from the system tray, open PowerShell in the folder containing the downloaded executable, and run:
 

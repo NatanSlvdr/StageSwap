@@ -1,8 +1,10 @@
 use anyhow::{Context, Result, bail};
+#[cfg(test)]
 use std::cmp::max;
 use std::env;
 use std::fmt;
 use std::fs;
+use std::io::{self, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -13,6 +15,7 @@ const MEDIA_SOURCE_PACKAGE: &str = "stageswap-media-source";
 const APP_EXECUTABLE: &str = "StageSwap.exe";
 const MEDIA_SOURCE_DLL: &str = "stageswap_media_source.dll";
 const RELEASE_PREFIX: &str = "StageSwap_win64_v";
+#[cfg(test)]
 const RELEASE_SUFFIX: &str = ".exe.sha256";
 
 fn main() -> Result<()> {
@@ -22,85 +25,41 @@ fn main() -> Result<()> {
             arguments.next().context("missing PE path")?,
             arguments.next().context("missing architecture")?,
         ),
-        Some("package") => package(
-            arguments.next().context("missing architecture")?,
-            arguments.next().map(PathBuf::from),
-        ),
+        Some("publish-release") => {
+            if arguments.next().is_some() {
+                bail!("publish-release does not accept positional arguments");
+            }
+            publish_release_cli()
+        }
         Some(command) => bail!("unknown xtask command: {command}"),
-        None => bail!("usage: cargo xtask <validate-pe PATH x64 | package x64 [OUTPUT_DIR]>"),
+        None => bail!("usage: cargo xtask <validate-pe PATH x64 | publish-release>"),
     }
 }
 
-fn package(architecture: String, output: Option<PathBuf>) -> Result<()> {
+fn build_package(release_version: ReleaseVersion, output: &Path) -> Result<PathBuf> {
     let workspace = workspace_root();
     let windows_sdk = selected_windows_sdk()?;
-    let target = match architecture.as_str() {
-        "x64" => "x86_64-pc-windows-msvc",
-        _ => bail!("architecture must be x64"),
-    };
-    let output = output.unwrap_or_else(|| PathBuf::from("dist"));
-    let history = env::var_os("STAGESWAP_RELEASE_HISTORY")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| output.clone());
+    let architecture = "x64";
+    let target = "x86_64-pc-windows-msvc";
     let manifest = workspace.join("Cargo.toml");
-    let lockfile = workspace.join("Cargo.lock");
     let application_version = read_workspace_version(&manifest)?;
-    let mut version_transaction = None;
-
-    let outcome = (|| -> Result<PathBuf> {
-        let (_, mut executable) = build_release_pair(&workspace, target, &architecture)?;
-        let candidate_digest = sha256(&fs::read(&executable)?);
-        let latest = latest_release(&history)?;
-        let release_version =
-            select_release_version(application_version, latest.as_ref(), &candidate_digest)?;
-
-        if release_version != application_version {
-            version_transaction = Some(VersionTransaction::begin(
-                &manifest,
-                &lockfile,
-                release_version,
-            )?);
-            run(&mut cargo_metadata(&workspace))?;
-            (_, executable) = build_release_pair(&workspace, target, &architecture)?;
-        }
-
-        let persisted_version = read_workspace_version(&manifest)?;
-        if persisted_version != release_version {
-            bail!(
-                "workspace version {persisted_version} does not match release version {release_version}"
-            );
-        }
-        let executable_bytes = fs::read(&executable)
-            .with_context(|| format!("could not read {}", executable.display()))?;
-        let digest = sha256(&executable_bytes);
-        let artifact = format!("{RELEASE_PREFIX}{release_version}.exe");
-        let revision = env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".into());
-        let checksum = format!(
-            "# applicationVersion={release_version}\n# releaseVersion={release_version}\n# sourceRevision={revision}\n# architecture={architecture}\n# configuration=Release\n# windowsSdk={windows_sdk}\n{} *{artifact}\n",
-            hex(&digest)
+    if application_version != release_version {
+        bail!(
+            "workspace version {application_version} does not match release version {release_version}"
         );
-        publish_release(&output, &artifact, &executable_bytes, checksum.as_bytes())
-    })();
-
-    match outcome {
-        Ok(destination) => {
-            if let Some(transaction) = version_transaction.as_mut() {
-                transaction.commit();
-            }
-            println!("packaged {}", destination.display());
-            Ok(())
-        }
-        Err(error) => {
-            if let Some(transaction) = version_transaction.as_mut()
-                && let Err(rollback_error) = transaction.rollback()
-            {
-                return Err(error.context(format!(
-                    "packaging also failed to restore the workspace version: {rollback_error:#}"
-                )));
-            }
-            Err(error)
-        }
     }
+    let (_, executable) = build_release_pair(&workspace, target, architecture)?;
+    let executable_bytes = fs::read(&executable)
+        .with_context(|| format!("could not read {}", executable.display()))?;
+    let digest = sha256(&executable_bytes);
+    let artifact = format!("{RELEASE_PREFIX}{release_version}.exe");
+    let revision = capture(git(&workspace, &["rev-parse", "HEAD"]))?;
+    let checksum = format!(
+        "# applicationVersion={release_version}\n# releaseVersion={release_version}\n# sourceRevision={}\n# architecture={architecture}\n# configuration=Release\n# windowsSdk={windows_sdk}\n{} *{artifact}\n",
+        revision.trim(),
+        hex(&digest)
+    );
+    publish_release(output, &artifact, &executable_bytes, checksum.as_bytes())
 }
 
 fn workspace_root() -> PathBuf {
@@ -108,6 +67,366 @@ fn workspace_root() -> PathBuf {
         .parent()
         .expect("xtask is inside the workspace")
         .to_owned()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReleaseTrack {
+    Development,
+    Release,
+}
+
+fn publish_release_cli() -> Result<()> {
+    let workspace = workspace_root();
+    preflight_repository(&workspace)?;
+    run(Command::new("gh").args(["auth", "status"]))?;
+
+    let track = prompt_track()?;
+    let branch = capture(git(&workspace, &["branch", "--show-current"]))?;
+    let branch = branch.trim();
+    if branch.is_empty() {
+        bail!("publish-release requires a checked-out branch");
+    }
+    if track == ReleaseTrack::Release && branch != "main" {
+        bail!("stable releases must be published from main");
+    }
+
+    let published = published_versions()?;
+    let highest = published.iter().copied().max();
+    let current = read_workspace_version(&workspace.join("Cargo.toml"))?;
+    let suggested = match highest {
+        Some(highest) if current <= highest => highest.increment_patch()?,
+        _ => current,
+    };
+    let version = prompt_version(suggested)?;
+    if highest.is_some_and(|highest| version <= highest) {
+        bail!("release version {version} must be newer than every published version");
+    }
+    let tag = format!("v{version}");
+    if track == ReleaseTrack::Release {
+        let expected = format!("RELEASE {tag}");
+        let confirmation = prompt(&format!("Type '{expected}' to publish a stable release: "))?;
+        if confirmation != expected {
+            bail!("stable release confirmation did not match");
+        }
+    }
+    let incomplete_draft = incomplete_draft_exists(&tag)?;
+    if !incomplete_draft {
+        ensure_tag_absent(&workspace, &tag)?;
+    }
+
+    let manifest = workspace.join("Cargo.toml");
+    let lockfile = workspace.join("Cargo.lock");
+    let mut version_transaction = (version != current)
+        .then(|| VersionTransaction::begin(&manifest, &lockfile, version))
+        .transpose()?;
+    let outcome = (|| -> Result<PathBuf> {
+        if version_transaction.is_some() {
+            run(&mut cargo_metadata(&workspace))?;
+        }
+        run_checks(&workspace)?;
+        let verification = tempfile::tempdir().context("create release verification directory")?;
+        let verification_artifact = build_package(version, verification.path())?;
+        validate_release_outputs(&verification_artifact, version)?;
+
+        run(&mut git(&workspace, &["add", "Cargo.toml", "Cargo.lock"]))?;
+        let message = format!("Release {tag}");
+        run(&mut git(
+            &workspace,
+            &["commit", "--allow-empty", "-m", &message],
+        ))?;
+        if let Some(transaction) = version_transaction.as_mut() {
+            transaction.commit();
+        }
+        let output = workspace.join("dist");
+        clear_local_release_outputs(&output, version)?;
+        let artifact = build_package(version, &output)?;
+        validate_release_outputs(&artifact, version)?;
+        run(&mut git(&workspace, &["push", "origin", branch]))?;
+        let revision = capture(git(&workspace, &["rev-parse", "HEAD"]))?;
+        if incomplete_draft {
+            cleanup_incomplete_draft(&tag)?;
+        }
+        publish_github_release(track, version, revision.trim(), &artifact, &workspace)?;
+        Ok(artifact)
+    })();
+
+    match outcome {
+        Ok(artifact) => {
+            println!("published {tag} from {}", artifact.display());
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(transaction) = version_transaction.as_mut()
+                && let Err(rollback_error) = transaction.rollback()
+            {
+                return Err(error.context(format!(
+                    "release also failed to restore the workspace version: {rollback_error:#}"
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn preflight_repository(workspace: &Path) -> Result<()> {
+    let status = capture(git(
+        workspace,
+        &["status", "--porcelain", "--untracked-files=all"],
+    ))?;
+    if !status.trim().is_empty() {
+        bail!("publish-release requires a clean worktree");
+    }
+    let remote = capture(git(workspace, &["remote", "get-url", "origin"]))?;
+    if !remote.contains("NatanSlvdr/StageSwap") {
+        bail!("origin does not point to NatanSlvdr/StageSwap");
+    }
+    run(&mut git(workspace, &["fetch", "origin"]))?;
+    let head = capture(git(workspace, &["rev-parse", "HEAD"]))?;
+    let upstream = capture(git(workspace, &["rev-parse", "@{upstream}"]))?;
+    if head.trim() != upstream.trim() {
+        bail!("the current branch must exactly match its pushed upstream before publishing");
+    }
+    Ok(())
+}
+
+fn prompt_track() -> Result<ReleaseTrack> {
+    println!("Release track:");
+    println!("  1. Development (default)");
+    println!("  2. Release");
+    match prompt("Select [1]: ")?.as_str() {
+        "" | "1" => Ok(ReleaseTrack::Development),
+        "2" => Ok(ReleaseTrack::Release),
+        _ => bail!("release track must be 1 or 2"),
+    }
+}
+
+fn prompt_version(suggested: ReleaseVersion) -> Result<ReleaseVersion> {
+    let value = prompt(&format!("Version [{suggested}]: "))?;
+    if value.is_empty() {
+        Ok(suggested)
+    } else {
+        ReleaseVersion::parse(&value)
+    }
+}
+
+fn prompt(message: &str) -> Result<String> {
+    print!("{message}");
+    io::stdout().flush().context("flush prompt")?;
+    let mut value = String::new();
+    io::stdin().read_line(&mut value).context("read prompt")?;
+    Ok(value.trim().to_owned())
+}
+
+fn published_versions() -> Result<Vec<ReleaseVersion>> {
+    let output = capture({
+        let mut command = Command::new("gh");
+        command.args([
+            "release",
+            "list",
+            "--repo",
+            "NatanSlvdr/StageSwap",
+            "--limit",
+            "100",
+            "--json",
+            "tagName,isDraft",
+            "--jq",
+            ".[] | select(.isDraft == false) | .tagName",
+        ]);
+        command
+    })?;
+    Ok(output
+        .lines()
+        .filter_map(|tag| {
+            let version = ReleaseVersion::parse(tag).ok()?;
+            (tag == format!("v{version}")).then_some(version)
+        })
+        .collect())
+}
+
+fn incomplete_draft_exists(tag: &str) -> Result<bool> {
+    let mut inspect = Command::new("gh");
+    inspect.args([
+        "release",
+        "view",
+        tag,
+        "--repo",
+        "NatanSlvdr/StageSwap",
+        "--json",
+        "isDraft",
+        "--jq",
+        ".isDraft",
+    ]);
+    let output = inspect
+        .output()
+        .with_context(|| format!("could not inspect GitHub release {tag}"))?;
+    if output.status.success() {
+        let is_draft =
+            String::from_utf8(output.stdout).context("GitHub release state was not valid UTF-8")?;
+        if is_draft.trim() != "true" {
+            bail!("release {tag} already exists");
+        }
+        Ok(true)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        if !stderr.contains("release not found") && !stderr.contains("not found") {
+            bail!(
+                "could not inspect GitHub release {tag}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(false)
+    }
+}
+
+fn cleanup_incomplete_draft(tag: &str) -> Result<()> {
+    println!("removing incomplete draft {tag} before retrying");
+    let mut delete = Command::new("gh");
+    delete.args([
+        "release",
+        "delete",
+        tag,
+        "--repo",
+        "NatanSlvdr/StageSwap",
+        "--yes",
+        "--cleanup-tag",
+    ]);
+    run(&mut delete)
+}
+
+fn ensure_tag_absent(workspace: &Path, tag: &str) -> Result<()> {
+    let reference = format!("refs/tags/{tag}");
+    let output = capture(git(
+        workspace,
+        &["ls-remote", "--tags", "origin", &reference],
+    ))?;
+    if !output.trim().is_empty() {
+        bail!("tag {tag} already exists");
+    }
+    Ok(())
+}
+
+fn run_checks(workspace: &Path) -> Result<()> {
+    let mut format = Command::new("cargo");
+    format
+        .current_dir(workspace)
+        .args(["fmt", "--all", "--", "--check"]);
+    run(&mut format)?;
+    let mut clippy = Command::new("cargo");
+    clippy.current_dir(workspace).args([
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings",
+    ]);
+    run(&mut clippy)?;
+    let mut windows_clippy = Command::new("cargo");
+    windows_clippy.current_dir(workspace).args([
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        "--",
+        "-D",
+        "warnings",
+    ]);
+    run(&mut windows_clippy)?;
+    let mut tests = Command::new("cargo");
+    tests
+        .current_dir(workspace)
+        .args(["test", "--workspace", "--all-targets"]);
+    run(&mut tests)
+}
+
+fn validate_release_outputs(artifact: &Path, version: ReleaseVersion) -> Result<()> {
+    let expected_name = format!("{RELEASE_PREFIX}{version}.exe");
+    if artifact.file_name().and_then(|name| name.to_str()) != Some(&expected_name) {
+        bail!("packaged executable name does not match {expected_name}");
+    }
+    let checksum = artifact.with_file_name(format!("{expected_name}.sha256"));
+    if !checksum.is_file() {
+        bail!("packaging did not produce {}", checksum.display());
+    }
+    Ok(())
+}
+
+fn clear_local_release_outputs(output: &Path, version: ReleaseVersion) -> Result<()> {
+    let executable = output.join(format!("{RELEASE_PREFIX}{version}.exe"));
+    let checksum = output.join(format!("{RELEASE_PREFIX}{version}.exe.sha256"));
+    for path in [executable, checksum] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("remove stale release output {}", path.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn publish_github_release(
+    track: ReleaseTrack,
+    version: ReleaseVersion,
+    revision: &str,
+    artifact: &Path,
+    workspace: &Path,
+) -> Result<()> {
+    let tag = format!("v{version}");
+    let title = match track {
+        ReleaseTrack::Development => format!("StageSwap {tag} Beta"),
+        ReleaseTrack::Release => format!("StageSwap {tag}"),
+    };
+    let checksum = artifact.with_file_name(format!("{}{}.exe.sha256", RELEASE_PREFIX, version));
+    let mut command = Command::new("gh");
+    command.current_dir(workspace).args([
+        "release",
+        "create",
+        &tag,
+        artifact.to_str().context("artifact path is not UTF-8")?,
+        checksum.to_str().context("checksum path is not UTF-8")?,
+        "--repo",
+        "NatanSlvdr/StageSwap",
+        "--target",
+        revision,
+        "--title",
+        &title,
+        "--generate-notes",
+    ]);
+    match track {
+        ReleaseTrack::Development => {
+            command.args(["--prerelease", "--latest=false"]);
+        }
+        ReleaseTrack::Release => {
+            command.arg("--latest");
+        }
+    }
+    run(&mut command)
+}
+
+fn git(workspace: &Path, arguments: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(workspace).args(arguments);
+    command
+}
+
+fn capture(mut command: Command) -> Result<String> {
+    let description = format!("{command:?}");
+    let output = command
+        .output()
+        .with_context(|| format!("could not run {description}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "command failed ({}): {description}\n{}",
+            output.status,
+            stderr.trim()
+        );
+    }
+    String::from_utf8(output.stdout).context("command output was not valid UTF-8")
 }
 
 fn build_release_pair(
@@ -187,6 +506,7 @@ impl fmt::Display for ReleaseVersion {
     }
 }
 
+#[cfg(test)]
 fn select_release_version(
     application_version: ReleaseVersion,
     latest: Option<&(ReleaseVersion, String)>,
@@ -201,6 +521,7 @@ fn select_release_version(
     Ok(max(latest_version.increment_patch()?, application_version))
 }
 
+#[cfg(test)]
 fn latest_release(output: &Path) -> Result<Option<(ReleaseVersion, String)>> {
     if !output.exists() {
         return Ok(None);

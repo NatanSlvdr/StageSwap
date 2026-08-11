@@ -28,7 +28,11 @@ pub use deployment::{
 #[cfg(windows)]
 mod notification;
 #[cfg(windows)]
-pub use notification::{notify_warning, show_error_dialog};
+pub use notification::{notify_update_available, notify_warning, show_error_dialog};
+#[cfg(windows)]
+mod http;
+#[cfg(windows)]
+pub use http::{https_download, https_get};
 #[cfg(windows)]
 mod system_locale;
 #[cfg(windows)]
@@ -62,7 +66,7 @@ pub use instance_control::{
 };
 #[cfg(windows)]
 pub use portable_install::{
-    BootstrapResult, LaunchContext, PortableMode, bootstrap as portable_bootstrap,
+    BootstrapResult, LaunchContext, PortableMode, bootstrap as portable_bootstrap, launch_update,
     managed_executable_path, request_install,
 };
 #[cfg(windows)]

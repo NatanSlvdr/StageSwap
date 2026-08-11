@@ -8,6 +8,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SCHEMA_VERSION: u32 = 1;
 const ADMIN_SCHEMA_VERSION: u32 = 1;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Beta,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AppConfig {
     pub schema_version: u32,
@@ -24,6 +32,8 @@ pub struct AppConfig {
     pub start_automatically: bool,
     pub close_to_tray: bool,
     pub show_notifications: bool,
+    pub update_channel: UpdateChannel,
+    pub notify_updates: bool,
     pub verbose_logging: bool,
     pub interface_language: String,
     pub confirm_exit: bool,
@@ -48,6 +58,8 @@ impl Default for AppConfig {
             start_automatically: true,
             close_to_tray: true,
             show_notifications: true,
+            update_channel: UpdateChannel::Stable,
+            notify_updates: true,
             verbose_logging: false,
             interface_language: "en-US".into(),
             confirm_exit: true,
@@ -74,6 +86,8 @@ struct AppConfigFile {
     start_automatically: bool,
     close_to_tray: bool,
     show_notifications: bool,
+    update_channel: UpdateChannel,
+    notify_updates: bool,
     verbose_logging: bool,
     interface_language: String,
     confirm_exit: bool,
@@ -99,6 +113,8 @@ impl Default for AppConfigFile {
             start_automatically: config.start_automatically,
             close_to_tray: config.close_to_tray,
             show_notifications: config.show_notifications,
+            update_channel: config.update_channel,
+            notify_updates: config.notify_updates,
             verbose_logging: config.verbose_logging,
             interface_language: config.interface_language,
             confirm_exit: config.confirm_exit,
@@ -131,6 +147,8 @@ impl<'de> Deserialize<'de> for AppConfig {
             start_automatically: file.start_automatically,
             close_to_tray: file.close_to_tray,
             show_notifications: file.show_notifications,
+            update_channel: file.update_channel,
+            notify_updates: file.notify_updates,
             verbose_logging: file.verbose_logging,
             interface_language: file.interface_language,
             confirm_exit: file.confirm_exit,
@@ -671,7 +689,22 @@ mod tests {
         assert!(config.selected_monitor_label.is_empty());
         assert!(config.automatic_monitor_rescans);
         assert!(config.automatic_screen_capture_recovery);
+        assert_eq!(config.update_channel, UpdateChannel::Stable);
+        assert!(config.notify_updates);
         assert!(!config.verbose_logging);
+    }
+
+    #[test]
+    fn update_preferences_round_trip_without_a_schema_bump() {
+        let config = AppConfig {
+            update_channel: UpdateChannel::Beta,
+            notify_updates: false,
+            ..AppConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert_eq!(ConfigStore::parse(&json).unwrap(), config);
+        assert!(json.contains("\"schema_version\":1"));
+        assert!(json.contains("\"update_channel\":\"beta\""));
     }
 
     #[test]

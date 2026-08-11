@@ -16,7 +16,8 @@ StageSwap is a local-only, native Windows 11 x64 virtual camera for automatic Zo
 - The virtual camera prefers RGB32 1280×720 at 30 fps. Selectable NV12 720p is retained for Windows Camera and Zoom compatibility; 1080p is intentionally excluded.
 - Output uses deadline-based 30 fps pacing. Visible dashboard previews use latest-only conversion workers and display-sized textures. FPS is runtime-owned and remains meaningful while the dashboard is hidden.
 - While automation is stopped, a fixed black screen with the centered StageSwap icon is published at 30 fps. The virtual camera generates the same frame whenever the app publisher is absent.
-- The app includes the dashboard, five settings categories, contextual previews, shared executable/window/tray icon, synchronized tray controls, warning notifications, exit confirmation, 14-day JSONL logs, and individual/all component restarts.
+- The app includes the dashboard, six settings categories, contextual previews, shared executable/window/tray icon, synchronized tray controls, warning and update notifications, exit confirmation, 14-day JSONL logs, and individual/all component restarts.
+- Manual updates use the public GitHub Releases API. Stable ignores prereleases; Beta accepts both tracks. Availability is checked once at startup and on demand, while download, verified installation, and restart always require user action.
 - There is no general hot-plug manager, monitor-reselection system, sleep/resume recovery, docking recovery, dynamic output-format management, OBS integration, or kernel driver. Compatible webcam media-type changes are revalidated; invalidation, driver failure, and stale capture retry the saved webcam up to three times without rediscovery, while other failures retain the explicit restart path. Screen recovery only retries a selected capture that is black or unavailable, using its stored display identity.
 
 Configuration schema 1, references, and logs live under `%LocalAppData%\StageSwap`. Frames are never recorded or uploaded.
@@ -66,7 +67,7 @@ General opens by default. To open a particular page:
 cargo run -p stageswap --bin StageSwap -- --ui-preview matching
 ```
 
-Available page names are `general`, `webcam`, `screen`, `matching`, and `diagnostics`. You can still navigate between every page after launch.
+Available page names are `general`, `webcam`, `screen`, `matching`, `updates`, and `diagnostics`. You can still navigate between every page after launch.
 
 Setup-guide previews are `setup-1` through `setup-5`. Each name opens one deterministic full-window step for the JW Library-to-Zoom workflow.
 
@@ -90,23 +91,23 @@ Preview mode uses a temporary configuration directory and does not save changes 
 
 ## Platform limitations
 
-Development is performed on macOS. Host checks, deterministic UI previews, and cross-compilation are available locally, but macOS cannot validate an interactive Windows desktop, physical webcam capture, virtual-camera enumeration, native Windows dialogs/tray behavior, exact Windows font rendering, or hardware-specific capture behavior. Use a native Windows machine or the GitHub Actions workflow for those checks.
+Development is performed on macOS. Host checks, deterministic UI previews, and cross-compilation are available locally, but macOS cannot validate an interactive Windows desktop, physical webcam capture, virtual-camera enumeration, native Windows dialogs/tray behavior, exact Windows font rendering, or hardware-specific capture behavior. Use a native Windows machine for those checks.
 
 ## Packaging and release
 
-### Cross-compiled x64 package
+### Publish a release
 
 ```bash
-./scripts/package-x64-macos.sh
+./scripts/publish-release.sh
 ```
 
-The wrapper cross-compiles the x64 Windows build, pins the Windows SDK, embeds the matching Media Foundation DLL and Windows resources, validates the generated PE files and payload, and writes the versioned executable and checksum to `dist/`.
+The interactive publisher defaults to the Development/Beta track, suggests the next available version, requires explicit confirmation for a stable Release, runs the repository checks, cross-compiles the x64 Windows build, validates the PE files and embedded payload, commits and pushes the selected version, and publishes the executable and checksum to GitHub Releases.
 
-If the optimized release build differs from the latest versioned artifact in `dist/`, the patch number is incremented and the selected version is persisted to `Cargo.toml` and `Cargo.lock` before the final DLL and EXE are rebuilt. Rebuilding identical bytes with an already synchronized workspace keeps the existing version. The filename, application UI, Windows version resources, and checksum metadata therefore use one version. Rust and SDK caches make later builds faster. GitHub Actions remains the authoritative release builder.
+The publisher requires a clean branch matching its pushed upstream. Stable releases must come from `main`; Development releases may come from another synchronized branch. Every published `vX.Y.Z` must be newer than all existing StageSwap releases.
 
 ### Release and deployment
 
-Releases are unsigned versioned executables with SHA-256 sidecars. The local package command is `cargo run --release -p xtask -- package x64 dist`.
+Releases are unsigned versioned executables with SHA-256 sidecars. The underlying interactive command is `cargo run --release -p xtask -- publish-release`; the wrapper supplies the pinned macOS cross-compilation environment.
 
 `StageSwap_win64_vX.Y.Z.exe` self-deploys per-user or can run once without installation. `--cleanup` removes startup and the virtual-camera deployment; `--uninstall` also removes the managed app and shortcuts. Both preserve user data, and deployment never modifies Automatic Screen Camera data.
 

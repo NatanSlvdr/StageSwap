@@ -24,7 +24,6 @@ if [ -z "$resource_compiler" ]; then
     exit 1
 fi
 
-output_directory=${1:-dist}
 export STAGESWAP_USE_CARGO_XWIN=1
 export STAGESWAP_CROSS_COMPILE_RESOURCES=1
 export STAGESWAP_WINDOWS_SDK_VERSION=10.0.22621.0
@@ -32,4 +31,4 @@ export XWIN_ARCH=x86_64
 export XWIN_SDK_VERSION=10.0.22621
 export RC_PATH="$resource_compiler"
 
-cargo run --release -p xtask -- package x64 "$output_directory"
+cargo run --release -p xtask -- publish-release

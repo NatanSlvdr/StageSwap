@@ -9,11 +9,13 @@ pub mod ipc;
 pub mod monitor;
 pub mod pacer;
 pub mod runtime;
+pub mod sha256;
 pub mod transition;
 pub mod types;
 
 pub use config::{
     AdminProfileStatus, AdminProfileStore, AdminRestoreOutcome, AppConfig, ConfigLoad, ConfigStore,
+    UpdateChannel,
 };
 pub use decision::{Decision, decide};
 pub use detector::{DebouncedDetector, DetectorSettings};
@@ -35,5 +37,6 @@ pub use runtime::{
     AppSnapshot, Command, ComponentFailureKind, ComponentLifecycle, ComponentStatus, PreviewFrames,
     RestartTarget, RunState, ScreenFailureKind, WebcamFailureKind,
 };
+pub use sha256::{hex as hex_digest, sha256};
 pub use transition::{TransitionController, TransitionState};
 pub use types::*;

@@ -13,7 +13,8 @@
 | Strict 40-byte bounded IPC and two-second expiry | `FrameHeader`, `SharedFrameCache`, `FramePublisher` | IPC tests |
 | Rust COM source and required interfaces | `stageswap-media-source::com_server` | Windows COM/source-state tests |
 | RGB32/NV12 1280×720@30 output with limited BT.601 metadata and sequence cache | `MediaStream` media types and NV12 cache | color/grayscale metadata tests, MF probe, Windows Camera, Zoom |
-| Native self-deploying x64 | deployment module, embedded manifest/version, and `xtask package` | PE/payload validation, first-run and cleanup |
+| Native self-deploying x64 | deployment module, embedded manifest/version, and `xtask publish-release` | PE/payload validation, first-run and cleanup |
+| Manual Stable/Beta GitHub updates | update worker, WinHTTP adapter, checksum verification, replacement bootstrap | release-selection/config/checksum tests and native update/rollback checks |
 | Deterministic lifecycle, deadlines, bounded mailbox, and constant-time pacing | `RuntimeEngine`, runtime clock, component status, runtime mailbox, `FramePacer` | virtual-clock lifecycle tests, command flood/coalescing/shutdown tests, long-gap pacer tests |
 | UI, tray, previews, notifications, logs, recovery submenu, four restarts | `stageswap` | headless locale/DPI render tests, tray mapping tests, native ignored tests, screenshot comparison |
 | Transactional managed startup and run-once preservation | deployment startup helpers and General Settings | registry status/transition tests and native Windows checks |

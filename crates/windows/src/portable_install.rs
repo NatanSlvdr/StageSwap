@@ -167,6 +167,16 @@ pub fn request_install() -> Result<(), String> {
     launch(&current, "--install-request")
 }
 
+pub fn launch_update(candidate: &Path) -> Result<(), String> {
+    if !candidate.is_file() {
+        return Err(format!(
+            "the downloaded update does not exist at {}",
+            candidate.display()
+        ));
+    }
+    launch(candidate, "--install-request")
+}
+
 fn install_or_replace(
     source: &Path,
     managed: &Path,

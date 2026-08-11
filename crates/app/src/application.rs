@@ -6,7 +6,7 @@ use stageswap_app::{CommandDispatch, RuntimeHandle};
 use stageswap_core::{
     AdminProfileStatus, AdminProfileStore, AdminRestoreOutcome, AppConfig, AppSnapshot, Command,
     ComponentFailureKind, ConfigLoad, ConfigStore, DetectionState, DeviceState, Frame, OutputMode,
-    RestartTarget, RunState, Source, WebcamFailureKind,
+    RestartTarget, RunState, Source, UpdateChannel, WebcamFailureKind,
 };
 use stageswap_i18n::{Locale, format_text, text as localized_text};
 use std::collections::HashMap;
@@ -80,12 +80,17 @@ mod setup_guide;
 mod tray;
 #[path = "ui_icon.rs"]
 mod ui_icon;
+#[path = "update.rs"]
+mod update;
 use local_log::LocalLog;
 use preview_conversion::PreviewConverter;
 use setup_guide::{
     SetupReturnView, SetupSession, SetupStartup, SetupStateStore, SetupStep, has_existing_user_data,
 };
 use ui_icon::UiIcon;
+use update::UpdateStatus;
+#[cfg(windows)]
+use update::{ReleaseVersion, UpdateNotificationState, UpdateRequest, UpdateResult, UpdateWorker};
 
 pub(crate) fn run() -> eframe::Result {
     let _embedded_payload = deployment_payload::bytes();
@@ -99,7 +104,7 @@ pub(crate) fn run() -> eframe::Result {
         Err(error) => {
             eprintln!("StageSwap UI preview: {error}");
             eprintln!(
-                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|diagnostics|setup-1..5|dialog-*] [--ui-language en-US|fr-FR|es] [--ui-setup-reference-state captured|empty|review|missing-screen]"
+                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|updates|diagnostics|setup-1..5|dialog-*] [--ui-language en-US|fr-FR|es] [--ui-setup-reference-state captured|empty|review|missing-screen]"
             );
             return Ok(());
         }
@@ -413,16 +418,18 @@ enum SettingsTab {
     Webcam,
     Screen,
     Matching,
+    Updates,
     Diagnostics,
 }
 
 impl SettingsTab {
     #[cfg(test)]
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::General,
         Self::Webcam,
         Self::Screen,
         Self::Matching,
+        Self::Updates,
         Self::Diagnostics,
     ];
 
@@ -433,6 +440,8 @@ impl SettingsTab {
         (Self::Matching, UiIcon::Target),
     ];
 
+    const UPDATES: (Self, UiIcon) = (Self::Updates, UiIcon::Download);
+
     const DIAGNOSTICS: (Self, UiIcon) = (Self::Diagnostics, UiIcon::Layers);
 
     const fn icon(self) -> UiIcon {
@@ -441,6 +450,7 @@ impl SettingsTab {
             Self::Webcam => UiIcon::Camera,
             Self::Screen => UiIcon::Monitor,
             Self::Matching => UiIcon::Target,
+            Self::Updates => UiIcon::Download,
             Self::Diagnostics => UiIcon::Layers,
         }
     }
@@ -453,6 +463,7 @@ impl SettingsTab {
                 Self::Webcam => "Webcam",
                 Self::Screen => "Secondary screen",
                 Self::Matching => "Reference image",
+                Self::Updates => "Updates",
                 Self::Diagnostics => "Diagnostics",
             },
         )
@@ -471,6 +482,9 @@ impl SettingsTab {
                 }
                 Self::Matching => {
                     "Capture the screen JW Library shows when no media is playing. StageSwap compares the live screen with it to detect media."
+                }
+                Self::Updates => {
+                    "Check GitHub for new StageSwap versions and choose when to install them."
                 }
                 Self::Diagnostics => {
                     "Check video connections, troubleshoot problems, and view logs."
@@ -519,6 +533,7 @@ impl SettingsTab {
             Self::Webcam => "webcam",
             Self::Screen => "screen",
             Self::Matching => "matching",
+            Self::Updates => "updates",
             Self::Diagnostics => "diagnostics",
         }
     }
@@ -529,6 +544,7 @@ impl SettingsTab {
             "webcam" => Some(Self::Webcam),
             "screen" => Some(Self::Screen),
             "matching" => Some(Self::Matching),
+            "updates" => Some(Self::Updates),
             "diagnostics" => Some(Self::Diagnostics),
             _ => None,
         }
@@ -949,6 +965,7 @@ struct SettingsSidebarLayout {
     brand_separator: Rect,
     back: Rect,
     primary_navigation: Vec<Rect>,
+    updates: Rect,
     diagnostics: Rect,
     save_status: Rect,
     go_back: bool,
@@ -1107,6 +1124,12 @@ struct SwitcherApp {
     log: LocalLog,
     last_activity_id: u64,
     command_banner: Option<(Instant, String)>,
+    update_status: UpdateStatus,
+    #[cfg(windows)]
+    update_notifications: UpdateNotificationState,
+    update_check_started: bool,
+    #[cfg(windows)]
+    update_worker: Option<UpdateWorker>,
     #[cfg(windows)]
     last_notified_warning: Option<String>,
     #[cfg(windows)]
@@ -1156,6 +1179,18 @@ impl SwitcherApp {
             }
         };
         let log = LocalLog::new(store.logs_path(), 14);
+        #[cfg(windows)]
+        let update_notifications = UpdateNotificationState::load(store.directory());
+        #[cfg(windows)]
+        let update_worker = UpdateWorker::start(
+            store.directory().to_owned(),
+            ReleaseVersion::parse(env!("CARGO_PKG_VERSION"))
+                .expect("Cargo package version is numeric semantic versioning"),
+        )
+        .map_err(|error| {
+            load_warnings.push(error);
+        })
+        .ok();
         for warning in &load_warnings {
             log.write("warning", "configuration", "LOAD_WARNING", warning);
         }
@@ -1184,6 +1219,12 @@ impl SwitcherApp {
             log,
             last_activity_id: 0,
             command_banner: None,
+            update_status: UpdateStatus::Idle,
+            #[cfg(windows)]
+            update_notifications,
+            update_check_started: false,
+            #[cfg(windows)]
+            update_worker,
             #[cfg(windows)]
             last_notified_warning: None,
             #[cfg(windows)]
@@ -1526,6 +1567,116 @@ impl SwitcherApp {
         self.send(Command::RefreshVideoDevices);
         if self.config.automatic_monitor_rescans {
             self.send(Command::Rescan);
+        }
+    }
+
+    fn request_update_check(&mut self, manual: bool) {
+        if matches!(
+            self.update_status,
+            UpdateStatus::Checking | UpdateStatus::Downloading(_) | UpdateStatus::Installing
+        ) {
+            return;
+        }
+        #[cfg(windows)]
+        {
+            let Some(worker) = self.update_worker.as_ref() else {
+                if manual {
+                    self.update_status =
+                        UpdateStatus::Failed("The update service is unavailable.".into());
+                }
+                return;
+            };
+            match worker.request(UpdateRequest::Check {
+                channel: self.config.update_channel,
+                manual,
+            }) {
+                Ok(()) => self.update_status = UpdateStatus::Checking,
+                Err(error) if manual => self.update_status = UpdateStatus::Failed(error),
+                Err(error) => {
+                    self.log
+                        .write("warning", "update", "UPDATE_CHECK_NOT_STARTED", &error)
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = manual;
+            self.update_status = UpdateStatus::UpToDate;
+        }
+    }
+
+    #[cfg(windows)]
+    fn poll_update_worker(&mut self) {
+        let Some(result) = self.update_worker.as_ref().and_then(UpdateWorker::poll) else {
+            return;
+        };
+        match result {
+            UpdateResult::Checked { manual, result } => match result {
+                Ok(Some(release)) => {
+                    let should_notify = self.config.notify_updates
+                        && self
+                            .update_notifications
+                            .should_notify(self.config.update_channel, release.version);
+                    if should_notify {
+                        if let Err(error) = self.update_notifications.save(self.store.directory()) {
+                            self.log.write(
+                                "warning",
+                                "update",
+                                "UPDATE_NOTIFICATION_STATE_FAILED",
+                                &error,
+                            );
+                        }
+                        if let Err(error) = stageswap_windows::notify_update_available(
+                            self.locale(),
+                            &release.version.to_string(),
+                        ) {
+                            self.log.write(
+                                "warning",
+                                "notification",
+                                "UPDATE_NOTIFICATION_FAILED",
+                                &error,
+                            );
+                        }
+                    }
+                    self.update_status = UpdateStatus::Available(release);
+                }
+                Ok(None) => self.update_status = UpdateStatus::UpToDate,
+                Err(error) if manual => self.update_status = UpdateStatus::Failed(error),
+                Err(error) => {
+                    self.log
+                        .write("warning", "update", "UPDATE_CHECK_FAILED", &error);
+                    self.update_status = UpdateStatus::Idle;
+                }
+            },
+            UpdateResult::InstallFailed(error) => {
+                self.log
+                    .write("error", "update", "UPDATE_INSTALL_FAILED", &error);
+                self.update_status = UpdateStatus::Failed(error);
+            }
+            UpdateResult::InstallStarted => self.update_status = UpdateStatus::Installing,
+        }
+    }
+
+    fn install_available_update(&mut self) {
+        let UpdateStatus::Available(release) = &self.update_status else {
+            return;
+        };
+        let release = release.clone();
+        #[cfg(windows)]
+        {
+            let Some(worker) = self.update_worker.as_ref() else {
+                self.update_status =
+                    UpdateStatus::Failed("The update service is unavailable.".into());
+                return;
+            };
+            match worker.request(UpdateRequest::Install(release.clone())) {
+                Ok(()) => self.update_status = UpdateStatus::Downloading(release),
+                Err(error) => self.update_status = UpdateStatus::Failed(error),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            self.update_status = UpdateStatus::Downloading(release);
         }
     }
 
@@ -3286,6 +3437,7 @@ impl SwitcherApp {
                 sidebar.inner.primary_navigation.len(),
                 SettingsTab::PRIMARY.len()
             );
+            debug_assert!(sidebar.inner.updates.is_positive());
             debug_assert!(sidebar.inner.diagnostics.is_positive());
             debug_assert!(sidebar.inner.save_status.is_positive());
             sidebar.inner.go_back
@@ -3316,11 +3468,11 @@ impl SwitcherApp {
 
                 let brand_icon = ui
                     .allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), 96.0),
+                        egui::vec2(ui.available_width(), 68.0),
                         egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                         |ui| {
                             let (rect, response) =
-                                ui.allocate_exact_size(egui::vec2(96.0, 96.0), Sense::click());
+                                ui.allocate_exact_size(egui::vec2(68.0, 68.0), Sense::click());
                             if disco_enabled {
                                 for ring in 0..3 {
                                     let color = disco_ui_color(disco_elapsed, ring as f32 / 3.0);
@@ -3429,7 +3581,7 @@ impl SwitcherApp {
                     }
                 }
 
-                let (diagnostics, save_status) = ui
+                let (updates, diagnostics, save_status) = ui
                     .with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                         let save_status = self.settings_save_indicator(ui);
                         ui.add_space(10.0);
@@ -3458,7 +3610,25 @@ impl SwitcherApp {
                             self.dismiss_dialog();
                             self.settings_section_changed_at = Some(Instant::now());
                         }
-                        (response.rect, save_status)
+                        let diagnostics = response.rect;
+                        ui.add_space(3.0);
+                        let (tab, icon) = SettingsTab::UPDATES;
+                        let label = tab.title(self.locale());
+                        let response = settings_nav_button(
+                            ui,
+                            tab,
+                            icon,
+                            label.as_ref(),
+                            self.settings_tab,
+                            disco_enabled.then(|| disco_ui_color(disco_elapsed, 0.64)),
+                        );
+                        if response.clicked() && self.settings_tab != tab {
+                            self.disco_diagnostics_gesture.reset();
+                            self.settings_tab = tab;
+                            self.dismiss_dialog();
+                            self.settings_section_changed_at = Some(Instant::now());
+                        }
+                        (response.rect, diagnostics, save_status)
                     })
                     .inner;
 
@@ -3469,6 +3639,7 @@ impl SwitcherApp {
                     brand_separator,
                     back: back.rect,
                     primary_navigation,
+                    updates,
                     diagnostics,
                     save_status,
                     go_back,
@@ -3573,6 +3744,7 @@ impl SwitcherApp {
                                     SettingsTab::Webcam => self.webcam_settings(ui),
                                     SettingsTab::Screen => self.screen_settings(ui),
                                     SettingsTab::Matching => self.matching_settings(ui),
+                                    SettingsTab::Updates => self.updates_settings(ui),
                                     SettingsTab::Diagnostics => self.diagnostics_settings(ui),
                                 }
                                 ui.add_space(22.0);
@@ -3996,6 +4168,103 @@ impl SwitcherApp {
                 );
             },
         );
+    }
+
+    fn updates_settings(&mut self, ui: &mut egui::Ui) {
+        settings_section_heading(
+            ui,
+            UiIcon::Download,
+            "Update preferences",
+            "Choose which published StageSwap versions you want to receive.",
+        );
+        settings_info_row(ui, "Installed version", APP_VERSION_LABEL);
+
+        let previous_channel = self.config.update_channel;
+        let locale = self.locale();
+        settings_fixed_control_row(
+            ui,
+            "Update channel",
+            "Stable releases are recommended. Beta may include unfinished changes.",
+            166.0,
+            |ui| {
+                egui::ComboBox::from_id_salt("update-channel")
+                    .width(166.0)
+                    .selected_text(update_channel_label(self.config.update_channel, locale))
+                    .show_ui(ui, |ui| {
+                        for channel in [UpdateChannel::Stable, UpdateChannel::Beta] {
+                            ui.selectable_value(
+                                &mut self.config.update_channel,
+                                channel,
+                                update_channel_label(channel, locale),
+                            );
+                        }
+                    });
+            },
+        );
+        settings_toggle_row(
+            ui,
+            &mut self.config.notify_updates,
+            "Notify when updates are available",
+            "Show one notification for each new version on the selected channel.",
+        );
+        if self.config.update_channel != previous_channel {
+            self.update_status = UpdateStatus::Idle;
+            self.request_update_check(false);
+        }
+
+        settings_section_gap(ui);
+        settings_section_heading(
+            ui,
+            UiIcon::Refresh,
+            "Update status",
+            "StageSwap checks once when it starts and only installs after you choose to continue.",
+        );
+        let status = update_status_text(self.locale(), &self.update_status);
+        settings_result_text(ui, &status);
+        ui.add_space(10.0);
+        let busy = matches!(
+            self.update_status,
+            UpdateStatus::Checking | UpdateStatus::Downloading(_) | UpdateStatus::Installing
+        );
+        ui.add_enabled_ui(!busy, |ui| {
+            if translated_button(ui, "Check for updates").clicked() {
+                self.request_update_check(true);
+            }
+        });
+
+        let available = match &self.update_status {
+            UpdateStatus::Available(release) => Some(release.clone()),
+            _ => None,
+        };
+        if let Some(release) = available {
+            ui.add_space(12.0);
+            #[cfg(windows)]
+            if self.portable_mode == stageswap_windows::PortableMode::RunOnce {
+                settings_result_text(
+                    ui,
+                    tr(
+                        ui,
+                        "Continuing installs the updated managed copy of StageSwap for this user.",
+                    )
+                    .as_ref(),
+                );
+                ui.add_space(8.0);
+            }
+            let label = format_text(
+                self.locale(),
+                "Download, install, and restart {0}",
+                &[&format!("v{}", release.version)],
+            );
+            if ui
+                .add_sized(
+                    egui::vec2(ui.available_width().min(320.0), 36.0),
+                    egui::Button::new(label),
+                )
+                .clicked()
+            {
+                self.install_available_update();
+            }
+        }
     }
 
     fn diagnostics_settings(&mut self, ui: &mut egui::Ui) {
@@ -5238,6 +5507,12 @@ impl eframe::App for SwitcherApp {
         if let Some(readiness) = self.instance_readiness.take() {
             readiness.mark_ready();
         }
+        if !self.update_check_started {
+            self.update_check_started = true;
+            self.request_update_check(false);
+        }
+        #[cfg(windows)]
+        self.poll_update_worker();
         #[cfg(windows)]
         if let Some(commands) = self.instance_commands.as_ref() {
             let commands: Vec<_> = commands.try_iter().collect();
@@ -6977,6 +7252,45 @@ const fn window_behavior_result(close_to_tray: bool, confirm_exit: bool) -> &'st
         }
         (false, true) => "Closing the window or choosing Exit asks before StageSwap stops.",
         (false, false) => "Closing the window or choosing Exit stops StageSwap immediately.",
+    }
+}
+
+fn update_channel_label(channel: UpdateChannel, locale: Locale) -> std::borrow::Cow<'static, str> {
+    localized_text(
+        locale,
+        match channel {
+            UpdateChannel::Stable => "Stable releases",
+            UpdateChannel::Beta => "Beta",
+        },
+    )
+}
+
+fn update_status_text(locale: Locale, status: &UpdateStatus) -> String {
+    match status {
+        UpdateStatus::Idle => localized_text(locale, "Waiting for an update check.").into_owned(),
+        UpdateStatus::Checking => {
+            localized_text(locale, "Checking GitHub for updates…").into_owned()
+        }
+        UpdateStatus::UpToDate => localized_text(locale, "StageSwap is up to date.").into_owned(),
+        UpdateStatus::Available(release) => {
+            let template = if release.prerelease {
+                "StageSwap {0} Beta is available on the selected channel."
+            } else {
+                "StageSwap {0} is available on the selected channel."
+            };
+            format_text(locale, template, &[&format!("v{}", release.version)])
+        }
+        UpdateStatus::Downloading(release) => format_text(
+            locale,
+            "Downloading and verifying StageSwap {0}…",
+            &[&format!("v{}", release.version)],
+        ),
+        UpdateStatus::Installing => localized_text(
+            locale,
+            "The verified update is starting. StageSwap will restart shortly…",
+        )
+        .into_owned(),
+        UpdateStatus::Failed(error) => format_text(locale, "Update failed: {0}", &[error]),
     }
 }
 
@@ -9043,8 +9357,8 @@ mod tests {
                 assert!(rect.is_positive());
                 assert!(sidebar_rect.contains_rect(rect));
             }
-            assert!((sidebar_layout.brand_icon.width() - 96.0).abs() < 0.01);
-            assert!((sidebar_layout.brand_icon.height() - 96.0).abs() < 0.01);
+            assert!((sidebar_layout.brand_icon.width() - 68.0).abs() < 0.01);
+            assert!((sidebar_layout.brand_icon.height() - 68.0).abs() < 0.01);
             assert!(sidebar_layout.brand_icon.bottom() < sidebar_layout.brand_title.top());
             assert!(sidebar_layout.brand_title.bottom() < sidebar_layout.brand_version.top());
             assert!(sidebar_layout.brand_version.bottom() < sidebar_layout.brand_separator.top());
@@ -9073,12 +9387,14 @@ mod tests {
             assert!(sidebar_layout.back.bottom() < sidebar_layout.primary_navigation[0].top());
             assert!(
                 sidebar_layout.primary_navigation.last().unwrap().bottom()
-                    < sidebar_layout.diagnostics.top(),
-                "primary navigation overlaps Diagnostics: primary={:?}, diagnostics={:?}",
+                    < sidebar_layout.updates.top(),
+                "primary navigation overlaps Updates: primary={:?}, updates={:?}",
                 sidebar_layout.primary_navigation.last().unwrap(),
-                sidebar_layout.diagnostics
+                sidebar_layout.updates
             );
+            assert!(sidebar_layout.updates.bottom() < sidebar_layout.diagnostics.top());
             assert!(sidebar_layout.diagnostics.bottom() < sidebar_layout.save_status.top());
+            assert!(sidebar_rect.contains_rect(sidebar_layout.updates));
             assert!(sidebar_rect.contains_rect(sidebar_layout.diagnostics));
             assert!(sidebar_rect.contains_rect(sidebar_layout.save_status));
             assert!(
@@ -9920,8 +10236,8 @@ mod tests {
     }
 
     #[test]
-    fn five_settings_categories_keep_every_recovery_target_in_diagnostics() {
-        assert_eq!(SettingsTab::ALL.len(), 5);
+    fn six_settings_categories_keep_every_recovery_target_in_diagnostics() {
+        assert_eq!(SettingsTab::ALL.len(), 6);
         assert_eq!(SettingsTab::PRIMARY.len(), 4);
         for target in [
             RestartTarget::Webcam,

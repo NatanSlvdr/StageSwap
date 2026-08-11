@@ -16,6 +16,7 @@ pub(crate) enum UiIcon {
     Check,
     CheckCircle,
     Clock,
+    Download,
     Error,
     Folder,
     Image,
@@ -43,7 +44,7 @@ pub(crate) enum UiIcon {
 
 impl UiIcon {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 32] = [
+    pub(crate) const ALL: [Self; 33] = [
         Self::Back,
         Self::ArrowRight,
         Self::Bell,
@@ -53,6 +54,7 @@ impl UiIcon {
         Self::Check,
         Self::CheckCircle,
         Self::Clock,
+        Self::Download,
         Self::Error,
         Self::Folder,
         Self::Image,
@@ -89,6 +91,7 @@ impl UiIcon {
             Self::Check => regular::CHECK,
             Self::CheckCircle => regular::CHECK_CIRCLE,
             Self::Clock => regular::CLOCK,
+            Self::Download => regular::DOWNLOAD_SIMPLE,
             Self::Error => regular::X_CIRCLE,
             Self::Folder => regular::FOLDER_OPEN,
             Self::Image => regular::IMAGE,
