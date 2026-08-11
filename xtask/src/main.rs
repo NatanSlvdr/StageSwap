@@ -1171,7 +1171,7 @@ fn publish_github_release(
 ) -> Result<()> {
     let tag = format!("v{version}");
     let title = match track {
-        ReleaseTrack::Development => format!("{tag} Beta"),
+        ReleaseTrack::Development => format!("{tag} beta"),
         ReleaseTrack::Release => tag.clone(),
     };
     let checksum = artifact.with_file_name(format!("{}{}.exe.sha256", RELEASE_PREFIX, version));
