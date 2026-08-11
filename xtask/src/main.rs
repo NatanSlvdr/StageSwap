@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use dialoguer::{Input, console::Term};
+use dialoguer::{Input, Select, console::Term};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 #[cfg(test)]
 use std::cmp::max;
@@ -316,6 +316,20 @@ fn preflight_repository(workspace: &Path, progress: &ReleaseProgress) -> Result<
 }
 
 fn prompt_track() -> Result<ReleaseTrack> {
+    if Term::stderr().is_term() {
+        let selection = Select::new()
+            .with_prompt("Release track")
+            .items(&["Development (default)", "Release"])
+            .default(0)
+            .interact_on(&Term::stderr())
+            .context("select release track")?;
+        return match selection {
+            0 => Ok(ReleaseTrack::Development),
+            1 => Ok(ReleaseTrack::Release),
+            _ => bail!("release track selection was out of range"),
+        };
+    }
+
     eprintln!("Release track:");
     eprintln!("  1. Development (default)");
     eprintln!("  2. Release");
