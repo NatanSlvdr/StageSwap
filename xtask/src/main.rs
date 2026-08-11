@@ -289,11 +289,8 @@ fn publish_release_cli() -> Result<()> {
             Ok((published, current))
         })?;
     let highest = published.iter().copied().max();
-    let suggested = match highest {
-        Some(highest) if current <= highest => highest.increment_patch()?,
-        _ => current,
-    };
-    let version = prompt_version(suggested)?;
+    let version_suggestions = VersionSuggestions::new(current, highest)?;
+    let version = prompt_version(version_suggestions)?;
     if highest.is_some_and(|highest| version <= highest) {
         bail!("release version {version} must be newer than every published version");
     }
@@ -418,20 +415,7 @@ fn preflight_repository(workspace: &Path) -> Result<()> {
 
 fn prompt_track() -> Result<ReleaseTrack> {
     if Term::stderr().is_term() {
-        let selection = if env::var_os("NO_COLOR").is_none() {
-            Select::with_theme(&ColorfulTheme::default())
-                .with_prompt("Release track")
-                .items(&["Development (default)", "Release"])
-                .default(0)
-                .interact_on(&Term::stderr())
-        } else {
-            Select::with_theme(&SimpleTheme)
-                .with_prompt("Release track")
-                .items(&["Development (default)", "Release"])
-                .default(0)
-                .interact_on(&Term::stderr())
-        }
-        .context("select release track")?;
+        let selection = select_prompt("Release track", &["Development (default)", "Release"])?;
         return match selection {
             0 => Ok(ReleaseTrack::Development),
             1 => Ok(ReleaseTrack::Release),
@@ -449,7 +433,74 @@ fn prompt_track() -> Result<ReleaseTrack> {
     }
 }
 
-fn prompt_version(suggested: ReleaseVersion) -> Result<ReleaseVersion> {
+fn select_prompt<T: ToString>(message: &str, items: &[T]) -> Result<usize> {
+    let selection = if env::var_os("NO_COLOR").is_none() {
+        Select::with_theme(&ColorfulTheme::default())
+            .with_prompt(message)
+            .items(items)
+            .default(0)
+            .interact_on(&Term::stderr())
+    } else {
+        Select::with_theme(&SimpleTheme)
+            .with_prompt(message)
+            .items(items)
+            .default(0)
+            .interact_on(&Term::stderr())
+    };
+    selection.with_context(|| format!("select {message}"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VersionSuggestions {
+    patch: ReleaseVersion,
+    minor: ReleaseVersion,
+    major: ReleaseVersion,
+}
+
+impl VersionSuggestions {
+    fn new(current: ReleaseVersion, highest: Option<ReleaseVersion>) -> Result<Self> {
+        let base = highest
+            .filter(|highest| *highest > current)
+            .unwrap_or(current);
+        Ok(Self {
+            patch: base.increment_patch()?,
+            minor: base.increment_minor()?,
+            major: base.increment_major()?,
+        })
+    }
+}
+
+fn prompt_version(suggestions: VersionSuggestions) -> Result<ReleaseVersion> {
+    let items = [
+        format!("Patch ({})", suggestions.patch),
+        format!("Minor ({})", suggestions.minor),
+        format!("Major ({})", suggestions.major),
+        format!("Manual (edit {})", suggestions.patch),
+    ];
+    if Term::stderr().is_term() {
+        return match select_prompt("Version bump", &items)? {
+            0 => Ok(suggestions.patch),
+            1 => Ok(suggestions.minor),
+            2 => Ok(suggestions.major),
+            3 => prompt_manual_version(suggestions.patch),
+            _ => bail!("version bump selection was out of range"),
+        };
+    }
+
+    eprintln!("Version bump:");
+    for (index, item) in items.iter().enumerate() {
+        eprintln!("  {}. {item}", index + 1);
+    }
+    match prompt("Select [1]: ")?.as_str() {
+        "" | "1" => Ok(suggestions.patch),
+        "2" => Ok(suggestions.minor),
+        "3" => Ok(suggestions.major),
+        "4" => prompt_manual_version(suggestions.patch),
+        _ => bail!("version bump must be 1, 2, 3, or 4"),
+    }
+}
+
+fn prompt_manual_version(suggested: ReleaseVersion) -> Result<ReleaseVersion> {
     let value = if Term::stderr().is_term() {
         if env::var_os("NO_COLOR").is_none() {
             Input::<String>::with_theme(&ColorfulTheme::default())
@@ -814,6 +865,28 @@ impl ReleaseVersion {
                 .checked_add(1)
                 .context("patch version overflow")?,
             ..self
+        })
+    }
+
+    fn increment_minor(self) -> Result<Self> {
+        Ok(Self {
+            minor: self
+                .minor
+                .checked_add(1)
+                .context("minor version overflow")?,
+            patch: 0,
+            ..self
+        })
+    }
+
+    fn increment_major(self) -> Result<Self> {
+        Ok(Self {
+            major: self
+                .major
+                .checked_add(1)
+                .context("major version overflow")?,
+            minor: 0,
+            patch: 0,
         })
     }
 }
@@ -1333,6 +1406,36 @@ mod tests {
         assert_eq!(
             parse_version_input("0.3.19", suggested).unwrap(),
             ReleaseVersion::parse("0.3.19").unwrap()
+        );
+    }
+
+    #[test]
+    fn version_suggestions_offer_patch_minor_and_major_from_release_history() {
+        let current = ReleaseVersion::parse("0.2.18").unwrap();
+        let highest = Some(ReleaseVersion::parse("0.2.19").unwrap());
+
+        assert_eq!(
+            VersionSuggestions::new(current, highest).unwrap(),
+            VersionSuggestions {
+                patch: ReleaseVersion::parse("0.2.20").unwrap(),
+                minor: ReleaseVersion::parse("0.3.0").unwrap(),
+                major: ReleaseVersion::parse("1.0.0").unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn version_suggestions_start_from_a_source_version_ahead_of_history() {
+        let current = ReleaseVersion::parse("1.4.2").unwrap();
+        let highest = Some(ReleaseVersion::parse("1.3.9").unwrap());
+
+        assert_eq!(
+            VersionSuggestions::new(current, highest).unwrap(),
+            VersionSuggestions {
+                patch: ReleaseVersion::parse("1.4.3").unwrap(),
+                minor: ReleaseVersion::parse("1.5.0").unwrap(),
+                major: ReleaseVersion::parse("2.0.0").unwrap(),
+            }
         );
     }
 
