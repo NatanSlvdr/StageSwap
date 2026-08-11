@@ -260,8 +260,8 @@ mod tests {
     }
 
     #[test]
-    fn exported_class_factory_activates_all_required_source_interfaces() -> windows_core::Result<()>
-    {
+    fn native_exported_class_factory_activates_all_required_source_interfaces()
+    -> windows_core::Result<()> {
         let _test_lock = TEST_LOCK.lock().expect("media-source test lock poisoned");
         // SAFETY: initializes Media Foundation for the activation test.
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
@@ -296,7 +296,8 @@ mod tests {
     }
 
     #[test]
-    fn releasing_activation_does_not_shutdown_activated_source() -> windows_core::Result<()> {
+    fn native_releasing_activation_does_not_shutdown_activated_source() -> windows_core::Result<()>
+    {
         let _test_lock = TEST_LOCK.lock().expect("media-source test lock poisoned");
         // SAFETY: initializes Media Foundation for the activation test.
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };

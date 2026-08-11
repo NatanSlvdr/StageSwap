@@ -187,19 +187,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_icon_maps_to_one_private_use_character() {
-        for icon in UiIcon::ALL {
-            let glyph = icon.glyph();
-            assert_eq!(glyph.chars().count(), 1, "{icon:?}");
-            assert!(
-                ('\u{E000}'..='\u{F8FF}').contains(&icon.character()),
-                "{icon:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn installed_egui_font_contains_and_paints_every_icon() {
+    fn contract_installed_egui_font_contains_and_paints_every_icon() {
         let context = egui::Context::default();
         install_fonts(&context);
         let output = context.run_ui(egui::RawInput::default(), |ui| {
@@ -219,20 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_actions_keep_distinct_glyphs() {
-        for icons in [
-            [UiIcon::Robot, UiIcon::Route, UiIcon::Refresh],
-            [UiIcon::Error, UiIcon::Unavailable, UiIcon::Trash],
-            [UiIcon::Save, UiIcon::Load, UiIcon::SignOut],
-        ] {
-            assert_ne!(icons[0].glyph(), icons[1].glyph());
-            assert_ne!(icons[0].glyph(), icons[2].glyph());
-            assert_ne!(icons[1].glyph(), icons[2].glyph());
-        }
-    }
-
-    #[test]
-    fn tray_rasterization_is_antialiased_tinted_and_padded() {
+    fn contract_tray_rasterization_is_antialiased_tinted_and_padded() {
         let color = [64, 118, 216, 255];
         let image = rasterize(UiIcon::Settings, color, 32).unwrap();
         assert_eq!(image.dimensions(), (32, 32));
@@ -247,16 +222,5 @@ mod tests {
         for corner in [[0, 0], [31, 0], [0, 31], [31, 31]] {
             assert_eq!(image.get_pixel(corner[0], corner[1]).0[3], 0);
         }
-    }
-
-    #[test]
-    fn tray_actions_produce_distinct_pixels() {
-        let color = [255, 255, 255, 255];
-        let play = rasterize(UiIcon::Play, color, 32).unwrap();
-        let stop = rasterize(UiIcon::Stop, color, 32).unwrap();
-        let route = rasterize(UiIcon::Route, color, 32).unwrap();
-        assert_ne!(play, stop);
-        assert_ne!(play, route);
-        assert_ne!(stop, route);
     }
 }

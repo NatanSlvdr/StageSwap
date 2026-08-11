@@ -35,7 +35,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mutex_identity_is_stageswap() {
+    fn native_mutex_identity_is_stageswap() {
         assert_eq!(MUTEX_NAME, r"Local\StageSwap.Application");
     }
 }

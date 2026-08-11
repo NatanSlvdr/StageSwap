@@ -214,7 +214,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn converts_resizes_and_compares() {
+    fn contract_converts_resizes_and_compares() {
         let bgra = [0, 0, 255, 255, 255, 255, 255, 255];
         let image = bgra_to_gray(&bgra, Size::new(2, 1), 8).unwrap();
         assert_eq!(image.pixels, [54, 255]);

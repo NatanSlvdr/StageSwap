@@ -291,7 +291,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn control_identity_and_protocol_are_stable() {
+    fn native_control_identity_and_protocol_are_stable() {
         assert_eq!(CONTROL_PIPE, r"\\.\pipe\StageSwap.Control");
         assert_eq!(PROTOCOL_VERSION, 1);
         assert_eq!(InstanceCommand::Show.code(), 1);

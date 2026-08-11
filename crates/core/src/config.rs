@@ -665,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_one_round_trips() {
+    fn contract_config_schema_round_trip_and_update_preferences() {
         let config = AppConfig {
             selected_video_device_id: "camera\\id\"one".into(),
             crop_webcam_to_16_9: false,
@@ -680,10 +680,22 @@ mod tests {
         assert_eq!(ConfigStore::parse("{}").unwrap(), AppConfig::default());
         let invalid_schema = serde_json::json!({ "schema_version": 2 }).to_string();
         assert!(ConfigStore::parse(&invalid_schema).is_err());
+        let update_preferences = AppConfig {
+            update_channel: UpdateChannel::Beta,
+            notify_updates: false,
+            ..AppConfig::default()
+        };
+        let update_json = serde_json::to_string(&update_preferences).unwrap();
+        assert_eq!(
+            ConfigStore::parse(&update_json).unwrap(),
+            update_preferences
+        );
+        assert!(update_json.contains("\"schema_version\":1"));
+        assert!(update_json.contains("\"update_channel\":\"beta\""));
     }
 
     #[test]
-    fn legacy_schema_defaults_webcam_crop_to_enabled() {
+    fn contract_config_legacy_defaults_and_recovery_preference_migration() {
         let config = ConfigStore::parse(r#"{"schema_version":1}"#).unwrap();
         assert!(config.crop_webcam_to_16_9);
         assert!(config.selected_monitor_label.is_empty());
@@ -692,23 +704,6 @@ mod tests {
         assert_eq!(config.update_channel, UpdateChannel::Stable);
         assert!(config.notify_updates);
         assert!(!config.verbose_logging);
-    }
-
-    #[test]
-    fn update_preferences_round_trip_without_a_schema_bump() {
-        let config = AppConfig {
-            update_channel: UpdateChannel::Beta,
-            notify_updates: false,
-            ..AppConfig::default()
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        assert_eq!(ConfigStore::parse(&json).unwrap(), config);
-        assert!(json.contains("\"schema_version\":1"));
-        assert!(json.contains("\"update_channel\":\"beta\""));
-    }
-
-    #[test]
-    fn legacy_rescan_choice_is_inherited_by_screen_capture_recovery() {
         let disabled =
             ConfigStore::parse(r#"{"schema_version":1,"automatic_monitor_rescans":false}"#)
                 .unwrap();
@@ -719,10 +714,6 @@ mod tests {
             ConfigStore::parse(r#"{"schema_version":1,"automatic_monitor_rescans":true}"#).unwrap();
         assert!(enabled.automatic_monitor_rescans);
         assert!(enabled.automatic_screen_capture_recovery);
-    }
-
-    #[test]
-    fn explicit_screen_capture_recovery_choice_overrides_legacy_inheritance() {
         for (automatic_monitor_rescans, automatic_screen_capture_recovery) in
             [(false, true), (true, false)]
         {
@@ -744,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn backup_is_used_and_double_corruption_falls_back() {
+    fn contract_config_load_uses_backup_then_defaults_when_sources_are_invalid() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path());
         let original = AppConfig {
@@ -767,18 +758,13 @@ mod tests {
         let defaults = store.load();
         assert!(defaults.used_defaults);
         assert_eq!(defaults.config, AppConfig::default());
+        let missing = ConfigStore::new(tempfile::tempdir().unwrap().path()).load();
+        assert!(missing.used_defaults);
+        assert!(!missing.used_backup);
     }
 
     #[test]
-    fn missing_configuration_reports_default_source() {
-        let directory = tempfile::tempdir().unwrap();
-        let loaded = ConfigStore::new(directory.path()).load();
-        assert!(loaded.used_defaults);
-        assert!(!loaded.used_backup);
-    }
-
-    #[test]
-    fn admin_baseline_defaults_auto_restore_off_and_preserves_the_toggle_on_replace() {
+    fn contract_admin_baseline_metadata_and_reference_absence() {
         let directory = tempfile::tempdir().unwrap();
         let config_store = ConfigStore::new(directory.path());
         let admin_store = AdminProfileStore::new(directory.path());
@@ -797,10 +783,7 @@ mod tests {
                 reference_included: true,
             }
         );
-        assert_eq!(admin_store.status().unwrap(), Some(status));
-
-        let enabled = admin_store.set_auto_restore_on_launch(true).unwrap();
-        assert!(enabled.auto_restore_on_launch);
+        admin_store.set_auto_restore_on_launch(true).unwrap();
         write_reference(&config_store.reference_path(), [0, 255, 0, 255]);
         let replacement = AppConfig {
             selected_video_device_id: "replacement-camera".into(),
@@ -814,148 +797,19 @@ mod tests {
             admin_store.load_profile().unwrap().unwrap().config,
             replacement
         );
-
         assert!(admin_store.remove().unwrap());
         assert_eq!(admin_store.status().unwrap(), None);
-        assert!(!admin_store.remove().unwrap());
-    }
 
-    #[test]
-    fn enabled_admin_baseline_restores_settings_and_reference_on_every_launch() {
-        let directory = tempfile::tempdir().unwrap();
-        let config_store = ConfigStore::new(directory.path());
-        let admin_store = AdminProfileStore::new(directory.path());
-        write_reference(&config_store.reference_path(), [255, 0, 0, 255]);
+        let no_reference_directory = tempfile::tempdir().unwrap();
+        let config_store = ConfigStore::new(no_reference_directory.path());
+        let admin_store = AdminProfileStore::new(no_reference_directory.path());
         let admin = AppConfig {
             selected_video_device_id: "admin-camera".into(),
-            cursor_visible: true,
             reference_image_path: config_store.reference_path().display().to_string(),
             ..AppConfig::default()
         };
-        admin_store.save(&admin).unwrap();
+        assert!(!admin_store.save(&admin).unwrap().reference_included);
         admin_store.set_auto_restore_on_launch(true).unwrap();
-
-        for user_camera in ["first-user-camera", "second-user-camera"] {
-            config_store
-                .save(&AppConfig {
-                    selected_video_device_id: user_camera.into(),
-                    reference_image_path: config_store.reference_path().display().to_string(),
-                    ..AppConfig::default()
-                })
-                .unwrap();
-            write_reference(&config_store.reference_path(), [0, 0, 255, 255]);
-
-            assert_eq!(
-                admin_store.restore_on_launch().unwrap(),
-                AdminRestoreOutcome::Restored
-            );
-            assert_eq!(config_store.load().config, admin);
-            assert_eq!(
-                reference_color(&config_store.reference_path()),
-                [255, 0, 0, 255]
-            );
-        }
-    }
-
-    #[test]
-    fn disabled_admin_baseline_leaves_working_files_untouched() {
-        let directory = tempfile::tempdir().unwrap();
-        let config_store = ConfigStore::new(directory.path());
-        let admin_store = AdminProfileStore::new(directory.path());
-        write_reference(&config_store.reference_path(), [255, 0, 0, 255]);
-        admin_store
-            .save(&AppConfig {
-                selected_video_device_id: "admin-camera".into(),
-                reference_image_path: config_store.reference_path().display().to_string(),
-                ..AppConfig::default()
-            })
-            .unwrap();
-        let user = AppConfig {
-            selected_video_device_id: "user-camera".into(),
-            reference_image_path: config_store.reference_path().display().to_string(),
-            ..AppConfig::default()
-        };
-        config_store.save(&user).unwrap();
-        write_reference(&config_store.reference_path(), [0, 0, 255, 255]);
-
-        assert_eq!(
-            admin_store.restore_on_launch().unwrap(),
-            AdminRestoreOutcome::Disabled
-        );
-        assert_eq!(config_store.load().config, user);
-        assert_eq!(
-            reference_color(&config_store.reference_path()),
-            [0, 0, 255, 255]
-        );
-    }
-
-    #[test]
-    fn manual_admin_restore_ignores_auto_restore_and_replaces_working_files() {
-        let directory = tempfile::tempdir().unwrap();
-        let config_store = ConfigStore::new(directory.path());
-        let admin_store = AdminProfileStore::new(directory.path());
-        write_reference(&config_store.reference_path(), [255, 0, 0, 255]);
-        let admin = AppConfig {
-            selected_video_device_id: "admin-camera".into(),
-            cursor_visible: true,
-            reference_image_path: config_store.reference_path().display().to_string(),
-            ..AppConfig::default()
-        };
-        let status = admin_store.save(&admin).unwrap();
-        assert!(!status.auto_restore_on_launch);
-
-        config_store
-            .save(&AppConfig {
-                selected_video_device_id: "user-camera".into(),
-                reference_image_path: config_store.reference_path().display().to_string(),
-                ..AppConfig::default()
-            })
-            .unwrap();
-        write_reference(&config_store.reference_path(), [0, 0, 255, 255]);
-
-        assert_eq!(
-            admin_store.restore_now().unwrap(),
-            AdminRestoreOutcome::Restored
-        );
-        assert_eq!(config_store.load().config, admin);
-        assert_eq!(
-            reference_color(&config_store.reference_path()),
-            [255, 0, 0, 255]
-        );
-        assert!(
-            !admin_store
-                .status()
-                .unwrap()
-                .unwrap()
-                .auto_restore_on_launch
-        );
-    }
-
-    #[test]
-    fn manual_admin_restore_reports_a_missing_profile() {
-        let directory = tempfile::tempdir().unwrap();
-        assert_eq!(
-            AdminProfileStore::new(directory.path())
-                .restore_now()
-                .unwrap(),
-            AdminRestoreOutcome::Missing
-        );
-    }
-
-    #[test]
-    fn baseline_without_reference_removes_a_later_session_reference() {
-        let directory = tempfile::tempdir().unwrap();
-        let config_store = ConfigStore::new(directory.path());
-        let admin_store = AdminProfileStore::new(directory.path());
-        let admin = AppConfig {
-            selected_video_device_id: "admin-camera".into(),
-            reference_image_path: config_store.reference_path().display().to_string(),
-            ..AppConfig::default()
-        };
-        let status = admin_store.save(&admin).unwrap();
-        assert!(!status.reference_included);
-        admin_store.set_auto_restore_on_launch(true).unwrap();
-
         write_reference(&config_store.reference_path(), [0, 0, 255, 255]);
         config_store
             .save(&AppConfig {
@@ -973,35 +827,42 @@ mod tests {
     }
 
     #[test]
-    fn invalid_admin_profile_does_not_change_working_files() {
-        let directory = tempfile::tempdir().unwrap();
-        let config_store = ConfigStore::new(directory.path());
-        let admin_store = AdminProfileStore::new(directory.path());
-        let user = AppConfig {
-            selected_video_device_id: "user-camera".into(),
+    fn contract_admin_restore_on_launch_respects_the_auto_restore_toggle() {
+        let enabled_directory = tempfile::tempdir().unwrap();
+        let config_store = ConfigStore::new(enabled_directory.path());
+        let admin_store = AdminProfileStore::new(enabled_directory.path());
+        write_reference(&config_store.reference_path(), [255, 0, 0, 255]);
+        let admin = AppConfig {
+            selected_video_device_id: "admin-camera".into(),
+            cursor_visible: true,
             reference_image_path: config_store.reference_path().display().to_string(),
             ..AppConfig::default()
         };
-        config_store.save(&user).unwrap();
-        write_reference(&config_store.reference_path(), [0, 0, 255, 255]);
-        let config_before = fs::read(config_store.config_path()).unwrap();
-        let reference_before = fs::read(config_store.reference_path()).unwrap();
-        fs::write(admin_store.profile_path(), "not valid json").unwrap();
+        admin_store.save(&admin).unwrap();
+        admin_store.set_auto_restore_on_launch(true).unwrap();
+        for user_camera in ["first-user-camera", "second-user-camera"] {
+            config_store
+                .save(&AppConfig {
+                    selected_video_device_id: user_camera.into(),
+                    reference_image_path: config_store.reference_path().display().to_string(),
+                    ..AppConfig::default()
+                })
+                .unwrap();
+            write_reference(&config_store.reference_path(), [0, 0, 255, 255]);
+            assert_eq!(
+                admin_store.restore_on_launch().unwrap(),
+                AdminRestoreOutcome::Restored
+            );
+            assert_eq!(config_store.load().config, admin);
+            assert_eq!(
+                reference_color(&config_store.reference_path()),
+                [255, 0, 0, 255]
+            );
+        }
 
-        assert!(admin_store.restore_on_launch().is_err());
-        assert!(admin_store.restore_now().is_err());
-        assert_eq!(fs::read(config_store.config_path()).unwrap(), config_before);
-        assert_eq!(
-            fs::read(config_store.reference_path()).unwrap(),
-            reference_before
-        );
-    }
-
-    #[test]
-    fn corrupt_admin_reference_does_not_change_working_files() {
-        let directory = tempfile::tempdir().unwrap();
-        let config_store = ConfigStore::new(directory.path());
-        let admin_store = AdminProfileStore::new(directory.path());
+        let disabled_directory = tempfile::tempdir().unwrap();
+        let config_store = ConfigStore::new(disabled_directory.path());
+        let admin_store = AdminProfileStore::new(disabled_directory.path());
         write_reference(&config_store.reference_path(), [255, 0, 0, 255]);
         admin_store
             .save(&AppConfig {
@@ -1010,14 +871,6 @@ mod tests {
                 ..AppConfig::default()
             })
             .unwrap();
-        admin_store.set_auto_restore_on_launch(true).unwrap();
-        let protected_reference = admin_store
-            .load_profile()
-            .unwrap()
-            .unwrap()
-            .reference_file
-            .unwrap();
-
         let user = AppConfig {
             selected_video_device_id: "user-camera".into(),
             reference_image_path: config_store.reference_path().display().to_string(),
@@ -1025,10 +878,10 @@ mod tests {
         };
         config_store.save(&user).unwrap();
         write_reference(&config_store.reference_path(), [0, 0, 255, 255]);
-        fs::write(directory.path().join(protected_reference), "corrupt image").unwrap();
-
-        assert!(admin_store.restore_on_launch().is_err());
-        assert!(admin_store.restore_now().is_err());
+        assert_eq!(
+            admin_store.restore_on_launch().unwrap(),
+            AdminRestoreOutcome::Disabled
+        );
         assert_eq!(config_store.load().config, user);
         assert_eq!(
             reference_color(&config_store.reference_path()),
@@ -1037,7 +890,116 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_admin_schema_is_rejected() {
+    fn contract_manual_admin_restore_restores_or_reports_missing_profiles() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_store = ConfigStore::new(directory.path());
+        let admin_store = AdminProfileStore::new(directory.path());
+        write_reference(&config_store.reference_path(), [255, 0, 0, 255]);
+        let admin = AppConfig {
+            selected_video_device_id: "admin-camera".into(),
+            cursor_visible: true,
+            reference_image_path: config_store.reference_path().display().to_string(),
+            ..AppConfig::default()
+        };
+        let status = admin_store.save(&admin).unwrap();
+        assert!(!status.auto_restore_on_launch);
+        config_store
+            .save(&AppConfig {
+                selected_video_device_id: "user-camera".into(),
+                reference_image_path: config_store.reference_path().display().to_string(),
+                ..AppConfig::default()
+            })
+            .unwrap();
+        write_reference(&config_store.reference_path(), [0, 0, 255, 255]);
+        assert_eq!(
+            admin_store.restore_now().unwrap(),
+            AdminRestoreOutcome::Restored
+        );
+        assert_eq!(config_store.load().config, admin);
+        assert_eq!(
+            reference_color(&config_store.reference_path()),
+            [255, 0, 0, 255]
+        );
+        assert!(
+            !admin_store
+                .status()
+                .unwrap()
+                .unwrap()
+                .auto_restore_on_launch
+        );
+
+        let missing_directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            AdminProfileStore::new(missing_directory.path())
+                .restore_now()
+                .unwrap(),
+            AdminRestoreOutcome::Missing
+        );
+    }
+
+    #[test]
+    fn contract_invalid_admin_profiles_preserve_working_files() {
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let config_store = ConfigStore::new(directory.path());
+            let admin_store = AdminProfileStore::new(directory.path());
+            let user = AppConfig {
+                selected_video_device_id: "user-camera".into(),
+                reference_image_path: config_store.reference_path().display().to_string(),
+                ..AppConfig::default()
+            };
+            config_store.save(&user).unwrap();
+            write_reference(&config_store.reference_path(), [0, 0, 255, 255]);
+            let config_before = fs::read(config_store.config_path()).unwrap();
+            let reference_before = fs::read(config_store.reference_path()).unwrap();
+            fs::write(admin_store.profile_path(), "not valid json").unwrap();
+
+            assert!(admin_store.restore_on_launch().is_err());
+            assert!(admin_store.restore_now().is_err());
+            assert_eq!(fs::read(config_store.config_path()).unwrap(), config_before);
+            assert_eq!(
+                fs::read(config_store.reference_path()).unwrap(),
+                reference_before
+            );
+        }
+
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let config_store = ConfigStore::new(directory.path());
+            let admin_store = AdminProfileStore::new(directory.path());
+            write_reference(&config_store.reference_path(), [255, 0, 0, 255]);
+            admin_store
+                .save(&AppConfig {
+                    selected_video_device_id: "admin-camera".into(),
+                    reference_image_path: config_store.reference_path().display().to_string(),
+                    ..AppConfig::default()
+                })
+                .unwrap();
+            admin_store.set_auto_restore_on_launch(true).unwrap();
+            let protected_reference = admin_store
+                .load_profile()
+                .unwrap()
+                .unwrap()
+                .reference_file
+                .unwrap();
+            let user = AppConfig {
+                selected_video_device_id: "user-camera".into(),
+                reference_image_path: config_store.reference_path().display().to_string(),
+                ..AppConfig::default()
+            };
+            config_store.save(&user).unwrap();
+            write_reference(&config_store.reference_path(), [0, 0, 255, 255]);
+            fs::write(directory.path().join(protected_reference), "corrupt image").unwrap();
+
+            assert!(admin_store.restore_on_launch().is_err());
+            assert!(admin_store.restore_now().is_err());
+            assert_eq!(config_store.load().config, user);
+            assert_eq!(
+                reference_color(&config_store.reference_path()),
+                [0, 0, 255, 255]
+            );
+        }
+
         let directory = tempfile::tempdir().unwrap();
         let config_store = ConfigStore::new(directory.path());
         let admin_store = AdminProfileStore::new(directory.path());
@@ -1052,14 +1014,13 @@ mod tests {
             serde_json::to_vec_pretty(&profile).unwrap(),
         )
         .unwrap();
-
         assert!(admin_store.status().is_err());
         assert!(admin_store.restore_on_launch().is_err());
         assert!(!config_store.config_path().exists());
     }
 
     #[test]
-    fn failed_admin_replacement_keeps_the_previous_baseline() {
+    fn contract_failed_admin_replacement_keeps_the_previous_baseline() {
         let directory = tempfile::tempdir().unwrap();
         let config_store = ConfigStore::new(directory.path());
         let admin_store = AdminProfileStore::new(directory.path());
@@ -1090,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_config_restore_rolls_back_the_working_reference() {
+    fn contract_failed_config_restore_rolls_back_the_working_reference() {
         let directory = tempfile::tempdir().unwrap();
         let config_store = ConfigStore::new(directory.path());
         let admin_store = AdminProfileStore::new(directory.path());

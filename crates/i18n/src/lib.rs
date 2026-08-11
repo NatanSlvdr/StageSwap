@@ -430,16 +430,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn locale_tags_accept_language_families_and_normalize() {
+    fn contract_locale_resolution_normalizes_tags_and_prefers_saved_system_then_english() {
         assert_eq!(Locale::from_tag("fr-CA"), Some(Locale::French));
         assert_eq!(Locale::from_tag("es_MX"), Some(Locale::Spanish));
         assert_eq!(Locale::from_tag("EN-gb"), Some(Locale::English));
         assert_eq!(Locale::from_tag("de-DE"), None);
         assert_eq!(Locale::Spanish.tag(), "es");
-    }
-
-    #[test]
-    fn saved_locale_wins_then_system_then_english() {
         assert_eq!(
             Locale::resolve(Some("fr-FR"), Some("es-ES")),
             Locale::French
@@ -453,17 +449,13 @@ mod tests {
     }
 
     #[test]
-    fn known_text_is_translated_and_unknown_text_is_preserved() {
+    fn contract_localization_lookup_preserves_unknown_text_and_formats_placeholders() {
         assert_eq!(text(Locale::French, "Settings"), "Paramètres");
         assert_eq!(text(Locale::Spanish, "Settings"), "Ajustes");
         assert_eq!(
             text(Locale::French, "Device supplied name"),
             "Device supplied name"
         );
-    }
-
-    #[test]
-    fn formatted_text_reorders_safe_placeholders() {
         assert_eq!(
             format_text(Locale::French, "{0} — {1}", &["98 %", "Équilibrée"]),
             "98 % — Équilibrée"
@@ -471,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn approved_terminology_is_localized_consistently() {
+    fn contract_approved_terminology_and_guided_setup_copy_are_localized_consistently() {
         let terms = [
             (
                 "Reference image",
@@ -544,10 +536,6 @@ mod tests {
             text(Locale::Spanish, "in the system tray"),
             "en el área de notificación"
         );
-    }
-
-    #[test]
-    fn guided_setup_copy_uses_the_approved_localizations() {
         assert_eq!(
             text(Locale::French, "Capture reference image"),
             "Capturer l’image de référence"
@@ -578,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn jw_library_workflow_copy_is_localized_in_every_supported_language() {
+    fn contract_jw_library_copy_is_localized_in_every_supported_language() {
         let strings = [
             "Automatically switch what Zoom sees between the webcam and JW Library presentations.",
             "Choose how StageSwap starts, stays open, and alerts you.",
@@ -676,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_does_not_restore_obsolete_user_facing_terms() {
+    fn contract_catalog_does_not_restore_obsolete_user_facing_terms() {
         let source = include_str!("lib.rs");
         for obsolete in [
             ["idle", " reference"].concat(),

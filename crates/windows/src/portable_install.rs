@@ -642,7 +642,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn managed_location_and_transient_names_are_stable() {
+    fn native_managed_location_and_transient_names_are_stable() {
         assert_eq!(MANAGED_DIRECTORY, "Programs\\StageSwap");
         assert_eq!(MANAGED_EXECUTABLE, "StageSwap.exe");
         assert_eq!(STAGING_EXECUTABLE, "StageSwap.exe.installing");
@@ -651,14 +651,14 @@ mod tests {
     }
 
     #[test]
-    fn version_relation_calls_out_downgrades_and_rebuilds() {
+    fn native_version_relation_calls_out_downgrades_and_rebuilds() {
         assert!(version_relation("1.0.0", "2.0.0", Locale::English).contains("older"));
         assert!(version_relation("2.0.0", "2.0.0", Locale::English).contains("different build"));
         assert!(version_relation("3.0.0", "2.0.0", Locale::English).contains("close gracefully"));
     }
 
     #[test]
-    fn content_comparison_detects_identical_and_changed_executables() {
+    fn native_content_comparison_detects_identical_and_changed_executables() {
         let directory = env::temp_dir().join(format!(
             "stageswap-portable-install-test-{}",
             std::process::id()

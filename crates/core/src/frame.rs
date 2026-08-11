@@ -608,7 +608,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn off_frame_is_deterministic_black_with_a_centered_stageswap_icon() {
+    fn contract_off_frame_is_deterministic_black_with_a_centered_stageswap_icon() {
         let now = Instant::now();
         let first = off_frame(FrameMetadata {
             sequence: 7,
@@ -657,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_frames() {
+    fn contract_rejects_invalid_frames() {
         let now = Instant::now();
         assert_eq!(
             Frame::new(vec![0; 16].into(), Size::new(2, 2), 4, 1, 0, now).unwrap_err(),
@@ -670,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn aspect_fit_letterboxes_and_blends() {
+    fn contract_aspect_fit_letterboxes_and_blends() {
         let now = Instant::now();
         let source = Frame::placeholder(Size::new(4, 2), 0xff20_4080, 1, 0, now);
         let fitted = source.aspect_fit(Size::new(4, 4), now);
@@ -694,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn compositor_reuses_full_size_sources_and_skips_unselected_input() {
+    fn contract_compositor_reuses_full_size_sources_and_skips_unselected_input() {
         let now = Instant::now();
         let camera = Arc::new(Frame::placeholder(Size::new(2, 2), 0xff20_4080, 1, 0, now));
         let screen = Arc::new(Frame::placeholder(Size::new(4, 4), 0xffff_ffff, 2, 0, now));
@@ -716,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn compositor_caches_letterboxing_and_blends_with_integer_weights() {
+    fn contract_compositor_caches_letterboxing_and_blends_with_integer_weights() {
         let now = Instant::now();
         let camera = Arc::new(Frame::placeholder(Size::new(4, 2), 0xff00_0000, 1, 0, now));
         let screen = Arc::new(Frame::placeholder(Size::new(4, 4), 0xffff_ffff, 2, 0, now));
@@ -748,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn aspect_fit_helper_normalizes_common_capture_sizes() {
+    fn contract_aspect_fit_sizes_and_incremental_mapping_are_stable() {
         for source_size in [
             Size::new(1280, 720),
             Size::new(1920, 1080),
@@ -788,10 +788,42 @@ mod tests {
                 assert_eq!(output, source);
             }
         }
+
+        let horizontal = (0_u8..5)
+            .flat_map(|value| [value, value, value, 0xff])
+            .collect::<Vec<_>>();
+        let mut output = vec![0; 7 * 2 * 4];
+        aspect_fit_bgra_into(
+            &horizontal,
+            Size::new(5, 1),
+            20,
+            &mut output,
+            Size::new(7, 2),
+        )
+        .unwrap();
+        let mapped = output[..7 * 4]
+            .chunks_exact(4)
+            .map(|pixel| pixel[0])
+            .collect::<Vec<_>>();
+        assert_eq!(mapped, [0, 0, 1, 2, 2, 3, 4]);
+        assert!(
+            output[7 * 4..]
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0, 0, 0, 0xff])
+        );
+
+        let vertical = (0_u8..5)
+            .flat_map(|value| [value, value, value, 0xff])
+            .collect::<Vec<_>>();
+        let mut output = vec![0; 2 * 7 * 4];
+        aspect_fit_bgra_into(&vertical, Size::new(1, 5), 4, &mut output, Size::new(2, 7)).unwrap();
+        let mapped = (0..7).map(|y| output[y * 2 * 4]).collect::<Vec<_>>();
+        assert_eq!(mapped, [0, 0, 1, 2, 2, 3, 4]);
+        assert!((0..7).all(|y| output[(y * 2 + 1) * 4..(y * 2 + 2) * 4] == [0, 0, 0, 0xff]));
     }
 
     #[test]
-    fn frame_buffer_pool_reuses_only_unshared_slots_and_is_bounded() {
+    fn contract_frame_buffer_pool_bounds_reuse_and_fallback() {
         let mut pool = FrameBufferPool::new(16, 2);
         let first = pool
             .try_write(|pixels| {
@@ -827,82 +859,45 @@ mod tests {
         assert!(reused.iter().all(|byte| *byte == 3));
         assert!(second.iter().all(|byte| *byte == 2));
         assert_eq!(pool.allocated_slots(), 2);
-    }
+        {
+            let mut pool = FrameBufferPool::new(8, 2);
+            let first = pool
+                .write_with_fallback(|pixels| {
+                    pixels.fill(1);
+                    Ok::<(), ()>(())
+                })
+                .unwrap();
+            let second = pool
+                .write_with_fallback(|pixels| {
+                    pixels.fill(2);
+                    Ok::<(), ()>(())
+                })
+                .unwrap();
+            let fallback = pool
+                .write_with_fallback(|pixels| {
+                    pixels.fill(3);
+                    Ok::<(), ()>(())
+                })
+                .unwrap();
 
-    #[test]
-    fn frame_buffer_pool_falls_back_without_dropping_and_reuses_after_release() {
-        let mut pool = FrameBufferPool::new(8, 2);
-        let first = pool
-            .write_with_fallback(|pixels| {
-                pixels.fill(1);
-                Ok::<(), ()>(())
-            })
-            .unwrap();
-        let second = pool
-            .write_with_fallback(|pixels| {
-                pixels.fill(2);
-                Ok::<(), ()>(())
-            })
-            .unwrap();
-        let fallback = pool
-            .write_with_fallback(|pixels| {
-                pixels.fill(3);
-                Ok::<(), ()>(())
-            })
-            .unwrap();
+            assert_eq!(pool.allocated_slots(), 2);
+            assert_eq!(pool.exhaustion_count(), 1);
+            assert!(fallback.iter().all(|byte| *byte == 3));
+            assert!(!Arc::ptr_eq(&fallback, &first));
+            assert!(!Arc::ptr_eq(&fallback, &second));
 
-        assert_eq!(pool.allocated_slots(), 2);
-        assert_eq!(pool.exhaustion_count(), 1);
-        assert!(fallback.iter().all(|byte| *byte == 3));
-        assert!(!Arc::ptr_eq(&fallback, &first));
-        assert!(!Arc::ptr_eq(&fallback, &second));
-
-        let first_pointer = Arc::as_ptr(&first);
-        drop(first);
-        let reused = pool
-            .write_with_fallback(|pixels| {
-                pixels.fill(4);
-                Ok::<(), ()>(())
-            })
-            .unwrap();
-        assert_eq!(Arc::as_ptr(&reused), first_pointer);
-        assert!(reused.iter().all(|byte| *byte == 4));
-        assert!(second.iter().all(|byte| *byte == 2));
-        assert!(fallback.iter().all(|byte| *byte == 3));
-    }
-
-    #[test]
-    fn aspect_fit_incremental_mapping_matches_nearest_neighbor_coordinates() {
-        let horizontal = (0_u8..5)
-            .flat_map(|value| [value, value, value, 0xff])
-            .collect::<Vec<_>>();
-        let mut output = vec![0; 7 * 2 * 4];
-        aspect_fit_bgra_into(
-            &horizontal,
-            Size::new(5, 1),
-            20,
-            &mut output,
-            Size::new(7, 2),
-        )
-        .unwrap();
-        let mapped = output[..7 * 4]
-            .chunks_exact(4)
-            .map(|pixel| pixel[0])
-            .collect::<Vec<_>>();
-        assert_eq!(mapped, [0, 0, 1, 2, 2, 3, 4]);
-        assert!(
-            output[7 * 4..]
-                .chunks_exact(4)
-                .all(|pixel| pixel == [0, 0, 0, 0xff])
-        );
-
-        let vertical = (0_u8..5)
-            .flat_map(|value| [value, value, value, 0xff])
-            .collect::<Vec<_>>();
-        let mut output = vec![0; 2 * 7 * 4];
-        aspect_fit_bgra_into(&vertical, Size::new(1, 5), 4, &mut output, Size::new(2, 7)).unwrap();
-        let mapped = (0..7).map(|y| output[y * 2 * 4]).collect::<Vec<_>>();
-        assert_eq!(mapped, [0, 0, 1, 2, 2, 3, 4]);
-        assert!((0..7).all(|y| output[(y * 2 + 1) * 4..(y * 2 + 2) * 4] == [0, 0, 0, 0xff]));
+            let first_pointer = Arc::as_ptr(&first);
+            drop(first);
+            let reused = pool
+                .write_with_fallback(|pixels| {
+                    pixels.fill(4);
+                    Ok::<(), ()>(())
+                })
+                .unwrap();
+            assert_eq!(Arc::as_ptr(&reused), first_pointer);
+            assert!(reused.iter().all(|byte| *byte == 4));
+            assert!(second.iter().all(|byte| *byte == 2));
+            assert!(fallback.iter().all(|byte| *byte == 3));
+        }
     }
 }

@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn replacement_generation_rejects_old_callbacks() {
+    fn native_replacement_generation_rejects_old_callbacks() {
         let shared = Shared::default();
         shared.generation.store(7, Ordering::Release);
         assert!(shared.is_current(7));
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn processing_failure_clears_the_session_frame() {
+    fn native_processing_failure_clears_the_session_frame() {
         let shared = Shared::default();
         shared.generation.store(3, Ordering::Release);
         *shared.latest.lock().unwrap() = Some(test_frame());
@@ -446,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn an_old_generation_cannot_clear_or_fail_a_new_session() {
+    fn native_an_old_generation_cannot_clear_or_fail_a_new_session() {
         let shared = Shared::default();
         shared.generation.store(4, Ordering::Release);
         let frame = test_frame();

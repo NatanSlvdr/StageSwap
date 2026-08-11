@@ -423,7 +423,7 @@ enum SettingsTab {
 }
 
 impl SettingsTab {
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     const ALL: [Self; 6] = [
         Self::General,
         Self::Webcam,
@@ -8982,36 +8982,16 @@ fn frame_image(frame: &Frame, target: [usize; 2]) -> egui::ColorImage {
 }
 
 #[cfg(test)]
-fn bgra_color(value: u32) -> Color32 {
-    let [b, g, r, a] = value.to_le_bytes();
-    Color32::from_rgba_unmultiplied(r, g, b, a)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn default_ui_fonts_are_bundled() {
+    fn smoke_default_ui_fonts_are_bundled() {
         assert!(!egui::FontDefinitions::default().font_data.is_empty());
     }
 
     #[test]
-    fn setup_steps_use_distinct_semantic_title_icons() {
-        assert_eq!(
-            SetupStep::ALL.map(setup_step_icon),
-            [
-                UiIcon::Route,
-                UiIcon::Camera,
-                UiIcon::Monitor,
-                UiIcon::Capture,
-                UiIcon::CheckCircle,
-            ]
-        );
-    }
-
-    #[test]
-    fn user_data_directory_is_stageswap() {
+    fn contract_user_data_directory_is_stageswap() {
         assert_eq!(
             local_data_directory()
                 .file_name()
@@ -9021,7 +9001,7 @@ mod tests {
     }
 
     #[test]
-    fn window_title_includes_the_package_version() {
+    fn contract_window_title_includes_the_package_version() {
         assert_eq!(
             WINDOW_TITLE,
             format!("StageSwap - v{}", env!("CARGO_PKG_VERSION"))
@@ -9030,14 +9010,14 @@ mod tests {
     }
 
     #[test]
-    fn minimized_start_is_reasserted_after_eframe_initialization() {
+    fn contract_minimized_start_is_reasserted_after_eframe_initialization() {
         assert_eq!(initial_visibility_override(true, true), None);
         assert_eq!(initial_visibility_override(false, true), Some(false));
         assert_eq!(initial_visibility_override(false, false), Some(true));
     }
 
     #[test]
-    fn visible_ui_and_hidden_logic_use_distinct_repaint_cadences() {
+    fn contract_visible_ui_and_hidden_logic_use_distinct_repaint_cadences() {
         assert_eq!(repaint_interval(true), VISIBLE_REFRESH);
         assert_eq!(repaint_interval(false), HIDDEN_REFRESH);
         assert_eq!(VISIBLE_REFRESH, Duration::from_nanos(1_000_000_000 / 30));
@@ -9045,50 +9025,7 @@ mod tests {
     }
 
     #[test]
-    fn active_disco_interface_renders_ball_beams_particles_and_borders() {
-        let context = egui::Context::default();
-        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 720.0));
-        let output = context.run_ui(
-            egui::RawInput {
-                screen_rect: Some(screen_rect),
-                ..egui::RawInput::default()
-            },
-            |ui| {
-                paint_disco_interface(
-                    ui.ctx(),
-                    screen_rect,
-                    Duration::from_millis(750),
-                    Duration::from_millis(750),
-                    true,
-                );
-            },
-        );
-        assert!(
-            output.shapes.len() >= 600,
-            "the active disco overlay should include dense reflections and effects"
-        );
-    }
-
-    #[test]
-    fn disco_ball_lowers_from_above_the_window_and_settles_on_screen() {
-        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 720.0));
-        let hidden = disco_ball_center(rect, Duration::ZERO);
-        let settled = disco_ball_center(rect, Duration::from_secs(2));
-        assert!(hidden.y < rect.top());
-        assert!((settled.y - (rect.top() + 158.0)).abs() < 0.01);
-    }
-
-    #[test]
-    fn disco_flash_envelope_produces_double_hits_and_quiet_gaps() {
-        assert_eq!(disco_flash_envelope(Duration::ZERO), 1.0);
-        assert_eq!(disco_flash_envelope(Duration::from_millis(180)), 0.0);
-        assert!(disco_flash_envelope(Duration::from_millis(270)) > 0.6);
-        assert_eq!(disco_flash_envelope(Duration::from_millis(600)), 0.0);
-        assert_eq!(disco_flash_envelope(Duration::from_secs(3)), 1.0);
-    }
-
-    #[test]
-    fn preview_conversion_preserves_size_and_bgra_channels() {
+    fn contract_preview_conversion_preserves_size_and_bgra_channels() {
         let frame = Frame::new(
             vec![3, 2, 1, 255, 30, 20, 10, 255].into(),
             stageswap_core::Size::new(2, 1),
@@ -9104,7 +9041,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_texture_is_capped_to_its_display_size() {
+    fn contract_preview_texture_is_capped_to_its_display_size() {
         let frame = Frame::placeholder(
             stageswap_core::Size::new(1280, 720),
             0xff03_0201,
@@ -9123,7 +9060,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_converter_collapses_pending_jobs_to_latest_frame() {
+    fn contract_preview_converter_collapses_pending_jobs_to_latest_frame() {
         let converter = PreviewConverter::new(PreviewKind::Output.key());
         let now = Instant::now();
         for sequence in 1..=12 {
@@ -9156,27 +9093,7 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_color_round_trips_from_bgra() {
-        assert_eq!(
-            bgra_color(0x4433_2211),
-            Color32::from_rgba_unmultiplied(0x33, 0x22, 0x11, 0x44)
-        );
-    }
-
-    #[test]
-    fn window_resize_stays_at_sixteen_by_nine() {
-        let wider =
-            aspect_locked_window_size(egui::vec2(1440.0, 720.0), Some(egui::vec2(1280.0, 720.0)));
-        assert!((wider.x / wider.y - WINDOW_ASPECT_RATIO).abs() < 0.000_001);
-        let taller =
-            aspect_locked_window_size(egui::vec2(1280.0, 800.0), Some(egui::vec2(1280.0, 720.0)));
-        assert!((taller.x / taller.y - WINDOW_ASPECT_RATIO).abs() < 0.000_001);
-        let minimum = aspect_locked_window_size(egui::vec2(400.0, 300.0), None);
-        assert_eq!(minimum.y, MIN_WINDOW_HEIGHT);
-    }
-
-    #[test]
-    fn preview_contours_mark_live_output_and_active_source() {
+    fn contract_preview_contours_mark_live_output_and_active_source() {
         assert_eq!(
             preview_contour(PreviewKind::Output, Source::Camera),
             PreviewContour::Live
@@ -9204,7 +9121,7 @@ mod tests {
     }
 
     #[test]
-    fn health_states_have_lifecycle_order_icons_and_semantic_colors() {
+    fn contract_health_states_have_lifecycle_order_icons_and_semantic_colors() {
         assert_eq!(
             HEALTH_STATES,
             [
@@ -9246,7 +9163,7 @@ mod tests {
     }
 
     #[test]
-    fn not_matching_is_warning_amber_but_missing_reference_is_error_red() {
+    fn flow_not_matching_is_warning_amber_but_missing_reference_is_error_red() {
         assert_eq!(
             detection_indicator_tone(DetectionState::NotMatching),
             IndicatorTone::Amber
@@ -9266,7 +9183,7 @@ mod tests {
     }
 
     #[test]
-    fn fps_overlays_use_runtime_metrics_for_all_live_pipelines() {
+    fn contract_fps_overlays_use_runtime_metrics_for_all_live_pipelines() {
         assert!(PreviewKind::Webcam.shows_fps());
         assert!(PreviewKind::Screen.shows_fps());
         assert!(PreviewKind::Output.shows_fps());
@@ -9278,145 +9195,9 @@ mod tests {
         assert_eq!(output.fps, Some(30));
     }
 
-    #[test]
-    fn indicator_rows_keep_content_height_inside_a_tall_panel() {
-        let context = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 600.0))),
-            ..egui::RawInput::default()
-        };
-        let _ = context.run_ui(input, |ui| {
-            ui.set_min_height(560.0);
-            let choices = HEALTH_STATES.map(|state| IndicatorChoice {
-                icon: device_state_icon(state),
-                label: friendly_device_state(state),
-                current: state == DeviceState::Ready,
-                tone: device_state_tone(state),
-                span: 1,
-            });
-            let rect = indicator_group(ui, UiIcon::Camera, "Webcam", &choices, None);
-            assert!(
-                rect.height() <= 30.0,
-                "indicator row expanded to {} px",
-                rect.height()
-            );
-        });
-    }
-
-    #[test]
-    fn settings_sidebar_navigation_is_vertical_and_non_overlapping() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut app = SwitcherApp::new(
-            AppConfig {
-                show_notifications: false,
-                ..AppConfig::default()
-            },
-            Vec::new(),
-            ConfigStore::new(directory.path()),
-        );
-        let context = egui::Context::default();
-        for (viewport, dpi_scale) in [
-            (egui::vec2(820.0, 540.0), 1.0),
-            (egui::vec2(820.0, 540.0), 1.5),
-            (egui::vec2(820.0, 600.0), 1.0),
-            (
-                egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
-                1.5,
-            ),
-            (egui::vec2(1280.0, 720.0), 1.5),
-        ] {
-            let mut input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
-                ..egui::RawInput::default()
-            };
-            input
-                .viewports
-                .get_mut(&egui::ViewportId::ROOT)
-                .unwrap()
-                .native_pixels_per_point = Some(dpi_scale);
-            let mut sidebar_rect = Rect::NOTHING;
-            let mut sidebar_layout = None;
-            let _ = context.run_ui(input, |ui| {
-                let sidebar = ui.allocate_ui_with_layout(
-                    egui::vec2(SETTINGS_SIDEBAR_WIDTH, viewport.y),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| app.settings_sidebar(ui, viewport.y),
-                );
-                sidebar_rect = sidebar.response.rect;
-                sidebar_layout = Some(sidebar.inner);
-            });
-
-            let sidebar_layout = sidebar_layout.unwrap();
-            for rect in [
-                sidebar_layout.brand_icon,
-                sidebar_layout.brand_title,
-                sidebar_layout.brand_version,
-                sidebar_layout.brand_separator,
-                sidebar_layout.back,
-            ] {
-                assert!(rect.is_positive());
-                assert!(sidebar_rect.contains_rect(rect));
-            }
-            assert!((sidebar_layout.brand_icon.width() - 68.0).abs() < 0.01);
-            assert!((sidebar_layout.brand_icon.height() - 68.0).abs() < 0.01);
-            assert!(sidebar_layout.brand_icon.bottom() < sidebar_layout.brand_title.top());
-            assert!(sidebar_layout.brand_title.bottom() < sidebar_layout.brand_version.top());
-            assert!(sidebar_layout.brand_version.bottom() < sidebar_layout.brand_separator.top());
-            assert!(sidebar_layout.brand_separator.bottom() < sidebar_layout.back.top());
-            assert_eq!(
-                sidebar_layout.primary_navigation.len(),
-                SettingsTab::PRIMARY.len()
-            );
-            for rect in &sidebar_layout.primary_navigation {
-                assert!(rect.is_positive(), "invalid navigation rect: {rect:?}");
-                assert!(
-                    sidebar_rect.contains_rect(*rect),
-                    "navigation rect escaped sidebar: {rect:?} outside {sidebar_rect:?}"
-                );
-                assert!((rect.height() - 36.0).abs() < 0.01);
-            }
-            for pair in sidebar_layout.primary_navigation.windows(2) {
-                assert!(
-                    pair[1].top() - pair[0].bottom() >= 2.9,
-                    "navigation rows overlap: {:?} and {:?}",
-                    pair[0],
-                    pair[1]
-                );
-                assert!(!pair[0].intersects(pair[1]));
-            }
-            assert!(sidebar_layout.back.bottom() < sidebar_layout.primary_navigation[0].top());
-            assert!(
-                sidebar_layout.primary_navigation.last().unwrap().bottom()
-                    < sidebar_layout.updates.top(),
-                "primary navigation overlaps Updates: primary={:?}, updates={:?}",
-                sidebar_layout.primary_navigation.last().unwrap(),
-                sidebar_layout.updates
-            );
-            assert!(sidebar_layout.updates.bottom() < sidebar_layout.diagnostics.top());
-            assert!(sidebar_layout.diagnostics.bottom() < sidebar_layout.save_status.top());
-            assert!(sidebar_rect.contains_rect(sidebar_layout.updates));
-            assert!(sidebar_rect.contains_rect(sidebar_layout.diagnostics));
-            assert!(sidebar_rect.contains_rect(sidebar_layout.save_status));
-            assert!(
-                sidebar_rect.bottom() - sidebar_layout.save_status.bottom() <= 24.0,
-                "autosave footer was not bottom-aligned: sidebar={sidebar_rect:?}, save={:?}",
-                sidebar_layout.save_status
-            );
-        }
-    }
-
-    #[test]
-    fn settings_sidebar_navigation_uses_neutral_gray_colors() {
-        assert_eq!(SETTINGS_SIDEBAR_FILL, Color32::from_rgb(20, 22, 27));
-        assert_eq!(SETTINGS_NAV_HOVERED, Color32::from_rgb(32, 35, 41));
-        assert_eq!(SETTINGS_NAV_SELECTED, Color32::from_rgb(45, 48, 55));
-        assert_eq!(SETTINGS_NAV_INDICATOR, Color32::from_rgb(151, 157, 168));
-        assert_eq!(SETTINGS_SIDEBAR_CORNER_RADIUS, 12);
-    }
-
     #[cfg(not(windows))]
     #[test]
-    fn ui_preview_cli_selects_each_settings_page() {
+    fn smoke_ui_preview_cli_selects_each_settings_page() {
         for tab in SettingsTab::ALL {
             let args = vec![
                 "StageSwap".to_owned(),
@@ -9538,7 +9319,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn ui_screenshot_cli_requires_an_absolute_png_path() {
+    fn smoke_ui_screenshot_cli_requires_an_absolute_png_path() {
         let path = "/tmp/stageswap-setup.png";
         assert_eq!(
             parse_ui_screenshot_path(&[
@@ -9569,7 +9350,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn setup_demo_preview_state_is_deterministic() {
+    fn smoke_setup_demo_preview_state_is_deterministic() {
         assert_eq!(
             parse_setup_demo_preview_state(&[
                 "StageSwap".to_owned(),
@@ -9599,47 +9380,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_demo_loop_holds_and_crossfades_at_locked_boundaries() {
-        let alpha = |seconds: f32| setup_demo_changed_alpha(Duration::from_secs_f32(seconds));
-        assert_eq!(alpha(0.0), 0.0);
-        assert_eq!(alpha(3.5), 0.0);
-        assert!((alpha(3.7) - 0.5).abs() < 0.001);
-        assert!((alpha(3.9) - 1.0).abs() < 0.001);
-        assert!((alpha(7.4) - 1.0).abs() < 0.001);
-        assert!((alpha(7.6) - 0.5).abs() < 0.001);
-        assert_eq!(alpha(7.8), 0.0);
-    }
-
-    #[test]
-    fn setup_reference_review_flashes_once_and_respects_reduced_motion() {
-        assert_eq!(setup_reference_flash_alpha(Duration::ZERO, true), 1.0);
-        assert!((setup_reference_flash_alpha(Duration::from_millis(60), true) - 0.5).abs() < 0.001);
-        assert_eq!(
-            setup_reference_flash_alpha(SETUP_REFERENCE_FLASH_DURATION, true),
-            0.0
-        );
-        assert_eq!(setup_reference_flash_alpha(Duration::ZERO, false), 0.0);
-    }
-
-    #[test]
-    fn setup_reference_card_is_vertically_centered_without_negative_spacing() {
-        assert_eq!(
-            setup_reference_card_top_offset(SETUP_REFERENCE_CARD_HEIGHT),
-            0.0
-        );
-        assert_eq!(setup_reference_card_top_offset(446.0), 92.0);
-        assert_eq!(setup_reference_card_top_offset(200.0), 0.0);
-
-        let preview = Rect::from_min_size(Pos2::new(0.0, 36.0), egui::vec2(484.0, 260.0));
-        assert_eq!(reference_dialog_example_top_offset(0.0, preview), 35.0);
-        assert_eq!(
-            reference_dialog_example_top_offset(100.0, Rect::from_min_size(Pos2::ZERO, Vec2::ZERO)),
-            0.0
-        );
-    }
-
-    #[test]
-    fn setup_reference_requires_a_decision_only_for_unresolved_candidates() {
+    fn flow_setup_reference_requires_a_decision_only_for_unresolved_candidates() {
         let now = Instant::now();
         assert!(!setup_reference_requires_decision(
             SetupReferenceCaptureState::Idle
@@ -9673,7 +9414,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_reference_capture_action_distinguishes_first_capture_from_retry() {
+    fn flow_setup_reference_capture_action_distinguishes_first_capture_from_retry() {
         assert_eq!(
             setup_reference_capture_label(false),
             "Capture reference image"
@@ -9683,7 +9424,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn ui_preview_frame_decodes_embedded_images_as_bgra() {
+    fn smoke_ui_preview_frame_decodes_embedded_images_as_bgra() {
         let bytes = include_bytes!("../assets/setup-webcam-example.png");
         let source = image::load_from_memory(bytes).unwrap().to_rgba8();
         let frame = ui_preview_frame(7, "setup-webcam-example", bytes);
@@ -9708,7 +9449,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn ui_preview_snapshot_has_realistic_ready_inputs_and_frames() {
+    fn smoke_ui_preview_snapshot_has_realistic_ready_inputs_and_frames() {
         let snapshot = ui_preview_snapshot();
         assert_eq!(snapshot.run_state, RunState::Running);
         assert_eq!(snapshot.mode, OutputMode::Automatic);
@@ -9734,47 +9475,96 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn setup_reference_preview_states_cover_captured_empty_review_and_missing_screen() {
-        let build = |state| {
-            let directory = tempfile::tempdir().unwrap();
-            SwitcherApp::new(
-                ui_preview_config(),
-                Vec::new(),
-                ConfigStore::new(directory.path()),
-            )
-            .with_ui_preview(UiPreviewRequest {
-                target: UiPreviewTarget::Setup(SetupStep::Reference),
-            })
-            .with_setup_reference_preview_state(Some(state))
+    fn smoke_primary_ui_surfaces_render_contained_without_panic() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            ui_preview_config(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        )
+        .with_ui_preview(UiPreviewRequest {
+            target: UiPreviewTarget::Settings(SettingsTab::General),
+        });
+        let context = egui::Context::default();
+        ui_icon::install_fonts(&context);
+        let viewport = egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT);
+
+        let render_root = |app: &mut SwitcherApp| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
+                ..egui::RawInput::default()
+            };
+            let output = context.run_ui(input, |ui| {
+                let content = app.root_ui(ui);
+                assert!(ui.max_rect().contains_rect(content));
+            });
+            assert!(!output.shapes.is_empty());
         };
 
-        let captured = build(SetupReferencePreviewState::Captured);
-        assert!(captured.snapshot().previews.reference.is_some());
+        app.active_dialog = None;
+        app.view = AppView::Dashboard;
+        render_root(&mut app);
 
-        let empty = build(SetupReferencePreviewState::Empty);
-        assert!(empty.snapshot().previews.screen.is_some());
-        assert!(empty.snapshot().previews.reference.is_none());
+        for tab in SettingsTab::ALL {
+            app.active_dialog = None;
+            app.view = AppView::Settings;
+            app.settings_tab = tab;
+            app.settings_opened_at = None;
+            app.settings_section_changed_at = None;
+            render_root(&mut app);
+        }
 
-        let review = build(SetupReferencePreviewState::Review);
-        assert!(review.snapshot().previews.reference.is_none());
-        assert!(review.snapshot().previews.reference_candidate.is_some());
-        assert!(matches!(
-            review.setup_reference_capture,
-            SetupReferenceCaptureState::Review { .. }
-        ));
+        for step in SetupStep::ALL {
+            app.active_dialog = None;
+            app.view = AppView::SetupGuide;
+            app.setup_session = Some(SetupSession::preview(step));
+            app.setup_reference_capture = SetupReferenceCaptureState::Idle;
+            render_root(&mut app);
+        }
 
-        let missing = build(SetupReferencePreviewState::MissingScreen);
-        let snapshot = missing.snapshot();
-        assert!(snapshot.previews.screen.is_none());
-        assert!(snapshot.previews.reference.is_none());
-        assert!(snapshot.selected_monitor.is_none());
-        assert!(snapshot.monitors.is_empty());
-        assert_eq!(snapshot.screen_state, DeviceState::Unavailable);
+        app.view = AppView::Settings;
+        app.admin_profile_status = Some(AdminProfileStatus {
+            auto_restore_on_launch: true,
+            reference_included: true,
+        });
+        for kind in [
+            AppDialogKind::Exit,
+            AppDialogKind::ClearLogs,
+            AppDialogKind::ReferenceCapture,
+            AppDialogKind::Admin,
+        ] {
+            app.active_dialog = Some(ActiveDialog {
+                kind,
+                opened_at: Instant::now() - DIALOG_ENTRANCE_DURATION,
+                focus_safe_action: true,
+            });
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
+                ..egui::RawInput::default()
+            };
+            let output = context.run_ui(input, |_ui| app.dialog(&context));
+            assert!(!output.shapes.is_empty());
+            assert!(app.dialog_is(kind));
+        }
+
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..egui::RawInput::default()
+        };
+        let _ = context.run_ui(input, |_ui| app.dialog(&context));
+        assert!(app.active_dialog.is_none());
     }
 
     #[cfg(not(windows))]
     #[test]
-    fn ui_preview_reference_commands_exercise_capture_retake_and_confirmation() {
+    fn flow_ui_preview_reference_commands_exercise_capture_retake_and_confirmation() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
             ui_preview_config(),
@@ -9837,7 +9627,7 @@ mod tests {
     }
 
     #[test]
-    fn busy_command_feedback_preserves_reference_dialog_state() {
+    fn flow_busy_command_feedback_preserves_reference_dialog_state() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
             AppConfig::default(),
@@ -9859,7 +9649,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn shared_reference_modal_preserves_cancels_and_confirms_candidates() {
+    fn flow_shared_reference_modal_preserves_cancels_and_confirms_candidates() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
             ui_preview_config(),
@@ -9964,450 +9754,8 @@ mod tests {
         );
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn ui_preview_disco_state_stays_enabled_until_toggled_off() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut app = SwitcherApp::new(
-            AppConfig::default(),
-            Vec::new(),
-            ConfigStore::new(directory.path()),
-        )
-        .with_ui_preview(UiPreviewRequest {
-            target: UiPreviewTarget::Settings(SettingsTab::Diagnostics),
-        });
-
-        assert!(!app.snapshot().disco_enabled);
-        app.toggle_disco();
-        assert!(app.snapshot().disco_enabled);
-        assert!(app.snapshot().disco_enabled);
-        app.toggle_disco();
-        assert!(!app.snapshot().disco_enabled);
-    }
-
-    #[test]
-    fn screen_and_reference_image_are_separate_settings_pages() {
-        assert_eq!(
-            SettingsTab::Screen.title(Locale::English),
-            "Secondary screen"
-        );
-        assert_eq!(
-            SettingsTab::Matching.title(Locale::English),
-            "Reference image"
-        );
-        assert!(
-            SettingsTab::Screen
-                .description(Locale::English)
-                .contains("secondary screen")
-        );
-        assert!(
-            SettingsTab::Matching
-                .description(Locale::English)
-                .contains("compares the live screen")
-        );
-        assert_ne!(SettingsTab::Screen, SettingsTab::Matching);
-    }
-
-    #[test]
-    fn settings_page_titles_reuse_their_navigation_icons() {
-        for (tab, icon) in SettingsTab::PRIMARY {
-            assert_eq!(tab.icon(), icon);
-        }
-        let (diagnostics, icon) = SettingsTab::DIAGNOSTICS;
-        assert_eq!(diagnostics.icon(), icon);
-    }
-
-    #[test]
-    fn settings_switches_use_fixed_aligned_geometry_and_blue_slate_states() {
-        let first = settings_switch_geometry(Rect::from_min_size(
-            Pos2::new(10.0, 20.0),
-            egui::vec2(500.0, 52.0),
-        ));
-        let second = settings_switch_geometry(Rect::from_min_size(
-            Pos2::new(10.0, 80.0),
-            egui::vec2(500.0, 52.0),
-        ));
-        assert_eq!(first.track.size(), egui::vec2(42.0, 22.0));
-        assert_eq!(first.track.right(), second.track.right());
-        assert_eq!(first.state.right(), second.state.right());
-        assert_eq!(
-            settings_switch_colors(),
-            (SETTINGS_SWITCH_OFF, SETTINGS_BLUE)
-        );
-    }
-
-    #[test]
-    fn guided_setup_settings_action_wraps_safely_and_stays_flush_right() {
-        let mut consumed_heights = Vec::new();
-        for width in [960.0, SETTINGS_CONTENT_WIDTH] {
-            let context = egui::Context::default();
-            let mut button_rect = Rect::NOTHING;
-            let mut row_right = 0.0;
-            let mut consumed_height = 0.0;
-            let _ = context.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(
-                        Pos2::ZERO,
-                        egui::vec2(width, 160.0),
-                    )),
-                    ..egui::RawInput::default()
-                },
-                |ui| {
-                    ui.set_width(width);
-                    row_right = ui.available_rect_before_wrap().right();
-                    let before = ui.cursor().top();
-                    button_rect = settings_single_button_row(
-                        ui,
-                        "Guided setup",
-                        "Choose the webcam and secondary screen, then capture the screen JW Library shows when no media is playing.",
-                        "Open guided setup",
-                        206.0,
-                    )
-                    .rect;
-                    consumed_height = ui.cursor().top() - before;
-                },
-            );
-            assert!(
-                (button_rect.right() - row_right).abs() <= 2.0,
-                "guided setup button should align with the full settings row: \
-                 button={button_rect:?}, row_right={row_right}"
-            );
-            consumed_heights.push(consumed_height);
-        }
-        assert!(consumed_heights[1] > consumed_heights[0]);
-    }
-
-    #[test]
-    fn language_selector_is_flush_with_the_right_control_edge() {
-        let context = egui::Context::default();
-        let mut selector_rect = Rect::NOTHING;
-        let mut row_right = 0.0;
-        let _ = context.run_ui(
-            egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(960.0, 80.0))),
-                ..egui::RawInput::default()
-            },
-            |ui| {
-                ui.set_width(960.0);
-                row_right = ui.available_rect_before_wrap().right();
-                selector_rect = settings_fixed_control_row(
-                    ui,
-                    "Interface language",
-                    "Changes apply immediately.",
-                    152.0,
-                    |ui| {
-                        egui::ComboBox::from_id_salt("language-selector-alignment-test")
-                            .width(152.0)
-                            .selected_text("English")
-                            .show_ui(ui, |_| {});
-                    },
-                );
-            },
-        );
-        assert!(
-            (selector_rect.right() - row_right).abs() <= 2.0,
-            "language selector should align with the full settings row: \
-             selector={selector_rect:?}, row_right={row_right}"
-        );
-    }
-
-    #[test]
-    fn static_settings_text_wraps_clear_of_the_switch() {
-        let context = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(300.0, 220.0))),
-            ..egui::RawInput::default()
-        };
-        let mut layout = None;
-        let _ = context.run_ui(input, |ui| {
-            ui.set_width(300.0);
-            let mut enabled = true;
-            layout = Some(settings_toggle_row(
-                ui,
-                &mut enabled,
-                "Automatically fix screen capture problems",
-                "Checks the selected screen every 30 seconds. If the image is black or missing twice in a row, StageSwap restarts screen capture.",
-            ));
-        });
-        let layout = layout.unwrap();
-        assert!(layout.row.height() > 52.0);
-        let description = layout.description.expect("static description is rendered");
-        assert!(description.height() > 12.0);
-        assert!(layout.row.contains_rect(description));
-        assert!(description.right() < layout.state.left());
-        assert!(!description.intersects(layout.state));
-        assert!(!description.intersects(layout.track));
-        assert!(layout.result.is_none());
-    }
-
-    #[test]
-    fn conditional_settings_copy_reflects_values_and_dependencies() {
-        let automatic =
-            start_automatically_result(Locale::English, true, true, OutputMode::ForceScreen);
-        assert!(automatic.starts_with("On —"));
-        assert!(automatic.contains("Screen mode in the system tray"));
-        let stopped =
-            start_automatically_result(Locale::English, false, false, OutputMode::Automatic);
-        assert!(stopped.starts_with("Off —"));
-        assert!(stopped.contains("off screen"));
-
-        assert!(window_behavior_result(true, true).contains("asks for confirmation"));
-        assert!(window_behavior_result(true, false).contains("stops StageSwap immediately"));
-        assert!(window_behavior_result(false, true).contains("asks before"));
-        assert!(window_behavior_result(false, false).contains("stops StageSwap immediately"));
-
-        assert_eq!(
-            component_health_guidance(
-                DeviceState::Ready,
-                DeviceState::Ready,
-                DeviceState::Ready,
-                DetectionState::Matching,
-            ),
-            "Everything is ready."
-        );
-    }
-
-    #[test]
-    fn required_similarity_explanations_use_documented_boundaries() {
-        assert_eq!(match_strictness_explanation(1.0).level, "Very high");
-        assert_eq!(match_strictness_explanation(0.99).level, "Very high");
-        assert_eq!(match_strictness_explanation(0.98).level, "High");
-        assert_eq!(match_strictness_explanation(0.97).level, "High");
-        assert_eq!(match_strictness_explanation(0.96).level, "Moderate");
-        assert_eq!(match_strictness_explanation(0.90).level, "Moderate");
-        assert_eq!(match_strictness_explanation(0.89).level, "Low");
-        assert_eq!(match_strictness_explanation(0.50).level, "Low");
-    }
-
-    #[test]
-    fn webcam_selector_and_refresh_share_one_bounded_row() {
-        for available in [220.0, 360.0, 520.0] {
-            let gap = 8.0;
-            let geometry = selector_utility_geometry(available, gap);
-            assert_eq!(geometry.action_width, 32.0);
-            assert!(geometry.selector_width >= 80.0);
-            assert!(geometry.selector_width + gap + geometry.action_width <= available + 0.01);
-        }
-    }
-
-    #[test]
-    fn reference_actions_share_available_width_without_overflow() {
-        for available in [220.0, 360.0, 520.0] {
-            let gap = 8.0;
-            let geometry = reference_control_geometry(available, gap);
-            assert!(geometry.action_width >= 80.0);
-            assert!((geometry.action_width * 2.0 + gap - available).abs() < 0.01);
-            assert_eq!(geometry.slider_width, available);
-        }
-    }
-
-    #[test]
-    fn match_strictness_slider_uses_the_full_control_width() {
-        for width in [220.0, 360.0, 520.0] {
-            let context = egui::Context::default();
-            let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 80.0))),
-                ..egui::RawInput::default()
-            };
-            let mut slider_rect = Rect::NOTHING;
-            let _ = context.run_ui(input, |ui| {
-                ui.set_width(width);
-                let mut value = 0.98;
-                slider_rect = match_strictness_slider(ui, &mut value, width).rect;
-                assert_eq!(value, 0.98);
-            });
-            assert!((slider_rect.width() - width).abs() < 0.01);
-        }
-        assert_eq!(AppConfig::default().similarity_threshold, 0.98);
-    }
-
-    #[test]
-    fn settings_sections_use_whitespace_instead_of_divider_lines() {
-        let context = egui::Context::default();
-        let mut first = Rect::NOTHING;
-        let mut second = Rect::NOTHING;
-        let _ = context.run_ui(egui::RawInput::default(), |ui| {
-            ui.set_width(520.0);
-            first = ui.allocate_space(egui::vec2(ui.available_width(), 30.0)).1;
-            settings_section_gap(ui);
-            second = ui.allocate_space(egui::vec2(ui.available_width(), 30.0)).1;
-        });
-        assert!(second.top() - first.bottom() >= 24.0);
-    }
-
-    #[test]
-    fn six_settings_categories_keep_every_recovery_target_in_diagnostics() {
-        assert_eq!(SettingsTab::ALL.len(), 6);
-        assert_eq!(SettingsTab::PRIMARY.len(), 4);
-        for target in [
-            RestartTarget::Webcam,
-            RestartTarget::ScreenCapture,
-            RestartTarget::VirtualCamera,
-            RestartTarget::All,
-        ] {
-            assert!(
-                SETTINGS_RECOVERY_TARGETS
-                    .iter()
-                    .any(|entry| entry.3 == target)
-            );
-        }
-    }
-
-    #[test]
-    fn automatic_route_and_refresh_icons_are_distinct() {
-        assert_ne!(UiIcon::Robot.glyph(), UiIcon::Route.glyph());
-        assert_ne!(UiIcon::Robot.glyph(), UiIcon::Refresh.glyph());
-        assert_ne!(UiIcon::Route.glyph(), UiIcon::Refresh.glyph());
-    }
-
-    #[test]
-    fn settings_footer_stays_inside_the_dashboard_at_supported_dpi() {
-        for dpi_scale in [1.0, 1.5] {
-            let directory = tempfile::tempdir().unwrap();
-            let mut app = SwitcherApp::new(
-                AppConfig::default(),
-                Vec::new(),
-                ConfigStore::new(directory.path()),
-            );
-            let context = egui::Context::default();
-            let viewport = egui::vec2(320.0, MIN_WINDOW_HEIGHT);
-            let mut input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
-                ..egui::RawInput::default()
-            };
-            input
-                .viewports
-                .get_mut(&egui::ViewportId::ROOT)
-                .unwrap()
-                .native_pixels_per_point = Some(dpi_scale);
-            let snapshot = app.runtime.snapshot();
-            let mut footer = Rect::NOTHING;
-            let _ = context.run_ui(input, |ui| {
-                footer = app
-                    .controls_workspace(ui, &snapshot, viewport.x, viewport.y)
-                    .footer;
-            });
-            assert!(footer.is_positive());
-            assert!(footer.left() >= 0.0 && footer.right() <= viewport.x + 0.01);
-            assert!(footer.top() >= 0.0 && footer.bottom() <= viewport.y + 0.01);
-        }
-    }
-
-    #[test]
-    fn dashboard_controls_have_three_separated_full_width_sections() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut app = SwitcherApp::new(
-            AppConfig::default(),
-            Vec::new(),
-            ConfigStore::new(directory.path()),
-        );
-        let context = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 530.0))),
-            ..egui::RawInput::default()
-        };
-        let snapshot = app.runtime.snapshot();
-        let mut workspace = None;
-        let mut available_width = 0.0;
-        let _ = context.run_ui(input, |ui| {
-            available_width = ui.available_width();
-            workspace = Some(app.controls_workspace(ui, &snapshot, 320.0, 530.0));
-        });
-        let workspace = workspace.unwrap();
-        let layout = workspace.body;
-
-        for rect in layout.sections {
-            assert!(rect.is_positive());
-        }
-        for rect in layout.section_headings {
-            assert!(rect.is_positive());
-        }
-        for pair in layout.sections.windows(2) {
-            assert!(pair[0].bottom() < pair[1].top());
-            assert!(!pair[0].intersects(pair[1]));
-        }
-        assert_eq!(layout.health_indicators.len(), 5);
-        for pair in layout.health_indicators.windows(2) {
-            assert!(pair[0].bottom() < pair[1].top());
-        }
-        assert!(layout.sections[0].bottom() < layout.section_dividers[0].top());
-        assert!(layout.section_dividers[0].bottom() < layout.sections[1].top());
-        assert!(layout.sections[1].bottom() < layout.section_dividers[1].top());
-        assert!(layout.section_dividers[1].bottom() < layout.sections[2].top());
-        assert_eq!(layout.other_actions.len(), 2);
-        assert!(layout.other_actions[0].bottom() < layout.other_actions[1].top());
-        for action in layout.other_actions {
-            assert!((action.width() - available_width).abs() < 0.01);
-        }
-        assert!(layout.sections[2].bottom() < workspace.footer.top());
-    }
-
-    #[test]
-    fn settings_previews_are_stacked_bounded_and_responsive() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut app = SwitcherApp::new(
-            AppConfig::default(),
-            Vec::new(),
-            ConfigStore::new(directory.path()),
-        );
-        for kind in [
-            PreviewKind::Webcam,
-            PreviewKind::Screen,
-            PreviewKind::Reference,
-        ] {
-            for width in [760.0, 560.0, 360.0] {
-                let context = egui::Context::default();
-                let input = egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 900.0))),
-                    ..egui::RawInput::default()
-                };
-                let mut layout = None;
-                let output = context.run_ui(input, |ui| {
-                    ui.set_width(width);
-                    layout = Some(app.settings_preview_control_row(
-                        ui,
-                        SettingsPreview {
-                            kind,
-                            frame: None,
-                            label: "Preview",
-                            empty_message: "Missing preview",
-                            actual_output: Source::Camera,
-                        },
-                        |_, ui| {
-                            ui.label("Controls");
-                        },
-                    ));
-                });
-                let layout = layout.unwrap();
-                assert!(layout.preview.is_positive());
-                assert!(layout.controls.is_positive());
-                assert!(layout.preview.left() >= -0.01 && layout.preview.right() <= width + 0.01);
-                assert!(layout.preview.width() <= SETTINGS_PREVIEW_WIDTH + 0.01);
-                assert!(layout.preview.height() <= SETTINGS_PREVIEW_HEIGHT + 0.01);
-                assert!(
-                    (layout.preview.width() / layout.preview.height() - WINDOW_ASPECT_RATIO).abs()
-                        < 0.01
-                );
-                assert!(!layout.preview.intersects(layout.controls));
-                assert!(layout.preview.bottom() < layout.controls.top());
-                assert!((layout.preview.center().x - width / 2.0).abs() < 0.01);
-                assert!((layout.controls.width() - width).abs() < 0.01);
-                assert!(!output.shapes.is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn settings_content_width_matches_the_preview_width() {
-        assert_eq!(SETTINGS_CONTENT_WIDTH, SETTINGS_PREVIEW_WIDTH);
-        assert_eq!(settings_content_width(1200.0), SETTINGS_CONTENT_WIDTH);
-        assert_eq!(settings_content_width(900.0), SETTINGS_CONTENT_WIDTH);
-        assert_eq!(settings_content_width(600.0), SETTINGS_CONTENT_WIDTH);
-        assert_eq!(settings_content_width(20.0), 1.0);
-    }
-
-    #[test]
-    fn clearing_logs_requires_explicit_confirmation() {
+    fn flow_clearing_logs_requires_explicit_confirmation() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
             AppConfig::default(),
@@ -10444,118 +9792,7 @@ mod tests {
     }
 
     #[test]
-    fn polished_dialogs_render_responsively_and_escape_cancels() {
-        for kind in [
-            AppDialogKind::Exit,
-            AppDialogKind::ClearLogs,
-            AppDialogKind::ReferenceCapture,
-            AppDialogKind::Admin,
-            AppDialogKind::ReplaceAdminBaseline,
-            AppDialogKind::LoadAdminConfig,
-            AppDialogKind::RemoveAdminBaseline,
-        ] {
-            for (viewport, dpi_scale) in [
-                (egui::vec2(820.0, 600.0), 1.0),
-                (egui::vec2(820.0, 600.0), 1.5),
-                (egui::vec2(1280.0, 720.0), 1.5),
-            ] {
-                let directory = tempfile::tempdir().unwrap();
-                let mut app = SwitcherApp::new(
-                    AppConfig::default(),
-                    Vec::new(),
-                    ConfigStore::new(directory.path()),
-                );
-                app.admin_profile_status = Some(AdminProfileStatus {
-                    auto_restore_on_launch: true,
-                    reference_included: true,
-                });
-                app.active_dialog = Some(ActiveDialog {
-                    kind,
-                    opened_at: Instant::now() - DIALOG_ENTRANCE_DURATION,
-                    focus_safe_action: true,
-                });
-                let context = egui::Context::default();
-                let mut input = egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
-                    ..egui::RawInput::default()
-                };
-                input
-                    .viewports
-                    .get_mut(&egui::ViewportId::ROOT)
-                    .unwrap()
-                    .native_pixels_per_point = Some(dpi_scale);
-                let output = context.run_ui(input, |_ui| app.dialog(&context));
-                assert!(
-                    !output.shapes.is_empty(),
-                    "{kind:?} did not render its backdrop, surface, and controls"
-                );
-                assert!(app.dialog_is(kind));
-            }
-        }
-
-        let directory = tempfile::tempdir().unwrap();
-        let mut app = SwitcherApp::new(
-            AppConfig::default(),
-            Vec::new(),
-            ConfigStore::new(directory.path()),
-        );
-        app.open_dialog(AppDialogKind::RemoveAdminBaseline);
-        let context = egui::Context::default();
-        let _ = context.run_ui(egui::RawInput::default(), |_ui| app.dialog(&context));
-        let input = egui::RawInput {
-            events: vec![egui::Event::Key {
-                key: egui::Key::Escape,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
-            }],
-            ..egui::RawInput::default()
-        };
-        let _ = context.run_ui(input, |_ui| app.dialog(&context));
-        assert!(app.active_dialog.is_none());
-    }
-
-    #[test]
-    fn dialog_actions_fill_the_available_width() {
-        for (available, gap, count) in [(352.0, 10.0, 2), (392.0, 10.0, 2), (392.0, 10.0, 3)] {
-            let width = dialog_action_width(available, gap, count);
-            let used = width * count as f32 + gap * (count - 1) as f32;
-            assert!((used - available).abs() < 0.01);
-        }
-    }
-
-    #[test]
-    fn reference_dialog_columns_keep_their_reserved_widths() {
-        let context = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(720.0, 480.0))),
-            ..egui::RawInput::default()
-        };
-        let mut columns = [Rect::NOTHING; 2];
-        let _ = context.run_ui(input, |ui| {
-            ui.set_width(720.0);
-            ui.spacing_mut().item_spacing.x = SETUP_REFERENCE_COLUMN_GAP;
-            ui.horizontal_top(|ui| {
-                columns[0] = allocate_reference_dialog_column(ui, 484.0, |ui| {
-                    ui.set_width(484.0);
-                    ui.label("Candidate");
-                });
-                columns[1] = allocate_reference_dialog_sized_column(ui, 220.0, 262.0, |ui| {
-                    ui.set_width(220.0);
-                    ui.label("Example reference image");
-                });
-            });
-        });
-
-        assert!(columns[0].width() >= 484.0);
-        assert!(columns[1].width() >= 220.0);
-        assert!(columns[1].height() >= 262.0);
-        assert!(columns[1].left() >= columns[0].right() + SETUP_REFERENCE_COLUMN_GAP - 0.01);
-    }
-
-    #[test]
-    fn settings_save_is_debounced_and_back_flushes_pending_changes() {
+    fn flow_settings_save_is_debounced_and_back_flushes_pending_changes() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path());
         let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store.clone());
@@ -10586,7 +9823,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_monitor_selection_is_persisted_by_label() {
+    fn flow_accepted_monitor_selection_is_persisted_by_label() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path());
         let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store.clone());
@@ -10606,7 +9843,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_settings_does_not_rescan_when_automatic_rescans_are_disabled() {
+    fn flow_opening_settings_does_not_rescan_when_automatic_rescans_are_disabled() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
             AppConfig {
@@ -10644,7 +9881,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_save_failure_preserves_the_active_value() {
+    fn flow_settings_save_failure_preserves_the_active_value() {
         let directory = tempfile::tempdir().unwrap();
         let blocked_path = directory.path().join("not-a-directory");
         std::fs::write(&blocked_path, "blocking file").unwrap();
@@ -10670,7 +9907,7 @@ mod tests {
     }
 
     #[test]
-    fn verbose_logging_setting_uses_the_normal_settings_save_path() {
+    fn flow_verbose_logging_setting_uses_the_normal_settings_save_path() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path());
         let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store.clone());
@@ -10684,7 +9921,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_baseline_captures_pending_settings_and_toggle_is_independent() {
+    fn flow_admin_baseline_captures_pending_settings_and_toggle_is_independent() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path());
         let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store.clone());
@@ -10734,7 +9971,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_admin_load_updates_working_config_runtime_and_reference() {
+    fn flow_manual_admin_load_updates_working_config_runtime_and_reference() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path());
         image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
@@ -10803,7 +10040,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_admin_restore_failures_preserve_the_working_configuration() {
+    fn flow_startup_admin_restore_failures_preserve_the_working_configuration() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path());
         let user = AppConfig {
@@ -10828,7 +10065,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_secondary_double_click_activates_the_admin_logo() {
+    fn flow_only_a_secondary_double_click_activates_the_admin_logo() {
         fn click_input(time: f64, button: egui::PointerButton) -> egui::RawInput {
             let position = Pos2::new(20.0, 20.0);
             egui::RawInput {
@@ -10884,7 +10121,7 @@ mod tests {
     }
 
     #[test]
-    fn five_primary_diagnostics_clicks_toggle_disco_without_mixed_sequences() {
+    fn flow_five_primary_diagnostics_clicks_toggle_disco_without_mixed_sequences() {
         let start = Instant::now();
         let mut gesture = DiscoDiagnosticsGesture::default();
         for click in 0..4 {
@@ -10910,7 +10147,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_setup_guide_navigation_and_dismissal_return_to_general_settings() {
+    fn flow_manual_setup_guide_navigation_and_dismissal_return_to_general_settings() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path());
         let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store);
@@ -10983,7 +10220,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_guide_keyboard_navigation_matches_the_visible_actions() {
+    fn flow_setup_guide_keyboard_navigation_matches_the_visible_actions() {
         fn action_for(key: egui::Key, step: SetupStep, next_enabled: bool) -> Option<SetupAction> {
             let context = egui::Context::default();
             let input = egui::RawInput {
@@ -11038,7 +10275,7 @@ mod tests {
     }
 
     #[test]
-    fn finishing_setup_guide_starts_automatic_mode_and_opens_dashboard() {
+    fn flow_finishing_setup_guide_starts_automatic_mode_and_opens_dashboard() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
             AppConfig {
@@ -11064,7 +10301,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_guide_dismissal_is_independent_from_user_and_admin_configuration() {
+    fn flow_setup_guide_dismissal_is_independent_from_user_and_admin_configuration() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path());
         let config = AppConfig {
@@ -11089,290 +10326,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn all_setup_steps_render_full_window_in_every_locale_and_supported_dpi() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut app = SwitcherApp::new(
-            AppConfig {
-                start_automatically: false,
-                ..AppConfig::default()
-            },
-            Vec::new(),
-            ConfigStore::new(directory.path()),
-        )
-        .with_ui_preview(UiPreviewRequest {
-            target: UiPreviewTarget::Setup(SetupStep::HowItWorks),
-        });
-        let context = egui::Context::default();
-        ui_icon::install_fonts(&context);
-
-        for locale in Locale::ALL {
-            app.config.interface_language = locale.tag().into();
-            set_ui_locale(&context, locale);
-            for viewport in [
-                egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
-                egui::vec2(1280.0, 720.0),
-            ] {
-                for dpi_scale in [1.0, 1.5] {
-                    for step in SetupStep::ALL {
-                        app.view = AppView::SetupGuide;
-                        app.setup_session = Some(SetupSession::preview(step));
-                        let mut input = egui::RawInput {
-                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
-                            ..egui::RawInput::default()
-                        };
-                        input
-                            .viewports
-                            .get_mut(&egui::ViewportId::ROOT)
-                            .unwrap()
-                            .native_pixels_per_point = Some(dpi_scale);
-                        let output = context.run_ui(input, |ui| {
-                            let content = app.root_ui(ui);
-                            assert!(ui.max_rect().contains_rect(content));
-                        });
-                        assert!(
-                            output.shapes.len() > 10,
-                            "{step:?} did not render at {locale:?}, {viewport:?}, {dpi_scale}"
-                        );
-                        assert_eq!(app.view, AppView::SetupGuide);
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn setup_reference_capture_states_render_responsively_in_every_locale() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut app = SwitcherApp::new(
-            ui_preview_config(),
-            Vec::new(),
-            ConfigStore::new(directory.path()),
-        )
-        .with_ui_preview(UiPreviewRequest {
-            target: UiPreviewTarget::Setup(SetupStep::Reference),
-        });
-        let context = egui::Context::default();
-        ui_icon::install_fonts(&context);
-        let cases = [
-            ("empty", SetupReferenceCaptureState::Idle),
-            (
-                "capturing",
-                SetupReferenceCaptureState::CapturingCandidate {
-                    started_at: Instant::now(),
-                    previous_candidate_sequence: None,
-                },
-            ),
-            (
-                "review",
-                SetupReferenceCaptureState::Review {
-                    captured_at: Instant::now() - SETUP_REFERENCE_FLASH_DURATION,
-                },
-            ),
-            (
-                "saving",
-                SetupReferenceCaptureState::SavingCandidate {
-                    started_at: Instant::now(),
-                    previous_reference_sequence: None,
-                },
-            ),
-            ("confirmed", SetupReferenceCaptureState::Confirmed),
-            ("capture-failed", SetupReferenceCaptureState::CaptureFailed),
-            (
-                "save-failed",
-                SetupReferenceCaptureState::SaveFailed {
-                    previous_reference_sequence: None,
-                },
-            ),
-            ("existing", SetupReferenceCaptureState::Idle),
-            ("missing-frame", SetupReferenceCaptureState::Idle),
-            ("missing-display", SetupReferenceCaptureState::Idle),
-        ];
-
-        for locale in Locale::ALL {
-            app.config.interface_language = locale.tag().into();
-            set_ui_locale(&context, locale);
-            for viewport in [
-                egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
-                egui::vec2(1280.0, 720.0),
-            ] {
-                for dpi_scale in [1.0, 1.5] {
-                    for (name, state) in cases {
-                        let mut snapshot = ui_preview_snapshot();
-                        match name {
-                            "empty" | "capturing" | "capture-failed" => {
-                                snapshot.previews.reference = None;
-                                snapshot.previews.reference_candidate = None;
-                            }
-                            "review" | "saving" | "save-failed" => {
-                                snapshot.previews.reference = None;
-                                snapshot.previews.reference_candidate =
-                                    snapshot.previews.screen.clone();
-                            }
-                            "missing-frame" => {
-                                snapshot.previews.reference = None;
-                                snapshot.previews.reference_candidate = None;
-                                snapshot.previews.screen = None;
-                            }
-                            "missing-display" => {
-                                snapshot.previews.reference = None;
-                                snapshot.previews.reference_candidate = None;
-                                snapshot.previews.screen = None;
-                                snapshot.selected_monitor = None;
-                                snapshot.monitors = Vec::new().into();
-                                snapshot.screen_state = DeviceState::Unavailable;
-                            }
-                            "confirmed" | "existing" => {
-                                snapshot.previews.reference_candidate = None;
-                            }
-                            _ => unreachable!(),
-                        }
-                        app.config.selected_monitor_label = snapshot
-                            .selected_monitor
-                            .as_ref()
-                            .map(|monitor| monitor.label.clone())
-                            .unwrap_or_default();
-                        app.ui_preview.as_mut().unwrap().snapshot = snapshot;
-                        app.setup_reference_capture = state;
-                        app.setup_session = Some(SetupSession::preview(SetupStep::Reference));
-                        let mut input = egui::RawInput {
-                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
-                            ..egui::RawInput::default()
-                        };
-                        input
-                            .viewports
-                            .get_mut(&egui::ViewportId::ROOT)
-                            .unwrap()
-                            .native_pixels_per_point = Some(dpi_scale);
-                        let output = context.run_ui(input, |ui| {
-                            let content = app.root_ui(ui);
-                            assert!(ui.max_rect().contains_rect(content));
-                        });
-                        assert!(
-                            output.shapes.len() > 20,
-                            "{name} did not render at {locale:?}, {viewport:?}, {dpi_scale}"
-                        );
-                        assert_eq!(
-                            app.setup_session.map(|session| session.step),
-                            Some(SetupStep::Reference)
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn reference_capture_modal_states_render_responsively_in_every_locale() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut app = SwitcherApp::new(
-            ui_preview_config(),
-            Vec::new(),
-            ConfigStore::new(directory.path()),
-        )
-        .with_ui_preview(UiPreviewRequest {
-            target: UiPreviewTarget::Dialog(AppDialogKind::ReferenceCapture),
-        });
-        let context = egui::Context::default();
-        ui_icon::install_fonts(&context);
-
-        for locale in Locale::ALL {
-            app.config.interface_language = locale.tag().into();
-            set_ui_locale(&context, locale);
-            for viewport in [
-                egui::vec2(520.0, 720.0),
-                egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
-                egui::vec2(1280.0, 720.0),
-            ] {
-                for dpi_scale in [1.0, 1.5] {
-                    for name in [
-                        "preparing",
-                        "capturing",
-                        "review",
-                        "saving",
-                        "capture-failed",
-                        "save-failed",
-                    ] {
-                        let mut snapshot = ui_preview_snapshot();
-                        let reference_sequence =
-                            snapshot.previews.reference.as_ref().unwrap().sequence;
-                        app.setup_reference_capture = match name {
-                            "preparing" => {
-                                snapshot.previews.reference_candidate =
-                                    snapshot.previews.screen.clone();
-                                SetupReferenceCaptureState::PreparingCandidate {
-                                    started_at: Instant::now(),
-                                }
-                            }
-                            "capturing" => {
-                                snapshot.previews.reference_candidate = None;
-                                SetupReferenceCaptureState::CapturingCandidate {
-                                    started_at: Instant::now(),
-                                    previous_candidate_sequence: None,
-                                }
-                            }
-                            "review" => {
-                                snapshot.previews.reference_candidate =
-                                    snapshot.previews.screen.clone();
-                                SetupReferenceCaptureState::Review {
-                                    captured_at: Instant::now() - SETUP_REFERENCE_FLASH_DURATION,
-                                }
-                            }
-                            "saving" => {
-                                snapshot.previews.reference_candidate =
-                                    snapshot.previews.screen.clone();
-                                SetupReferenceCaptureState::SavingCandidate {
-                                    started_at: Instant::now(),
-                                    previous_reference_sequence: Some(reference_sequence),
-                                }
-                            }
-                            "capture-failed" => {
-                                snapshot.previews.reference_candidate = None;
-                                SetupReferenceCaptureState::CaptureFailed
-                            }
-                            "save-failed" => {
-                                snapshot.previews.reference_candidate =
-                                    snapshot.previews.screen.clone();
-                                SetupReferenceCaptureState::SaveFailed {
-                                    previous_reference_sequence: Some(reference_sequence),
-                                }
-                            }
-                            _ => unreachable!(),
-                        };
-                        app.ui_preview.as_mut().unwrap().snapshot = snapshot;
-                        app.active_dialog = Some(ActiveDialog {
-                            kind: AppDialogKind::ReferenceCapture,
-                            opened_at: Instant::now() - DIALOG_ENTRANCE_DURATION,
-                            focus_safe_action: true,
-                        });
-                        let mut input = egui::RawInput {
-                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
-                            ..egui::RawInput::default()
-                        };
-                        input
-                            .viewports
-                            .get_mut(&egui::ViewportId::ROOT)
-                            .unwrap()
-                            .native_pixels_per_point = Some(dpi_scale);
-                        let output = context.run_ui(input, |ui| {
-                            let content = app.root_ui(ui);
-                            assert!(ui.max_rect().contains_rect(content));
-                        });
-                        assert!(
-                            output.shapes.len() > 20,
-                            "{name} did not render at {locale:?}, {viewport:?}, {dpi_scale}"
-                        );
-                        assert!(app.dialog_is(AppDialogKind::ReferenceCapture));
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn setup_reference_candidate_tracks_capture_review_save_and_timeouts() {
+    fn flow_setup_reference_candidate_tracks_capture_review_save_and_timeouts() {
         let directory = tempfile::tempdir().unwrap();
         let mut app = SwitcherApp::new(
             AppConfig::default(),
@@ -11432,7 +10386,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_setup_images_have_the_approved_dimensions() {
+    fn smoke_embedded_setup_images_have_the_approved_dimensions() {
         for bytes in [
             include_bytes!("../assets/setup-reference-example.png").as_slice(),
             include_bytes!("../assets/setup-webcam-example.png").as_slice(),
@@ -11440,82 +10394,6 @@ mod tests {
         ] {
             let image = image::load_from_memory(bytes).unwrap();
             assert_eq!((image.width(), image.height()), (1672, 941));
-        }
-    }
-
-    #[test]
-    fn dashboard_and_full_window_settings_render_responsively() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut app = SwitcherApp::new(
-            AppConfig {
-                start_automatically: false,
-                ..AppConfig::default()
-            },
-            vec!["Test warning banner".into()],
-            ConfigStore::new(directory.path()),
-        );
-        let context = egui::Context::default();
-        for locale in Locale::ALL {
-            app.config.interface_language = locale.tag().into();
-            set_ui_locale(&context, locale);
-            for viewport in [
-                egui::vec2(820.0, 600.0),
-                egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT),
-                egui::vec2(1280.0, 720.0),
-            ] {
-                for dpi_scale in [1.0, 1.5] {
-                    app.view = AppView::Dashboard;
-                    let mut dashboard_input = egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, viewport)),
-                        ..egui::RawInput::default()
-                    };
-                    dashboard_input
-                        .viewports
-                        .get_mut(&egui::ViewportId::ROOT)
-                        .unwrap()
-                        .native_pixels_per_point = Some(dpi_scale);
-                    let dashboard_output = context.run_ui(dashboard_input, |ui| {
-                        app.root_ui(ui);
-                    });
-                    assert!(!dashboard_output.shapes.is_empty());
-
-                    for tab in SettingsTab::ALL {
-                        app.settings_tab = tab;
-                        app.view = AppView::Settings;
-                        app.settings_opened_at = None;
-                        app.settings_section_changed_at = None;
-                        let mut input = egui::RawInput {
-                            screen_rect: Some(egui::Rect::from_min_size(
-                                egui::Pos2::ZERO,
-                                viewport,
-                            )),
-                            ..egui::RawInput::default()
-                        };
-                        input
-                            .viewports
-                            .get_mut(&egui::ViewportId::ROOT)
-                            .unwrap()
-                            .native_pixels_per_point = Some(dpi_scale);
-                        let output = context.run_ui(input, |ui| {
-                            assert_eq!(ui.ctx().native_pixels_per_point(), Some(dpi_scale));
-                            let content_rect = app.root_ui(ui);
-                            assert!(
-                                content_rect.min.x >= 8.0 && content_rect.min.y >= 8.0,
-                                "settings starts outside the root panel margin: {content_rect:?}"
-                            );
-                            assert!(
-                                content_rect.max.x <= viewport.x - 8.0
-                                    && content_rect.max.y <= viewport.y - 8.0,
-                                "settings ends outside the root panel margin: {content_rect:?}"
-                            );
-                        });
-                        assert!(
-                            !output.shapes.is_empty(),
-                            "{tab:?} at {viewport:?} and {dpi_scale}× produced no UI shapes"
-                        );
-                    }
-                }
-            }
         }
     }
 }

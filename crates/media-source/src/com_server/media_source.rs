@@ -473,7 +473,8 @@ mod tests {
     }
 
     #[test]
-    fn source_starts_stops_and_shuts_down_with_rgb32_descriptor() -> windows_core::Result<()> {
+    fn native_source_starts_stops_and_shuts_down_with_rgb32_descriptor() -> windows_core::Result<()>
+    {
         let _test_lock = super::super::TEST_LOCK
             .lock()
             .expect("media-source test lock poisoned");

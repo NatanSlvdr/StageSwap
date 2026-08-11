@@ -53,6 +53,20 @@ For cross-target linting, run:
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 ```
 
+### Test design
+
+Create a test when it protects important product functionality, a documented contract, or a failure path that would be costly or difficult to detect manually. Good candidates include:
+
+- stable frame, media, IPC, configuration, localization, update, timing, persistence, and recovery behavior;
+- state transitions and user actions that cross component boundaries, especially startup, retries, rollback, bounded queues, and restart behavior; and
+- deterministic boundary cases, invariants, migrations, malformed input, limits, and platform-adapter behavior that can regress without an obvious UI symptom.
+
+Before adding a test, check whether an existing test can be extended or consolidated with the same behavior. Prefer one focused contract or flow test that covers complementary assertions over multiple near-duplicates.
+
+UI tests should be limited to representative rendering, containment, accessibility-relevant state, and meaningful interaction transitions. Do not add tests solely for exact coordinates, colors, spacing, icon shape counts, animation geometry, exhaustive locale/DPI matrices, or other implementation details that are better validated through the deterministic UI preview and manual visual review. Avoid broad smoke tests that only prove that many unrelated screens do not panic; keep smoke coverage small and intentional.
+
+Use the category prefixes `contract_`, `flow_`, `smoke_`, and `native_` so tests can be filtered without creating extra test binaries. Native or ignored tests are appropriate when they exercise real Windows, COM, camera, display, tray, or virtual-camera boundaries that cannot be meaningfully validated on macOS; keep those environment-dependent checks separate from the host-visible suite.
+
 ### UI preview
 
 Launch the real StageSwap Settings interface with deterministic mock cameras, displays, reference imagery, and healthy runtime states:

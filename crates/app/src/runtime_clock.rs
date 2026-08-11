@@ -46,7 +46,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn virtual_clock_advances_without_sleeping() {
+    fn flow_virtual_clock_advances_without_sleeping() {
         let start = Instant::now();
         let clock = VirtualRuntimeClock::new(start);
         clock.advance(Duration::from_secs(30));

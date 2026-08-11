@@ -193,7 +193,7 @@ impl FrameHeader {
 mod tests {
     use super::*;
     #[test]
-    fn round_trips_explicit_forty_byte_header() {
+    fn contract_round_trips_explicit_forty_byte_header() {
         let header = FrameHeader {
             sequence: 9,
             size: Size::new(1280, 720),
@@ -210,7 +210,7 @@ mod tests {
         );
     }
     #[test]
-    fn rejects_oversized_and_malformed_frames() {
+    fn contract_rejects_oversized_and_malformed_frames() {
         let invalid = FrameHeader {
             sequence: 1,
             size: Size::new(1920, 1080),
@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn expected_windows_pipe_disconnects_are_not_transport_failures() {
+    fn contract_expected_windows_pipe_disconnects_are_not_transport_failures() {
         for error in [109, 232, 233, 995] {
             assert!(is_expected_pipe_disconnect(error));
         }
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_enforces_sequence_invalidation_and_two_second_expiry() {
+    fn contract_cache_enforces_sequence_invalidation_and_two_second_expiry() {
         let now = Instant::now();
         let header = FrameHeader {
             sequence: 1,

@@ -54,7 +54,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deadlines_do_not_drift_after_late_work() {
+    fn contract_pacer_deadlines_do_not_drift_and_skip_long_gaps() {
         let start = Instant::now();
         let interval = Duration::from_millis(10);
         let mut pacer = FramePacer::new(start, interval);
@@ -63,10 +63,22 @@ mod tests {
         assert_eq!(pacer.deadline(), start + interval);
         assert_eq!(pacer.advance(start + Duration::from_millis(35)), 2);
         assert_eq!(pacer.deadline(), start + Duration::from_millis(40));
+        let interval = Duration::from_nanos(1_000_000_000 / 30);
+        for gap in [
+            Duration::from_secs(60),
+            Duration::from_secs(60 * 60),
+            Duration::from_secs(60 * 60 * 24),
+        ] {
+            let mut pacer = FramePacer::new(start, interval);
+            let skipped = pacer.advance(start + gap);
+            assert!(skipped >= gap.as_secs() * 29);
+            assert!(pacer.deadline() > start + gap);
+            assert!(pacer.deadline() <= start + gap + interval);
+        }
     }
 
     #[test]
-    fn early_tolerance_accepts_display_aligned_arrivals() {
+    fn contract_early_tolerance_accepts_display_aligned_arrivals() {
         let start = Instant::now();
         let interval = Duration::from_nanos(1_000_000_000 / 30);
         let pacer = FramePacer::new(start + interval, interval);
@@ -76,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn decimates_common_display_rates_to_thirty_frames_per_second() {
+    fn contract_decimates_common_display_rates_to_thirty_frames_per_second() {
         let output_interval = Duration::from_nanos(1_000_000_000 / 30);
         for input_interval in [
             Duration::from_nanos(1_000_000_000 / 60),
@@ -99,23 +111,6 @@ mod tests {
                 (accepted - expected).abs() <= 1,
                 "accepted {accepted}, expected {expected}"
             );
-        }
-    }
-
-    #[test]
-    fn advances_constant_time_across_long_gaps() {
-        let start = Instant::now();
-        let interval = Duration::from_nanos(1_000_000_000 / 30);
-        for gap in [
-            Duration::from_secs(60),
-            Duration::from_secs(60 * 60),
-            Duration::from_secs(60 * 60 * 24),
-        ] {
-            let mut pacer = FramePacer::new(start, interval);
-            let skipped = pacer.advance(start + gap);
-            assert!(skipped >= gap.as_secs() * 29);
-            assert!(pacer.deadline() > start + gap);
-            assert!(pacer.deadline() <= start + gap + interval);
         }
     }
 }

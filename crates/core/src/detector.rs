@@ -75,7 +75,7 @@ impl DebouncedDetector {
 mod tests {
     use super::*;
     #[test]
-    fn applies_five_three_debounce() {
+    fn contract_applies_five_three_debounce() {
         let mut detector = DebouncedDetector::new(DetectorSettings::default());
         for _ in 0..4 {
             assert_eq!(detector.update(0.99, true), DetectionState::Unknown);

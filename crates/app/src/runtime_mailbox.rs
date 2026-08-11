@@ -197,7 +197,7 @@ mod tests {
     use stageswap_core::{AppConfig, OutputMode, RestartTarget};
 
     #[test]
-    fn ordered_queue_reports_busy_without_blocking() {
+    fn flow_ordered_queue_reports_busy_without_blocking() {
         let (mailbox, inbox) = CommandMailbox::bounded(1);
         assert_eq!(mailbox.dispatch(Command::Start), CommandDispatch::Queued);
         assert_eq!(
@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_and_mode_are_last_wins() {
+    fn flow_settings_and_mode_are_last_wins() {
         let (mailbox, inbox) = CommandMailbox::bounded(1);
         let first = AppConfig {
             cursor_visible: false,
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_bypasses_a_full_queue() {
+    fn flow_shutdown_bypasses_a_full_queue() {
         let (mailbox, inbox) = CommandMailbox::bounded(1);
         assert_eq!(mailbox.dispatch(Command::Start), CommandDispatch::Queued);
         assert_eq!(mailbox.dispatch(Command::Exit), CommandDispatch::Queued);
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_pending_restart_is_coalesced_but_a_later_retry_is_allowed() {
+    fn flow_duplicate_pending_restart_is_coalesced_but_a_later_retry_is_allowed() {
         let (mailbox, inbox) = CommandMailbox::bounded(2);
         let restart = Command::Restart(RestartTarget::ScreenCapture);
         assert_eq!(mailbox.dispatch(restart.clone()), CommandDispatch::Queued);

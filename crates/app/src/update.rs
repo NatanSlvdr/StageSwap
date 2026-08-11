@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_and_beta_select_their_expected_versions() {
+    fn contract_stable_and_beta_select_their_expected_versions() {
         let current = ReleaseVersion::parse("1.0.0").unwrap();
         assert_eq!(
             select_update(&releases_json(), UpdateChannel::Stable, current)
@@ -467,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn current_and_older_versions_are_not_updates() {
+    fn contract_current_and_older_versions_are_not_updates() {
         let current = ReleaseVersion::parse("2.0.0").unwrap();
         assert!(
             select_update(&releases_json(), UpdateChannel::Beta, current)
@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn checksum_requires_matching_metadata_filename_and_digest() {
+    fn contract_checksum_requires_matching_metadata_filename_and_digest() {
         let version = ReleaseVersion::parse("2.3.4").unwrap();
         let filename = "StageSwap_win64_v2.3.4.exe";
         let text = format!(
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn update_notifications_are_deduplicated_per_channel() {
+    fn contract_update_notifications_dedupe_and_persist_per_channel() {
         let mut state = UpdateNotificationState {
             schema_version: 1,
             ..UpdateNotificationState::default()
@@ -502,15 +502,7 @@ mod tests {
         assert!(state.should_notify(UpdateChannel::Stable, version));
         assert!(!state.should_notify(UpdateChannel::Stable, version));
         assert!(state.should_notify(UpdateChannel::Beta, version));
-    }
-
-    #[test]
-    fn update_notification_state_persists_per_channel() {
         let directory = tempfile::tempdir().unwrap();
-        let mut state = UpdateNotificationState {
-            schema_version: 1,
-            ..UpdateNotificationState::default()
-        };
         state.should_notify(
             UpdateChannel::Stable,
             ReleaseVersion::parse("4.0.0").unwrap(),

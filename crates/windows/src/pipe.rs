@@ -448,7 +448,7 @@ mod tests {
     use std::time::Instant;
 
     #[test]
-    fn duplicate_pipe_publisher_is_rejected_during_startup() {
+    fn native_duplicate_pipe_publisher_is_rejected_during_startup() {
         let name = format!(r"\\.\pipe\StageSwap.PublisherTest.{}", std::process::id());
         let first = FramePublisher::start(&name).expect("first publisher should own the pipe");
         let second = FramePublisher::start(&name);
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn publishing_replaces_the_latest_frame_without_copying_its_pixels() {
+    fn native_publishing_replaces_the_latest_frame_without_copying_its_pixels() {
         let name = format!(r"\\.\pipe\StageSwap.LatestTest.{}", std::process::id());
         let publisher = FramePublisher::start(&name).unwrap();
         let first = Frame::placeholder(Size::new(2, 2), 0xff00_0000, 1, 0, Instant::now());

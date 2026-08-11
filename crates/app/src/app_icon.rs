@@ -29,7 +29,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_icon_is_square_rgba_with_transparent_corners() {
+    fn contract_canonical_icon_is_square_rgba_with_transparent_corners() {
         let icon = load(None).expect("embedded icon should decode");
         assert_eq!((icon.width, icon.height), (512, 512));
         assert_eq!(icon.rgba.len(), 512 * 512 * 4);
@@ -43,10 +43,6 @@ mod tests {
             .filter(|pixel| pixel[3] == 255)
             .count();
         assert!(opaque_pixels > 512 * 512 / 2);
-    }
-
-    #[test]
-    fn tray_icon_resizes_to_requested_dimensions() {
         let icon = load(Some(32)).expect("embedded tray icon should decode");
         assert_eq!((icon.width, icon.height), (32, 32));
         assert_eq!(icon.rgba.len(), 32 * 32 * 4);

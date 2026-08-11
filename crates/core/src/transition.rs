@@ -114,7 +114,7 @@ impl Default for TransitionController {
 mod tests {
     use super::*;
     #[test]
-    fn fade_reverses_without_a_jump() {
+    fn contract_fade_reverses_without_a_jump() {
         let start = Instant::now();
         let mut transition = TransitionController::default();
         transition.tick(start);

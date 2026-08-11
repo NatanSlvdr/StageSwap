@@ -219,7 +219,7 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn repeated_pipe_payloads_reuse_slots_after_warmup() {
+    fn native_repeated_pipe_payloads_reuse_slots_after_warmup() {
         let mut pool = FrameBufferPool::new(16, CAPTURE_FRAME_POOL_CAPACITY);
         let mut first_reader = Cursor::new(vec![1; 16]);
         let first = read_payload(&mut first_reader, &mut pool, 16)
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_pipe_pool_drains_dropped_payload_without_aliasing() {
+    fn native_exhausted_pipe_pool_drains_dropped_payload_without_aliasing() {
         let mut pool = FrameBufferPool::new(4, 2);
         let mut reader = Cursor::new(vec![1; 4]);
         let first = read_payload(&mut reader, &mut pool, 4).unwrap().unwrap();

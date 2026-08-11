@@ -93,7 +93,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn known_vector_matches() {
+    fn contract_known_vector_matches() {
         assert_eq!(
             hex(&sha256(b"abc")),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"

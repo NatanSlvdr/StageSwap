@@ -581,7 +581,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn payload_source_names_are_stable_and_versioned() {
+    fn native_payload_source_names_are_stable_and_versioned() {
         assert_eq!(
             payload_source_file_name(b"test"),
             "StageSwapSource-f9e6e6ef197c2b25.dll"
@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn deployment_identity_is_stageswap() {
+    fn native_deployment_identity_is_stageswap() {
         assert_eq!(DEPLOYMENT_DIRECTORY_NAME, "StageSwap");
         assert_eq!(RUN_VALUE, "StageSwap");
         assert_eq!(SOURCE_FILE, "StageSwapSource.dll");
@@ -605,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn only_owned_dll_names_are_managed() {
+    fn native_only_owned_dll_names_are_managed() {
         let directory = Path::new(r"C:\Program Files\StageSwap");
         assert!(is_managed_source(&directory.join(SOURCE_FILE), directory));
         assert!(is_managed_source(
@@ -623,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_screen_camera_paths_are_not_owned() {
+    fn native_automatic_screen_camera_paths_are_not_owned() {
         let directory = Path::new(r"C:\Program Files\StageSwap");
         assert!(!is_managed_source(
             Path::new(
@@ -634,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_command_is_quoted_and_status_comparison_is_case_insensitive() {
+    fn native_startup_command_is_quoted_and_status_comparison_is_case_insensitive() {
         let expected = startup_command(Path::new(r"C:\Program Files\StageSwap\StageSwap.exe"));
         assert_eq!(
             expected,

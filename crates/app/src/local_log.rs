@@ -116,7 +116,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exports_and_clears_local_jsonl_logs() {
+    fn contract_exports_and_clears_local_jsonl_logs() {
         let directory = tempfile::tempdir().unwrap();
         let log = LocalLog::new(directory.path().join("logs"), 14);
         log.write("info", "test", "ONE", "first");

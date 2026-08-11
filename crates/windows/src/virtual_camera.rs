@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_shutdown_extended_event_marks_camera_failed() -> windows_core::Result<()> {
+    fn native_pipeline_shutdown_extended_event_marks_camera_failed() -> windows_core::Result<()> {
         // SAFETY: initializes Media Foundation for event construction.
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
         let _foundation = MediaFoundation;
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_virtual_camera_registration_is_already_removed() {
+    fn native_missing_virtual_camera_registration_is_already_removed() {
         let error = Error::from_hresult(MF_E_INVALIDREQUEST);
         assert!(virtual_camera_registration_is_absent(&error));
         assert!(!virtual_camera_registration_is_absent(
@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn virtual_camera_identity_is_stageswap() {
+    fn native_virtual_camera_identity_is_stageswap() {
         assert_eq!(SOURCE_ID, "{4ABA794D-7B23-449C-8467-CE74A41C2820}");
         assert_eq!(
             PIPE_ATTRIBUTE,

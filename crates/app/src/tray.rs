@@ -305,7 +305,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn automation_menu_tracks_run_state() {
+    fn contract_automation_menu_tracks_run_state() {
         assert_eq!(
             automation_menu_state(RunState::Starting, Locale::English),
             ("Stop automatic switching".into(), true)
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires an interactive Windows notification area"]
-    fn tray_icon_and_all_retained_menu_actions_build() {
+    fn contract_tray_icon_and_all_retained_menu_actions_build() {
         let tray = Tray::new(Locale::English).expect("tray should build");
         assert_ne!(tray.show.id(), tray.automation.id());
         assert_ne!(tray.automatic.id(), tray.camera.id());

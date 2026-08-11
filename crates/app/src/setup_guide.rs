@@ -317,7 +317,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn setup_steps_have_stable_bidirectional_boundaries() {
+    fn flow_setup_steps_have_stable_bidirectional_boundaries() {
         assert_eq!(SetupStep::HowItWorks.previous(), None);
         assert_eq!(SetupStep::Ready.next(), None);
         for (index, step) in SetupStep::ALL.into_iter().enumerate() {
@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn page_transition_fades_out_switches_and_fades_in() {
+    fn flow_page_transition_fades_out_switches_and_fades_in() {
         let mut session = SetupSession::preview(SetupStep::HowItWorks);
         session.transition_to(SetupStep::Webcam, true);
         let started_at = session.transition_started_at.unwrap();
@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn reduced_motion_changes_pages_immediately() {
+    fn flow_reduced_motion_changes_pages_immediately() {
         let mut session = SetupSession::preview(SetupStep::HowItWorks);
         session.transition_to(SetupStep::Webcam, false);
         assert_eq!(session.step, SetupStep::Webcam);
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tutorial_completion_field_remains_compatible() {
+    fn flow_legacy_tutorial_completion_field_remains_compatible() {
         let state: SetupUiState =
             serde_json::from_str(r#"{"schema_version":1,"tutorial_completed":true}"#).unwrap();
         assert!(state.setup_guide_dismissed);
@@ -372,21 +372,15 @@ mod tests {
     }
 
     #[test]
-    fn fresh_install_starts_and_completion_is_persisted() {
+    fn flow_setup_state_initialization_and_completion_respect_install_status() {
         let directory = tempfile::tempdir().unwrap();
         let store = SetupStateStore::new(directory.path());
 
         assert!(store.initialize(false).show_setup_guide);
         store.mark_completed().unwrap();
         assert!(!store.initialize(false).show_setup_guide);
-    }
-
-    #[test]
-    fn existing_install_is_suppressed_without_changing_app_config() {
-        let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.json");
         fs::write(&config_path, b"existing config").unwrap();
-        let store = SetupStateStore::new(directory.path());
 
         assert!(!store.initialize(config_path.exists()).show_setup_guide);
         assert!(store.path().exists());
@@ -394,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn any_retained_user_data_counts_as_an_existing_install() {
+    fn flow_any_retained_user_data_counts_as_an_existing_install() {
         let directory = tempfile::tempdir().unwrap();
         assert!(!has_existing_user_data(directory.path()));
         fs::write(directory.path().join("ui-state.json"), "bad").unwrap();
@@ -404,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_state_uses_existing_install_as_the_safe_default() {
+    fn flow_setup_state_failures_use_safe_defaults_and_do_not_block_startup() {
         let existing = tempfile::tempdir().unwrap();
         let existing_store = SetupStateStore::new(existing.path());
         fs::write(existing_store.path(), "bad").unwrap();
@@ -418,12 +412,7 @@ mod tests {
         let fresh_load = fresh_store.initialize(false);
         assert!(fresh_load.show_setup_guide);
         assert!(!fresh_load.warnings.is_empty());
-    }
-
-    #[test]
-    fn unwritable_state_does_not_block_the_setup_guide() {
-        let directory = tempfile::tempdir().unwrap();
-        let blocked = directory.path().join("not-a-directory");
+        let blocked = fresh.path().join("not-a-directory");
         fs::write(&blocked, "file").unwrap();
         let store = SetupStateStore::new(&blocked);
 

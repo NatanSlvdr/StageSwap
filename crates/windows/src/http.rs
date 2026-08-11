@@ -198,7 +198,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_expected_https_hosts_are_accepted() {
+    fn native_only_expected_https_hosts_are_accepted() {
         assert_eq!(
             parse_url("https://api.github.com/repos/a/b").unwrap(),
             ("api.github.com", "/repos/a/b")

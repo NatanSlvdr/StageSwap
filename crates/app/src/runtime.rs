@@ -3931,7 +3931,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_engine_uses_virtual_time_for_delayed_frames_and_deadlines() {
+    fn flow_runtime_engine_uses_virtual_time_for_delayed_frames_and_deadlines() {
         let start = Instant::now();
         let clock = VirtualRuntimeClock::new(start);
         let mut state = RuntimeState::new_at(AppConfig::default(), start);
@@ -3980,7 +3980,7 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_timeout_detaches_worker_and_allows_controlled_release() {
+    fn flow_shutdown_timeout_detaches_worker_and_allows_controlled_release() {
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let worker_barrier = Arc::clone(&barrier);
         let (done_sender, done_receiver) = std_mpsc::sync_channel(1);
@@ -4000,13 +4000,12 @@ mod tests {
     }
 
     #[test]
-    fn initial_monitor_prefers_saved_label_then_secondary() {
+    fn flow_initial_monitor_selection_prefers_saved_then_secondary_then_primary() {
         let monitors = [
             monitor("primary", "Desk"),
             monitor("secondary", "Stage"),
             monitor("third", "Stage"),
         ];
-
         assert_eq!(
             choose_initial_monitor("Desk", &monitors)
                 .unwrap()
@@ -4029,10 +4028,7 @@ mod tests {
             choose_initial_monitor("", &monitors).unwrap().display_name,
             "secondary"
         );
-    }
 
-    #[test]
-    fn initial_monitor_uses_sole_primary_or_none() {
         let primary = [monitor("primary", "Desk")];
         assert_eq!(
             choose_initial_monitor("Missing", &primary)
@@ -4044,21 +4040,39 @@ mod tests {
     }
 
     #[test]
-    fn output_fps_tracker_measures_generated_output_independently_of_ui() {
+    fn flow_fps_trackers_measure_output_and_capture_stalls() {
         let start = Instant::now();
-        let mut tracker = OutputFpsTracker::default();
-        let mut reading = None;
+        let mut output = OutputFpsTracker::default();
+        let mut output_reading = None;
         for frame in 0..=30 {
-            reading = tracker.observe(start + Duration::from_secs_f64(frame as f64 / 30.0));
+            output_reading = output.observe(start + Duration::from_secs_f64(frame as f64 / 30.0));
         }
-        assert_eq!(reading, Some(30));
+        assert_eq!(output_reading, Some(30));
+        assert_eq!(output.observe(start + Duration::from_secs(3)), None);
 
-        let resumed = tracker.observe(start + Duration::from_secs(3));
-        assert_eq!(resumed, None);
+        let mut source = SourceFpsTracker::default();
+        let mut source_reading = None;
+        for sequence in 1..=31 {
+            let received_at = start + Duration::from_secs_f64((sequence - 1) as f64 / 30.0);
+            let frame = Frame::placeholder(Size::new(1, 1), 0xff00_0000, sequence, 0, received_at);
+            source_reading = source.observe(Some(&frame), received_at);
+        }
+        assert_eq!(source_reading, Some(30));
+        let last = Frame::placeholder(
+            Size::new(1, 1),
+            0xff00_0000,
+            31,
+            0,
+            start + Duration::from_secs(1),
+        );
+        assert_eq!(
+            source.observe(Some(&last), start + Duration::from_secs(2)),
+            Some(0)
+        );
     }
 
     #[test]
-    fn disco_effect_changes_only_rgb_and_preserves_frame_metadata() {
+    fn flow_disco_effect_changes_only_rgb_and_preserves_frame_metadata() {
         let now = Instant::now();
         let source = Frame::placeholder(Size::new(32, 18), 0xff30_6090, 17, 42, now);
         let mut effect = DiscoEffect::new(source.size);
@@ -4078,7 +4092,7 @@ mod tests {
     }
 
     #[test]
-    fn disco_flash_pattern_has_primary_secondary_and_major_hits() {
+    fn flow_disco_flash_pattern_has_primary_secondary_and_major_hits() {
         assert_eq!(disco_flash_lift(0), 38);
         assert_eq!(disco_flash_lift(1), 26);
         assert_eq!(disco_flash_lift(8), 22);
@@ -4089,7 +4103,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     #[test]
-    fn disco_effect_keeps_release_720p_processing_inside_the_frame_budget() {
+    fn flow_disco_effect_keeps_release_720p_processing_inside_the_frame_budget() {
         let now = Instant::now();
         let source = Frame::placeholder(PIPELINE_SIZE, 0xff30_6090, 1, 0, now);
         let mut effect = DiscoEffect::new(PIPELINE_SIZE);
@@ -4107,32 +4121,7 @@ mod tests {
     }
 
     #[test]
-    fn source_fps_tracker_measures_capture_rate_and_reports_stalls() {
-        let start = Instant::now();
-        let mut tracker = SourceFpsTracker::default();
-        let mut reading = None;
-        for sequence in 1..=31 {
-            let received_at = start + Duration::from_secs_f64((sequence - 1) as f64 / 30.0);
-            let frame = Frame::placeholder(Size::new(1, 1), 0xff00_0000, sequence, 0, received_at);
-            reading = tracker.observe(Some(&frame), received_at);
-        }
-        assert_eq!(reading, Some(30));
-
-        let last = Frame::placeholder(
-            Size::new(1, 1),
-            0xff00_0000,
-            31,
-            0,
-            start + Duration::from_secs(1),
-        );
-        assert_eq!(
-            tracker.observe(Some(&last), start + Duration::from_secs(2)),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn webcam_crop_is_aspect_aware_and_shares_processed_output() {
+    fn flow_webcam_crop_is_aspect_aware_and_shares_processed_output() {
         let now = Instant::now();
         let size = Size::new(1280, 720);
         let mut pixels = vec![0; size.width as usize * size.height as usize * 4];
@@ -4201,7 +4190,7 @@ mod tests {
     }
 
     #[test]
-    fn webcam_crop_tolerance_and_cache_include_native_aspect_ratio() {
+    fn flow_webcam_crop_tolerance_and_cache_include_input_aspect_ratio() {
         let now = Instant::now();
         let size = Size::new(1280, 720);
         let pixels = (0..size.height)
@@ -4250,7 +4239,7 @@ mod tests {
     }
 
     #[test]
-    fn black_screen_detection_allows_small_cursor_but_rejects_visible_content() {
+    fn flow_black_screen_detection_allows_small_cursor_but_rejects_visible_content() {
         assert!(is_nearly_black(&frame_with_bright_pixels(0)));
         assert!(is_nearly_black(&solid_frame(BLACK_LUMA_THRESHOLD)));
         assert!(!is_nearly_black(&solid_frame(BLACK_LUMA_THRESHOLD + 1)));
@@ -4259,7 +4248,7 @@ mod tests {
     }
 
     #[test]
-    fn illustrated_jw_library_idle_display_is_not_treated_as_failed_capture() {
+    fn flow_illustrated_jw_library_idle_display_is_not_treated_as_failed_capture() {
         let mut image =
             image::load_from_memory(include_bytes!("../assets/setup-reference-example.png"))
                 .unwrap()
@@ -4291,36 +4280,43 @@ mod tests {
     }
 
     #[test]
-    fn two_missing_frames_restart_screen_capture() {
-        let mut recovery = ScreenCaptureRecovery::default();
+    fn flow_screen_recovery_confirms_failures_and_clears_on_visible_frames() {
+        let black = frame_with_bright_pixels(0);
+        let restart_after = |first: Option<&Frame>, second: Option<&Frame>| {
+            let mut recovery = ScreenCaptureRecovery::default();
+            assert_eq!(
+                recovery.observe(first),
+                ScreenCaptureRecoveryObservation::AwaitingConfirmation
+            );
+            assert_eq!(
+                recovery.observe(second),
+                ScreenCaptureRecoveryObservation::Restart
+            );
+            recovery
+        };
 
+        restart_after(None, None);
+        restart_after(Some(&black), None);
+        let mut recovery = restart_after(Some(&black), Some(&black));
         assert_eq!(
-            recovery.observe(None),
+            recovery.observe(Some(&black)),
             ScreenCaptureRecoveryObservation::AwaitingConfirmation
         );
-        assert_eq!(
-            recovery.observe(None),
-            ScreenCaptureRecoveryObservation::Restart
-        );
-    }
 
-    #[test]
-    fn visible_frame_clears_a_single_missing_frame() {
         let visible = frame_with_bright_pixels(200);
-        let mut recovery = ScreenCaptureRecovery::default();
-
+        let mut visible_recovery = ScreenCaptureRecovery::default();
         assert_eq!(
-            recovery.observe(None),
+            visible_recovery.observe(None),
             ScreenCaptureRecoveryObservation::AwaitingConfirmation
         );
         assert_eq!(
-            recovery.observe(Some(&visible)),
+            visible_recovery.observe(Some(&visible)),
             ScreenCaptureRecoveryObservation::Clear
         );
     }
 
     #[test]
-    fn an_old_but_visible_session_frame_remains_usable() {
+    fn flow_screen_recovery_accepts_stale_visible_session_frames() {
         let mut visible = frame_with_bright_pixels(200);
         visible.received_at = Instant::now() - FRAME_STALE_AFTER - Duration::from_secs(1);
         let mut recovery = ScreenCaptureRecovery::default();
@@ -4333,41 +4329,7 @@ mod tests {
     }
 
     #[test]
-    fn near_black_then_missing_frame_restarts_screen_capture() {
-        let black = frame_with_bright_pixels(0);
-        let mut recovery = ScreenCaptureRecovery::default();
-
-        assert_eq!(
-            recovery.observe(Some(&black)),
-            ScreenCaptureRecoveryObservation::AwaitingConfirmation
-        );
-        assert_eq!(
-            recovery.observe(None),
-            ScreenCaptureRecoveryObservation::Restart
-        );
-    }
-
-    #[test]
-    fn two_near_black_frames_restart_and_reset_screen_capture_recovery() {
-        let black = frame_with_bright_pixels(0);
-        let mut recovery = ScreenCaptureRecovery::default();
-
-        assert_eq!(
-            recovery.observe(Some(&black)),
-            ScreenCaptureRecoveryObservation::AwaitingConfirmation
-        );
-        assert_eq!(
-            recovery.observe(Some(&black)),
-            ScreenCaptureRecoveryObservation::Restart
-        );
-        assert_eq!(
-            recovery.observe(Some(&black)),
-            ScreenCaptureRecoveryObservation::AwaitingConfirmation
-        );
-    }
-
-    #[test]
-    fn display_discovery_and_screen_capture_recovery_are_scheduled_independently() {
+    fn flow_display_discovery_and_screen_capture_recovery_are_scheduled_independently() {
         let started_at = Instant::now();
         let due_at = started_at + AUTOMATIC_SCREEN_CHECK_INTERVAL;
         assert_eq!(
@@ -4399,7 +4361,7 @@ mod tests {
     }
 
     #[test]
-    fn screen_restart_backoff_is_bounded_and_resets_externally_on_success() {
+    fn flow_screen_restart_backoff_is_bounded_and_resets_externally_on_success() {
         assert_eq!(screen_restart_backoff(1), Duration::from_secs(5));
         assert_eq!(screen_restart_backoff(2), Duration::from_secs(10));
         assert_eq!(screen_restart_backoff(3), Duration::from_secs(20));
@@ -4407,9 +4369,8 @@ mod tests {
     }
 
     #[test]
-    fn publisher_heartbeat_is_suppressed_when_verbose_logging_is_off() {
+    fn flow_publisher_logging_respects_verbose_setting_and_throttles_heartbeats() {
         let now = Instant::now();
-        let mut state = RuntimeState::new_at(AppConfig::default(), now);
         let mut diagnostics = PublisherDiagnosticsSnapshot {
             connected: true,
             published_sequence: 1,
@@ -4417,53 +4378,19 @@ mod tests {
             connection_count: 1,
             ..PublisherDiagnosticsSnapshot::default()
         };
-        state.record_publisher_diagnostics(diagnostics, now);
-        assert_eq!(state.activity.len(), 1);
 
+        let mut compact = RuntimeState::new_at(AppConfig::default(), now);
+        compact.record_publisher_diagnostics(diagnostics, now);
+        assert_eq!(compact.activity.len(), 1);
         for frame in 2..=120 {
             diagnostics.published_sequence = frame;
             diagnostics.transmitted_sequence = frame;
-            state
+            compact
                 .record_publisher_diagnostics(diagnostics, now + Duration::from_millis(frame * 33));
         }
-        assert_eq!(state.activity.len(), 1);
-
-        diagnostics.published_sequence = 152;
-        diagnostics.transmitted_sequence = 152;
-        state.record_publisher_diagnostics(diagnostics, now + Duration::from_secs(5));
-        assert_eq!(state.activity.len(), 1);
-    }
-
-    #[test]
-    fn publisher_heartbeat_is_recorded_when_verbose_logging_is_on() {
-        let now = Instant::now();
-        let mut state = RuntimeState::new_at(
-            AppConfig {
-                verbose_logging: true,
-                ..AppConfig::default()
-            },
-            now,
-        );
-        let mut diagnostics = PublisherDiagnosticsSnapshot {
-            connected: true,
-            published_sequence: 1,
-            transmitted_sequence: 1,
-            connection_count: 1,
-            ..PublisherDiagnosticsSnapshot::default()
-        };
-        state.record_publisher_diagnostics(diagnostics, now);
-        diagnostics.published_sequence = 152;
-        diagnostics.transmitted_sequence = 152;
-        state.record_publisher_diagnostics(diagnostics, now + Duration::from_secs(5));
-        assert_eq!(state.activity.len(), 2);
-    }
-
-    #[test]
-    fn verbose_activity_is_filtered_before_entering_the_activity_stream() {
-        let now = Instant::now();
-        let mut compact = RuntimeState::new_at(AppConfig::default(), now);
+        assert_eq!(compact.activity.len(), 1);
         compact.record_verbose("debug details");
-        assert!(compact.activity.is_empty());
+        assert_eq!(compact.activity.len(), 1);
 
         let mut verbose = RuntimeState::new_at(
             AppConfig {
@@ -4472,13 +4399,22 @@ mod tests {
             },
             now,
         );
+        diagnostics.published_sequence = 1;
+        diagnostics.transmitted_sequence = 1;
+        verbose.record_publisher_diagnostics(diagnostics, now);
+        diagnostics.published_sequence = 152;
+        diagnostics.transmitted_sequence = 152;
+        verbose.record_publisher_diagnostics(diagnostics, now + Duration::from_secs(5));
+        assert_eq!(verbose.activity.len(), 2);
         verbose.record_verbose("debug details");
-        assert_eq!(verbose.activity.len(), 1);
-        assert_eq!(verbose.activity[0], "debug details");
+        assert_eq!(
+            verbose.activity.back().map(String::as_str),
+            Some("debug details")
+        );
     }
 
     #[test]
-    fn publisher_connection_and_error_changes_bypass_heartbeat_throttle() {
+    fn flow_publisher_connection_and_error_changes_bypass_heartbeat_throttle() {
         let now = Instant::now();
         let mut state = RuntimeState::new_at(AppConfig::default(), now);
         let mut diagnostics = PublisherDiagnosticsSnapshot::default();
@@ -4491,7 +4427,7 @@ mod tests {
     }
 
     #[test]
-    fn webcam_recovery_uses_three_nonblocking_attempts_then_exhausts() {
+    fn flow_webcam_recovery_uses_three_nonblocking_attempts_then_exhausts() {
         let started_at = Instant::now();
         let mut recovery = WebcamRecovery::default();
         assert!(recovery.schedule_initial(started_at));
@@ -4529,7 +4465,7 @@ mod tests {
     }
 
     #[test]
-    fn webcam_recovery_success_and_manual_reset_clear_all_retry_state() {
+    fn flow_webcam_recovery_success_and_manual_reset_clear_all_retry_state() {
         let now = Instant::now();
         let mut recovery = WebcamRecovery::default();
         recovery.schedule_initial(now);
@@ -4546,7 +4482,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_detection_is_gray_but_preview_stays_in_color() {
+    fn flow_reference_detection_is_gray_but_preview_stays_in_color() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("reference.png");
         let image = image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
@@ -4560,7 +4496,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_candidate_is_isolated_discardable_and_committed_exactly() {
+    fn flow_reference_candidate_is_isolated_discardable_and_committed_exactly() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("reference.png");
         let config = AppConfig {
@@ -4607,7 +4543,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_candidate_save_keeps_candidate_and_active_reference_untouched() {
+    fn flow_failed_candidate_save_keeps_candidate_and_active_reference_untouched() {
         let directory = tempfile::tempdir().unwrap();
         let invalid_path = directory.path().join("reference-target-is-a-directory");
         std::fs::create_dir(&invalid_path).unwrap();
@@ -4639,7 +4575,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_decode_enforces_dimension_limit_and_caps_retained_preview() {
+    fn flow_reference_decode_enforces_dimension_limit_and_caps_retained_preview() {
         let directory = tempfile::tempdir().unwrap();
         let boundary = directory.path().join("boundary.png");
         image::RgbaImage::new(REFERENCE_MAX_DIMENSION, 1)
@@ -4660,7 +4596,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_reference_replace_preserves_exact_pixels_and_cleans_pending_file() {
+    fn flow_atomic_reference_replace_preserves_exact_pixels_and_cleans_pending_file() {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("reference.png");
         image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))
@@ -4675,7 +4611,7 @@ mod tests {
     }
 
     #[test]
-    fn warning_registry_preserves_source_ownership_and_priority() {
+    fn flow_warning_registry_preserves_source_ownership_and_priority() {
         let mut state = RuntimeState::new(AppConfig::default());
         state.set_warning(WarningSource::Hdr, "hdr");
         state.set_warning(WarningSource::VirtualCamera, "camera");
@@ -4691,7 +4627,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_ids_keep_duplicate_messages_and_track_ring_rollover() {
+    fn flow_activity_ids_keep_duplicate_messages_and_track_ring_rollover() {
         let mut state = RuntimeState::new(AppConfig::default());
         state.record("duplicate");
         state.record("duplicate");
@@ -4706,7 +4642,7 @@ mod tests {
     }
 
     #[test]
-    fn device_command_application_does_not_replay_user_activity() {
+    fn flow_device_command_application_does_not_replay_user_activity() {
         let mut state = RuntimeState::new(AppConfig::default());
         assert!(state.apply_command(Command::Start, false));
         assert!(state.snapshot.recent_activity.is_empty());
@@ -4717,7 +4653,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_device_refresh_and_rescan_activity_is_coalesced() {
+    fn flow_duplicate_device_refresh_and_rescan_activity_is_coalesced() {
         let mut state = RuntimeState::new(AppConfig::default());
 
         assert!(state.command(Command::RefreshVideoDevices));
@@ -4737,7 +4673,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_only_reload_reference_when_required() {
+    fn flow_settings_only_reload_reference_when_required() {
         let now = Instant::now();
         let config = AppConfig::default();
         let state = RuntimeState::new_at(config.clone(), now);
@@ -4751,7 +4687,7 @@ mod tests {
     }
 
     #[test]
-    fn device_commands_are_bounded_coalesced_and_restart_all_subsumes_individuals() {
+    fn flow_device_commands_are_bounded_coalesced_and_restart_all_subsumes_individuals() {
         let mut pending = PendingDeviceCommands::default();
         let first = AppConfig {
             cursor_visible: false,
@@ -4794,7 +4730,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_request_slots_keep_only_the_latest_pending_work() {
+    fn flow_discovery_request_slots_keep_only_the_latest_pending_work() {
         let slot = CoalescingSlot::new();
         assert!(slot.replace(1_u64));
         assert!(slot.replace(2_u64));
@@ -4806,7 +4742,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_publish_immutable_snapshots() {
+    fn flow_commands_publish_immutable_snapshots() {
         let runtime = RuntimeHandle::spawn(AppConfig {
             start_automatically: false,
             ..AppConfig::default()
@@ -4839,7 +4775,7 @@ mod tests {
     }
 
     #[test]
-    fn disco_mode_is_session_only_and_never_decorates_the_stopped_output() {
+    fn flow_disco_mode_is_session_only_and_never_decorates_the_stopped_output() {
         let runtime = RuntimeHandle::spawn(AppConfig {
             start_automatically: false,
             ..AppConfig::default()
@@ -4877,36 +4813,54 @@ mod tests {
     }
 
     #[test]
-    fn stopped_runtime_uses_the_canonical_off_frame_and_running_resumes_output() {
+    fn flow_stopped_runtime_publishes_off_frame_and_resumes_after_start() {
         let runtime = RuntimeHandle::spawn(AppConfig {
             start_automatically: false,
             ..AppConfig::default()
         });
-        let initial = runtime.snapshot();
-        let initial_output = initial
+        let initial_snapshot = runtime.snapshot();
+        let initial = initial_snapshot
             .previews
             .final_output
-            .expect("stopped runtime should start with an off frame");
-        assert_eq!(initial.run_state, RunState::Stopped);
-        assert_eq!(initial.actual_output, Source::Placeholder);
+            .expect("initial off frame is present");
+        assert_eq!(initial_snapshot.run_state, RunState::Stopped);
+        assert_eq!(initial_snapshot.actual_output, Source::Placeholder);
         assert_eq!(
-            initial_output.pixels(),
+            initial.pixels(),
             stageswap_core::off_frame_pixels().as_ref()
         );
 
-        assert!(runtime.send(Command::Start).is_accepted());
         let deadline = Instant::now() + Duration::from_secs(2);
+        let later = loop {
+            let output = runtime
+                .snapshot()
+                .previews
+                .final_output
+                .expect("off frame remains present");
+            if output.sequence > initial.sequence {
+                break output;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "stopped output clock did not advance"
+            );
+            thread::yield_now();
+        };
+        assert_eq!(later.pixels(), stageswap_core::off_frame_pixels().as_ref());
+
+        assert!(runtime.send(Command::Start).is_accepted());
         let running_sequence = loop {
             let snapshot = runtime.snapshot();
             if snapshot.run_state == RunState::Running
                 && let Some(output) = snapshot.previews.final_output
-                && output.sequence > initial_output.sequence
+                && output.sequence > later.sequence
             {
                 break output.sequence;
             }
             assert!(Instant::now() < deadline, "runtime did not resume output");
             thread::yield_now();
         };
+        assert!(running_sequence > later.sequence);
 
         assert!(runtime.send(Command::Stop).is_accepted());
         let stopped = loop {
@@ -4932,37 +4886,7 @@ mod tests {
     }
 
     #[test]
-    fn stopped_runtime_keeps_the_off_output_clock_running() {
-        let runtime = RuntimeHandle::spawn(AppConfig {
-            start_automatically: false,
-            ..AppConfig::default()
-        });
-        let first = runtime
-            .snapshot()
-            .previews
-            .final_output
-            .expect("initial off frame is present");
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let later = loop {
-            let output = runtime
-                .snapshot()
-                .previews
-                .final_output
-                .expect("off frame remains present");
-            if output.sequence > first.sequence {
-                break output;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "stopped output clock did not advance"
-            );
-            thread::yield_now();
-        };
-        assert_eq!(later.pixels(), stageswap_core::off_frame_pixels().as_ref());
-    }
-
-    #[test]
-    fn command_traffic_does_not_accelerate_output_clock() {
+    fn flow_command_traffic_does_not_accelerate_output_clock() {
         let runtime = RuntimeHandle::spawn(AppConfig {
             start_automatically: true,
             ..AppConfig::default()
@@ -5000,7 +4924,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     #[ignore = "requires installed COM source, interactive desktop, and a physical webcam"]
-    fn all_four_manual_restart_actions_recover_components() {
+    fn native_all_four_manual_restart_actions_recover_components() {
         let runtime = RuntimeHandle::spawn(AppConfig::default());
         let ready_deadline = Instant::now() + Duration::from_secs(20);
         loop {

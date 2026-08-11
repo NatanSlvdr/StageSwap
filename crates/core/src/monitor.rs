@@ -112,7 +112,7 @@ mod tests {
         }
     }
     #[test]
-    fn requires_two_identical_winning_scans() {
+    fn contract_requires_two_identical_winning_scans() {
         let mut tracker = MonitorTracker::new(MonitorTrackerSettings::default());
         tracker.select(monitor("one"));
         let scores = [MonitorScore {

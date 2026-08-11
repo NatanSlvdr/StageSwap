@@ -18,7 +18,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn public_media_source_identity_is_stageswap() {
+    fn native_public_media_source_identity_is_stageswap() {
         assert_eq!(SOURCE_CLSID, "{4ABA794D-7B23-449C-8467-CE74A41C2820}");
         assert_eq!(PIPE_ATTRIBUTE, "{75C753A0-587B-4064-BB77-F0171FCD4AD7}");
     }

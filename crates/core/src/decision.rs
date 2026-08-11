@@ -48,7 +48,7 @@ pub fn decide(
 mod tests {
     use super::*;
     #[test]
-    fn uses_safe_fallbacks() {
+    fn contract_uses_safe_fallbacks() {
         assert_eq!(
             decide(
                 OutputMode::Automatic,

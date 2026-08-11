@@ -16,5 +16,5 @@
 | Native self-deploying x64 | deployment module, embedded manifest/version, and `xtask publish-release` | PE/payload validation, first-run and cleanup |
 | Manual Stable/Beta GitHub updates | update worker, WinHTTP adapter, checksum verification, replacement bootstrap | release-selection/config/checksum tests and native update/rollback checks |
 | Deterministic lifecycle, deadlines, bounded mailbox, and constant-time pacing | `RuntimeEngine`, runtime clock, component status, runtime mailbox, `FramePacer` | virtual-clock lifecycle tests, command flood/coalescing/shutdown tests, long-gap pacer tests |
-| UI, tray, previews, notifications, logs, recovery submenu, four restarts | `stageswap` | headless locale/DPI render tests, tray mapping tests, native ignored tests, screenshot comparison |
+| UI, tray, previews, notifications, logs, recovery submenu, four restarts | `stageswap` | reduced `smoke_` UI coverage, consolidated `contract_`/`flow_` interaction and state tests, tray mapping tests, native ignored tests, and UI-preview/manual screenshot evidence |
 | Transactional managed startup and run-once preservation | deployment startup helpers and General Settings | registry status/transition tests and native Windows checks |

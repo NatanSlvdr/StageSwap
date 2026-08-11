@@ -129,7 +129,7 @@ mod tests {
     use std::time::Instant;
 
     #[test]
-    fn completed_frame_is_kept_when_a_newer_request_is_pending() {
+    fn contract_completed_frame_is_kept_when_a_newer_request_is_pending() {
         let now = Instant::now();
         let completed = Arc::new(Frame::placeholder(
             stageswap_core::Size::new(2, 2),

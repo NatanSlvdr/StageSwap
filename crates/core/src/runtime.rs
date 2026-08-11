@@ -187,7 +187,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn component_readiness_clears_deadline_and_restart_backoff() {
+    fn flow_component_readiness_clears_deadline_and_restart_backoff() {
         let now = Instant::now();
         let mut status = ComponentStatus::default();
         status.waiting_for_first_frame(now, now + Duration::from_secs(3));
@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn component_failure_keeps_diagnostic_context() {
+    fn flow_component_failure_keeps_diagnostic_context() {
         let now = Instant::now();
         let mut status = ComponentStatus::default();
         status.waiting_for_first_frame(now, now + Duration::from_secs(2));

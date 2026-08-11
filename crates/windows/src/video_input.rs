@@ -1109,13 +1109,13 @@ mod format_tests {
     use super::*;
 
     #[test]
-    fn missing_stride_and_sample_size_use_checked_rgb32_defaults() {
+    fn native_missing_stride_and_sample_size_use_checked_rgb32_defaults() {
         let format = resolve_negotiated_layout(Size::new(1280, 720), None, None).unwrap();
         assert_eq!(format.stride, 1280 * 4);
     }
 
     #[test]
-    fn negative_stride_is_validated_by_absolute_row_pitch() {
+    fn native_negative_stride_is_validated_by_absolute_row_pitch() {
         let format = resolve_negotiated_layout(
             Size::new(2, 2),
             Some(u32::from_ne_bytes((-12i32).to_ne_bytes())),
@@ -1126,13 +1126,13 @@ mod format_tests {
     }
 
     #[test]
-    fn undersized_declared_sample_is_rejected() {
+    fn native_undersized_declared_sample_is_rejected() {
         let error = resolve_negotiated_layout(Size::new(2, 2), Some(12), Some(23)).unwrap_err();
         assert!(error.contains("smaller than 24"));
     }
 
     #[test]
-    fn row_copy_accepts_padding_and_negative_stride() {
+    fn native_row_copy_accepts_padding_and_negative_stride() {
         let size = Size::new(2, 2);
         let top = [1, 2, 3, 4, 5, 6, 7, 8];
         let bottom = [11, 12, 13, 14, 15, 16, 17, 18];
@@ -1155,7 +1155,7 @@ mod format_tests {
     }
 
     #[test]
-    fn row_copy_rejects_an_undersized_buffer() {
+    fn native_row_copy_rejects_an_undersized_buffer() {
         let size = Size::new(2, 2);
         let mut destination = Vec::new();
         let error = copy_bgra_rows(&[0; 20], 0, 12, size, &mut destination).unwrap_err();
@@ -1163,7 +1163,7 @@ mod format_tests {
     }
 
     #[test]
-    fn repeated_callback_failures_open_the_circuit() {
+    fn native_repeated_callback_failures_open_the_circuit() {
         let state = CaptureState::default();
         state.running.store(true, Ordering::Release);
         for _ in 0..WEBCAM_FAILURE_THRESHOLD {
@@ -1182,7 +1182,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capture_generation_rejects_callbacks_from_stopped_reader() {
+    fn native_capture_generation_rejects_callbacks_from_stopped_reader() {
         let state = CaptureState::default();
         let generation = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
         state.running.store(true, Ordering::Release);
@@ -1192,7 +1192,7 @@ mod tests {
     }
 
     #[test]
-    fn product_virtual_cameras_are_never_selectable_webcams() {
+    fn native_product_virtual_cameras_are_never_selectable_webcams() {
         assert!(is_managed_virtual_camera("StageSwap"));
         assert!(is_managed_virtual_camera("Automatic Screen Camera"));
         assert!(is_managed_virtual_camera("stageswap"));

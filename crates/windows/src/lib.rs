@@ -123,7 +123,7 @@ mod tests {
         }
     }
     #[test]
-    fn selection_is_saved_then_unique_physical() {
+    fn native_selection_is_saved_then_unique_physical() {
         let devices = [device("virtual", true), device("physical", false)];
         assert_eq!(
             choose_video_device("saved", &devices, true).as_deref(),
@@ -185,7 +185,7 @@ mod interactive_windows_tests {
 
     #[test]
     #[ignore = "requires an interactive Windows desktop"]
-    fn screen_capture_produces_300_frames_with_cursor_on_and_off_and_stops_cleanly() {
+    fn native_screen_capture_produces_300_frames_with_cursor_on_and_off_and_stops_cleanly() {
         let mut input = WindowsGraphicsScreenInput::default();
         let monitor = input.enumerate().unwrap().into_iter().next().unwrap();
         for cursor_visible in [true, false] {
@@ -210,7 +210,7 @@ mod interactive_windows_tests {
 
     #[test]
     #[ignore = "requires a physical webcam"]
-    fn webcam_enumeration_excludes_virtual_camera_and_restarts_without_stale_frame() {
+    fn native_webcam_enumeration_excludes_virtual_camera_and_restarts_without_stale_frame() {
         let devices = enumerate_video_devices().unwrap();
         assert!(devices.iter().all(|device| !device.is_virtual));
         let device = devices.first().expect("a physical webcam is required");
@@ -229,7 +229,7 @@ mod interactive_windows_tests {
 
     #[test]
     #[ignore = "requires the COM source to be installed"]
-    fn virtual_camera_can_restart_manually() {
+    fn native_virtual_camera_can_restart_manually() {
         let pipe = frame_pipe_name().unwrap();
         let mut camera = VirtualCameraController::start(pipe).unwrap();
         assert!(camera.is_running());
@@ -239,7 +239,7 @@ mod interactive_windows_tests {
 
     #[test]
     #[ignore = "requires the COM source to be installed and no running app instance"]
-    fn virtual_camera_delivers_three_hundred_frames_at_thirty_fps() {
+    fn native_virtual_camera_delivers_three_hundred_frames_at_thirty_fps() {
         let pipe_name = frame_pipe_name().unwrap();
         let publisher = FramePublisher::start(&pipe_name).unwrap();
         let _camera = VirtualCameraController::start(pipe_name).unwrap();

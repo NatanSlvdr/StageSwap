@@ -666,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn rgb32_is_default_and_nv12_remains_selectable() -> windows_core::Result<()> {
+    fn native_rgb32_is_default_and_nv12_remains_selectable() -> windows_core::Result<()> {
         let _test_lock = super::super::TEST_LOCK
             .lock()
             .expect("media-source test lock poisoned");
@@ -726,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn sample_allocator_backpressure_and_reuse_after_release() -> windows_core::Result<()> {
+    fn native_sample_allocator_backpressure_and_reuse_after_release() -> windows_core::Result<()> {
         let _test_lock = super::super::TEST_LOCK
             .lock()
             .expect("media-source test lock poisoned");
@@ -772,7 +772,8 @@ mod tests {
     }
 
     #[test]
-    fn allocator_sample_survives_source_shutdown_without_pinning_dll() -> windows_core::Result<()> {
+    fn native_allocator_sample_survives_source_shutdown_without_pinning_dll()
+    -> windows_core::Result<()> {
         let _test_lock = super::super::TEST_LOCK
             .lock()
             .expect("media-source test lock poisoned");
@@ -800,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn limited_bt601_conversion_matches_black_white_and_primary_bars() {
+    fn native_limited_bt601_conversion_matches_black_white_and_primary_bars() {
         assert_eq!(limited_y(0, 0, 0), 16);
         assert_eq!(limited_y(255, 255, 255), 235);
         assert_eq!(limited_y(255, 0, 0), 82);
@@ -813,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn nv12_cache_converts_once_per_source_sequence() -> windows_core::Result<()> {
+    fn native_nv12_cache_converts_once_per_source_sequence() -> windows_core::Result<()> {
         let _test_lock = super::super::TEST_LOCK
             .lock()
             .expect("media-source test lock poisoned");
