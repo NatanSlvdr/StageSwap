@@ -684,11 +684,11 @@ fn style_stage_category(stage: ReleaseStage, text: String) -> String {
 fn style_substep(stage: ReleaseStage, status: SubstepStatus, text: String) -> String {
     let styled = match status {
         SubstepStatus::Active => return style_active_stage(stage, text),
-        SubstepStatus::Complete => Term::stderr().style().green().dim().apply_to(text),
-        SubstepStatus::Failed => Term::stderr().style().red().bold().apply_to(text),
-        SubstepStatus::Pending | SubstepStatus::Skipped => {
-            Term::stderr().style().dim().apply_to(text)
+        SubstepStatus::Complete | SubstepStatus::Skipped => {
+            Term::stderr().style().green().dim().apply_to(text)
         }
+        SubstepStatus::Failed => Term::stderr().style().red().bold().apply_to(text),
+        SubstepStatus::Pending => Term::stderr().style().dim().apply_to(text),
     };
     styled.force_styling(true).to_string()
 }
@@ -836,7 +836,23 @@ fn publish_release_cli() -> Result<()> {
     match outcome {
         Ok(artifact) => {
             progress.complete_current_stage();
-            println!("published {tag} from {}", artifact.display());
+            let message = format!(
+                "🎉 Release {tag} published successfully from {}",
+                artifact.display()
+            );
+            if Term::stdout().is_term() && env::var_os("NO_COLOR").is_none() {
+                println!(
+                    "{}",
+                    Term::stdout()
+                        .style()
+                        .green()
+                        .bold()
+                        .apply_to(message)
+                        .force_styling(true)
+                );
+            } else {
+                println!("{message}");
+            }
             Ok(())
         }
         Err(error) => {
