@@ -1,3 +1,4 @@
+use super::diagnostics;
 use stageswap_core::{
     CAPTURE_FRAME_POOL_CAPACITY, FrameBufferPool, FrameHeader, HEADER_LEN, MAX_FRAME_BYTES,
     SharedFrameCache,
@@ -21,6 +22,7 @@ impl PipeReader {
     pub(super) fn start(pipe_name: String, cache: Arc<Mutex<SharedFrameCache>>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         if pipe_name.is_empty() {
+            diagnostics::always("pipe reader was given an empty frame-pipe name");
             return Self { stop, worker: None };
         }
         let path = if pipe_name.starts_with(r"\\.\pipe\") {
@@ -28,10 +30,17 @@ impl PipeReader {
         } else {
             format!(r"\\.\pipe\{pipe_name}")
         };
+        let pipe_tag = diagnostics::path_tag(&path);
         let worker_stop = Arc::clone(&stop);
         let worker = thread::Builder::new()
             .name("stageswap-mf-pipe-reader".into())
             .spawn(move || reader_loop(&path, &worker_stop, &cache))
+            .map_err(|error| {
+                diagnostics::always(format!(
+                    "could not start pipe reader pipe_tag={pipe_tag:016x}: {error}"
+                ));
+                error
+            })
             .ok();
         Self { stop, worker }
     }
@@ -51,20 +60,49 @@ impl Drop for PipeReader {
 
 fn reader_loop(path: &str, stop: &AtomicBool, cache: &Mutex<SharedFrameCache>) {
     let mut pool = FrameBufferPool::new(MAX_FRAME_BYTES as usize, CAPTURE_FRAME_POOL_CAPACITY);
+    let pipe_tag = diagnostics::path_tag(path);
+    let mut ingested_frames = 0_u64;
+    let mut last_ingest_report = Instant::now() - Duration::from_secs(5);
     while !stop.load(Ordering::Acquire) {
-        let Ok(mut pipe) = OpenOptions::new().read(true).open(path) else {
-            thread::sleep(Duration::from_millis(250));
-            continue;
+        let mut pipe = match OpenOptions::new().read(true).open(path) {
+            Ok(pipe) => {
+                diagnostics::rate_limited(
+                    "pipe-connected",
+                    Duration::from_secs(5),
+                    format!("pipe connected pipe_tag={pipe_tag:016x}"),
+                );
+                pipe
+            }
+            Err(error) => {
+                diagnostics::rate_limited(
+                    "pipe-open-retry",
+                    Duration::from_secs(5),
+                    format!("pipe open retry pipe_tag={pipe_tag:016x} error={error}"),
+                );
+                thread::sleep(Duration::from_millis(250));
+                continue;
+            }
         };
         let mut previous_sequence = None;
+        let mut connection_ingested = false;
         while !stop.load(Ordering::Acquire) {
             let mut encoded = [0; HEADER_LEN];
-            if pipe.read_exact(&mut encoded).is_err() {
+            if let Err(error) = pipe.read_exact(&mut encoded) {
+                diagnostics::rate_limited(
+                    "pipe-header-read",
+                    Duration::from_secs(5),
+                    format!("pipe header read ended pipe_tag={pipe_tag:016x} error={error}"),
+                );
                 break;
             }
             let header = match FrameHeader::decode(&encoded, previous_sequence) {
                 Ok(header) => header,
-                Err(_) => {
+                Err(error) => {
+                    diagnostics::rate_limited(
+                        "pipe-header-invalid",
+                        Duration::from_secs(5),
+                        format!("pipe header was invalid pipe_tag={pipe_tag:016x} error={error:?}"),
+                    );
                     if let Ok(mut cache) = cache.lock() {
                         cache.invalidate();
                     }
@@ -77,26 +115,76 @@ fn reader_loop(path: &str, stop: &AtomicBool, cache: &Mutex<SharedFrameCache>) {
                     return;
                 };
                 if cache.ingest(header, Arc::from([]), Instant::now()).is_err() {
+                    diagnostics::rate_limited(
+                        "pipe-invalidation-invalid",
+                        Duration::from_secs(5),
+                        format!(
+                            "pipe invalidation was rejected pipe_tag={pipe_tag:016x} sequence={}",
+                            header.sequence
+                        ),
+                    );
                     cache.invalidate();
                     break;
                 }
+                diagnostics::rate_limited(
+                    "pipe-invalidation",
+                    Duration::from_secs(5),
+                    format!(
+                        "pipe invalidation ingested pipe_tag={pipe_tag:016x} sequence={}",
+                        header.sequence
+                    ),
+                );
                 continue;
             }
             let pixels = match read_payload(&mut pipe, &mut pool, header.frame_bytes as usize) {
                 Ok(Some(pixels)) => pixels,
                 Ok(None) => continue,
-                Err(_) => break,
+                Err(error) => {
+                    diagnostics::rate_limited(
+                        "pipe-payload-read",
+                        Duration::from_secs(5),
+                        format!("pipe payload read failed pipe_tag={pipe_tag:016x} error={error}"),
+                    );
+                    break;
+                }
             };
             let Ok(mut cache) = cache.lock() else {
                 return;
             };
             if cache.ingest(header, pixels, Instant::now()).is_err() {
+                diagnostics::rate_limited(
+                    "pipe-frame-invalid",
+                    Duration::from_secs(5),
+                    format!(
+                        "pipe frame was rejected pipe_tag={pipe_tag:016x} sequence={}",
+                        header.sequence
+                    ),
+                );
                 cache.invalidate();
                 break;
+            }
+            ingested_frames = ingested_frames.saturating_add(1);
+            let now = Instant::now();
+            if !connection_ingested
+                || now.saturating_duration_since(last_ingest_report) >= Duration::from_secs(5)
+            {
+                diagnostics::always(format!(
+                    "pipe frames ingested pipe_tag={pipe_tag:016x} count={ingested_frames} sequence={}",
+                    header.sequence
+                ));
+                connection_ingested = true;
+                last_ingest_report = now;
             }
         }
         if let Ok(mut cache) = cache.lock() {
             cache.invalidate();
+        }
+        if !stop.load(Ordering::Acquire) {
+            diagnostics::rate_limited(
+                "pipe-disconnected",
+                Duration::from_secs(5),
+                format!("pipe disconnected pipe_tag={pipe_tag:016x}"),
+            );
         }
     }
 }

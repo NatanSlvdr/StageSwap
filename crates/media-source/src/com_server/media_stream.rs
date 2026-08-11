@@ -1,13 +1,15 @@
 use super::OBJECTS;
+use super::diagnostics;
 use super::pipe_reader::PipeReader;
 use stageswap_core::{PIPELINE_SIZE, SharedFrameCache, off_frame_pixels};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use windows::Win32::Foundation::{E_NOTIMPL, E_POINTER, S_OK};
 use windows::Win32::Media::KernelStreaming::PINNAME_VIDEO_CAPTURE;
 use windows::Win32::Media::MediaFoundation::{
-    IMFAsyncCallback, IMFAsyncCallback_Impl, IMFAsyncResult, IMFAttributes, IMFMediaBuffer,
-    IMFMediaEvent, IMFMediaEventGenerator_Impl, IMFMediaEventQueue, IMFMediaSource,
+    IMF2DBuffer2, IMFAsyncCallback, IMFAsyncCallback_Impl, IMFAsyncResult, IMFAttributes,
+    IMFMediaBuffer, IMFMediaEvent, IMFMediaEventGenerator_Impl, IMFMediaEventQueue, IMFMediaSource,
     IMFMediaStream_Impl, IMFMediaStream2, IMFMediaStream2_Impl, IMFSample, IMFStreamDescriptor,
     MEMediaSample, MEStreamStarted, MEStreamStopped, MF_DEVICESTREAM_ATTRIBUTE_FRAMESOURCE_TYPES,
     MF_DEVICESTREAM_FRAMESERVER_SHARED, MF_DEVICESTREAM_STREAM_CATEGORY, MF_DEVICESTREAM_STREAM_ID,
@@ -16,8 +18,8 @@ use windows::Win32::Media::MediaFoundation::{
     MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
     MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE,
     MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX, MF_STREAM_STATE, MF_STREAM_STATE_PAUSED,
-    MF_STREAM_STATE_RUNNING, MF_STREAM_STATE_STOPPED, MFCreateAttributes, MFCreateEventQueue,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFCreateStreamDescriptor,
+    MF_STREAM_STATE_RUNNING, MF_STREAM_STATE_STOPPED, MFCreate2DMediaBuffer, MFCreateAttributes,
+    MFCreateEventQueue, MFCreateMediaType, MFCreateSample, MFCreateStreamDescriptor,
     MFFrameSourceTypes_Color, MFGetSystemTime, MFMediaType_Video, MFNominalRange_16_235,
     MFVideoFormat_NV12, MFVideoFormat_RGB32, MFVideoInterlace_Progressive,
     MFVideoTransferMatrix_BT601,
@@ -70,11 +72,7 @@ impl MediaBufferPool {
         }
     }
 
-    fn acquire(
-        &self,
-        format: BufferFormat,
-        frame_bytes: u32,
-    ) -> windows_core::Result<AcquiredMediaBuffer> {
+    fn acquire(&self, format: BufferFormat) -> windows_core::Result<AcquiredMediaBuffer> {
         let mut buffer_state = self.buffers.lock().expect("media buffer pool poisoned");
         let mut availability = self
             .availability
@@ -87,8 +85,20 @@ impl MediaBufferPool {
         let index = if let Some(index) = in_use.iter().position(|in_use| !in_use) {
             index
         } else if format_buffers.len() < MEDIA_BUFFER_POOL_CAPACITY {
-            // SAFETY: Media Foundation returns an owned buffer of the requested size.
-            let buffer = unsafe { MFCreateMemoryBuffer(frame_bytes)? };
+            // MFCreate2DMediaBuffer supplies a format-aware surface whose
+            // ContiguousCopyFrom implementation handles pitch and planar NV12
+            // layout for the consumer's selected media type.
+            let buffer = unsafe {
+                MFCreate2DMediaBuffer(
+                    WIDTH,
+                    HEIGHT,
+                    match format {
+                        BufferFormat::Rgb32 => MFVideoFormat_RGB32.data1,
+                        BufferFormat::Nv12 => MFVideoFormat_NV12.data1,
+                    },
+                    false,
+                )?
+            };
             format_buffers.push(buffer);
             in_use.push(false);
             format_buffers.len() - 1
@@ -258,6 +268,9 @@ pub(super) struct MediaStream {
     buffer_pool: MediaBufferPool,
     _pipe_reader: PipeReader,
     state: Mutex<StreamState>,
+    request_samples: AtomicU64,
+    queued_samples: AtomicU64,
+    sample_failures: AtomicU64,
 }
 
 impl MediaStream {
@@ -314,6 +327,9 @@ impl MediaStream {
                 shutdown: false,
                 next_time_100ns: 0,
             }),
+            request_samples: AtomicU64::new(0),
+            queued_samples: AtomicU64::new(0),
+            sample_failures: AtomicU64::new(0),
         })
     }
 
@@ -490,33 +506,25 @@ impl MediaStream {
                 .expect("NV12 cache lock poisoned")
                 .converted = None;
         }
-        let acquired = self.buffer_pool.acquire(format, frame_bytes)?;
+        let acquired = self.buffer_pool.acquire(format)?;
         let buffer = &acquired.buffer;
-        let mut destination = core::ptr::null_mut();
-        let mut maximum = 0;
-        // SAFETY: Lock initializes destination and maximum for this owned buffer.
-        unsafe { buffer.Lock(&mut destination, Some(&mut maximum), None)? };
-        if destination.is_null() || maximum < frame_bytes {
-            // SAFETY: balances the successful Lock call.
-            let _ = unsafe { buffer.Unlock() };
+        let output: &[u8] = if format == BufferFormat::Nv12 {
+            converted_nv12.as_deref().unwrap_or(self.off_nv12.as_ref())
+        } else {
+            live_frame
+                .as_ref()
+                .map_or(self.off_bgra.as_ref(), |frame| frame.pixels())
+        };
+        if output.len() != frame_bytes as usize {
             return Err(Error::from_hresult(E_POINTER));
         }
-        // SAFETY: Lock guarantees frame_bytes writable bytes and alignment is not assumed.
+        let buffer_2d: IMF2DBuffer2 = buffer.cast()?;
+        // SAFETY: the 2D buffer is owned by the bounded pool and the source
+        // slice exactly matches the selected media type's contiguous layout.
+        // ContiguousCopyFrom copies into the native surface pitch, including
+        // the plane layout used by NV12.
         unsafe {
-            let output = core::slice::from_raw_parts_mut(destination, frame_bytes as usize);
-            if format == BufferFormat::Nv12 {
-                if let Some(converted) = converted_nv12 {
-                    output.copy_from_slice(&converted);
-                } else {
-                    output.copy_from_slice(&self.off_nv12);
-                }
-            } else if let Some(frame) = live_frame {
-                output.copy_from_slice(frame.pixels());
-            } else {
-                output.copy_from_slice(&self.off_bgra);
-            }
-            buffer.Unlock()?;
-            buffer.SetCurrentLength(frame_bytes)?;
+            buffer_2d.ContiguousCopyFrom(output)?;
         }
         let timestamp = {
             let mut state = self.state.lock().expect("stream state lock poisoned");
@@ -613,11 +621,48 @@ impl IMFMediaStream_Impl for MediaStream_Impl {
         Ok(self.descriptor.clone())
     }
     fn RequestSample(&self, token: Ref<IUnknown>) -> windows_core::Result<()> {
-        let sample = self.make_output_sample(token.cloned())?;
+        let request_count = self.request_samples.fetch_add(1, Ordering::Relaxed) + 1;
+        diagnostics::rate_limited(
+            "sample-requests",
+            Duration::from_secs(5),
+            format!("sample requests count={request_count}"),
+        );
+        let sample = match self.make_output_sample(token.cloned()) {
+            Ok(sample) => sample,
+            Err(error) => {
+                let failure_count = self.sample_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                diagnostics::rate_limited(
+                    "sample-creation-failures",
+                    Duration::from_secs(5),
+                    format!("sample creation failed count={failure_count} error={error}"),
+                );
+                return Err(error);
+            }
+        };
         // SAFETY: the sample remains alive for the queue call and is AddRef'd by the event.
-        unsafe {
+        let result = unsafe {
             self.events
                 .QueueEventParamUnk(MEMediaSample.0 as u32, &GUID::zeroed(), S_OK, &sample)
+        };
+        match result {
+            Ok(()) => {
+                let queued_count = self.queued_samples.fetch_add(1, Ordering::Relaxed) + 1;
+                diagnostics::rate_limited(
+                    "sample-queued",
+                    Duration::from_secs(5),
+                    format!("samples queued count={queued_count}"),
+                );
+                Ok(())
+            }
+            Err(error) => {
+                let failure_count = self.sample_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                diagnostics::rate_limited(
+                    "sample-queue-failures",
+                    Duration::from_secs(5),
+                    format!("sample queue failed count={failure_count} error={error}"),
+                );
+                Err(error)
+            }
         }
     }
 }

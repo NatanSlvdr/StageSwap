@@ -1,4 +1,5 @@
 use super::OBJECTS;
+use super::diagnostics;
 use super::media_stream::MediaStream;
 use core::ffi::c_void;
 use std::sync::Mutex;
@@ -16,8 +17,8 @@ use windows::Win32::Media::MediaFoundation::{
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_CATEGORY,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_E_INVALID_POSITION,
     MF_E_INVALID_STATE_TRANSITION, MF_E_INVALIDREQUEST, MF_E_INVALIDSTREAMNUMBER, MF_E_SHUTDOWN,
-    MF_E_UNSUPPORTED_SERVICE, MF_E_UNSUPPORTED_TIME_FORMAT, MFCreateAttributes, MFCreateEventQueue,
-    MFCreatePresentationDescriptor, MFMEDIASOURCE_IS_LIVE,
+    MF_E_UNSUPPORTED_SERVICE, MF_E_UNSUPPORTED_TIME_FORMAT, MF_MT_SUBTYPE, MFCreateAttributes,
+    MFCreateEventQueue, MFCreatePresentationDescriptor, MFMEDIASOURCE_IS_LIVE,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Variant::{VT_EMPTY, VT_I8};
@@ -26,7 +27,7 @@ use windows_core::{ComObject, Error, GUID, HRESULT, IUnknown, Ref, implement, w}
 const PIPE_ATTRIBUTE: GUID = GUID::from_u128(0x75c753a0_587b_4064_bb77_f0171fcd4ad7);
 const ERROR_SET_NOT_FOUND_HRESULT: HRESULT = HRESULT(0x8007_0492_u32 as i32);
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Lifecycle {
     Stopped,
     Started,
@@ -74,7 +75,23 @@ impl MediaSource {
             )?;
             attributes.SetString(&MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, w!("StageSwap"))?;
         }
-        let pipe_name = read_string_attribute(activation, &PIPE_ATTRIBUTE).unwrap_or_default();
+        let pipe_name = match read_string_attribute(activation, &PIPE_ATTRIBUTE) {
+            Ok(pipe_name) if !pipe_name.is_empty() => pipe_name,
+            Ok(_) => {
+                diagnostics::always("activation contained an empty frame-pipe attribute");
+                return Err(Error::from_hresult(E_INVALIDARG));
+            }
+            Err(error) => {
+                diagnostics::always(format!(
+                    "activation is missing the frame-pipe attribute: {error}"
+                ));
+                return Err(error);
+            }
+        };
+        diagnostics::always(format!(
+            "source activated pipe_tag={:016x}",
+            diagnostics::path_tag(&pipe_name)
+        ));
         let stream = ComObject::new(MediaStream::new(pipe_name)?);
         let stream_descriptor = stream.descriptor();
         // SAFETY: the descriptor array remains alive for the constructor call.
@@ -267,6 +284,10 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
                 .GetMediaTypeHandler()?
                 .GetCurrentMediaType()?
         };
+        let subtype = unsafe { selected_type.GetGUID(&MF_MT_SUBTYPE)? };
+        diagnostics::always(format!(
+            "source start event={event_type:?} subtype={subtype:?} previous_lifecycle={previous_lifecycle:?}"
+        ));
         self.stream.set_media_type(&selected_type)?;
         let stream_checkpoint = self.stream.checkpoint()?;
         let actual_start_time = self.stream.start()?;
@@ -283,29 +304,31 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
         // SAFETY: interfaces and GUID pointers remain valid for each queue call.
         let queued = unsafe {
             self.events
-                .QueueEventParamUnk(
-                    event_type.0 as u32,
+                .QueueEventParamVar(
+                    MESourceStarted.0 as u32,
                     &GUID::zeroed(),
                     S_OK,
-                    &stream_interface,
+                    started_event_position,
                 )
                 .and_then(|()| {
-                    self.events.QueueEventParamVar(
-                        MESourceStarted.0 as u32,
+                    self.events.QueueEventParamUnk(
+                        event_type.0 as u32,
                         &GUID::zeroed(),
                         S_OK,
-                        started_event_position,
+                        &stream_interface,
                     )
                 })
                 .and_then(|()| self.stream.queue_started(started_event_position))
         };
         if let Err(error) = queued {
+            diagnostics::always(format!("source start event queue failed: {error}"));
             self.stream.restore(stream_checkpoint);
             return Err(error);
         }
         let mut state = self.state.lock().expect("source state lock poisoned");
         state.stream_announced = true;
         state.lifecycle = Lifecycle::Started;
+        diagnostics::always("source started");
         Ok(())
     }
 
@@ -333,6 +356,7 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
             .lock()
             .expect("source state lock poisoned")
             .lifecycle = Lifecycle::Stopped;
+        diagnostics::always("source stopped");
         event_result
     }
 
@@ -457,6 +481,10 @@ mod tests {
         // SAFETY: initializes the attributes out slot.
         unsafe { MFCreateAttributes(&mut activation, 4)? };
         let activation = activation.ok_or_else(|| Error::from_hresult(E_POINTER))?;
+        // SAFETY: the test activation owns its pipe attribute for the source lifetime.
+        unsafe {
+            activation.SetString(&PIPE_ATTRIBUTE, w!(r"\\.\pipe\StageSwap.MediaSource.Test"))?;
+        }
         let source = MediaSource::create(&activation)?;
         // SAFETY: exercises the COM contract on valid owned interfaces.
         unsafe {
@@ -464,26 +492,26 @@ mod tests {
             let descriptor = source.CreatePresentationDescriptor()?;
             let start = PROPVARIANT::default();
             source.Start(&descriptor, core::ptr::null(), &start)?;
-            let new_stream = source.GetEvent(Default::default())?;
-            assert_eq!(new_stream.GetType()?, MENewStream.0 as u32);
             let source_started = source.GetEvent(Default::default())?;
             assert_eq!(source_started.GetType()?, MESourceStarted.0 as u32);
             let source_started_value = source_started.GetValue()?;
             let source_started_inner = &source_started_value.Anonymous.Anonymous;
             assert_eq!(source_started_inner.vt, VT_I8);
             assert!(source_started_inner.Anonymous.hVal >= 0);
+            let new_stream = source.GetEvent(Default::default())?;
+            assert_eq!(new_stream.GetType()?, MENewStream.0 as u32);
             let repeated_absolute_position = PROPVARIANT::from(0_i64);
             let repeated_start_error = source
                 .Start(&descriptor, core::ptr::null(), &repeated_absolute_position)
                 .expect_err("a running live source must reject seek-like starts");
             assert_eq!(repeated_start_error.code(), MF_E_INVALIDREQUEST);
             source.Start(&descriptor, core::ptr::null(), &start)?;
-            let updated_stream = source.GetEvent(Default::default())?;
-            assert_eq!(updated_stream.GetType()?, MEUpdatedStream.0 as u32);
             let source_resumed = source.GetEvent(Default::default())?;
             assert_eq!(source_resumed.GetType()?, MESourceStarted.0 as u32);
             let source_resumed_value = source_resumed.GetValue()?;
             assert_eq!(source_resumed_value.Anonymous.Anonymous.vt, VT_EMPTY);
+            let updated_stream = source.GetEvent(Default::default())?;
+            assert_eq!(updated_stream.GetType()?, MEUpdatedStream.0 as u32);
             source.Stop()?;
             let live_position = PROPVARIANT::from(0_i64);
             source.Start(&descriptor, core::ptr::null(), &live_position)?;

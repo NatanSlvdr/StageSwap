@@ -1,6 +1,6 @@
 use stageswap_core::{Frame, FrameHeader, HEADER_LEN, MAX_FRAME_BYTES};
 use std::os::windows::io::AsRawHandle;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -41,6 +41,22 @@ struct Shared {
     changed: Condvar,
     stop: AtomicBool,
     failure: Mutex<Option<String>>,
+    published_sequence: AtomicU64,
+    connected: AtomicBool,
+    transmitted_sequence: AtomicU64,
+    write_failures: AtomicU64,
+    connection_count: AtomicU64,
+    connection_failures: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FramePublisherDiagnostics {
+    pub published_sequence: u64,
+    pub transmitted_sequence: u64,
+    pub connected: bool,
+    pub write_failures: u64,
+    pub connection_count: u64,
+    pub connection_failures: u64,
 }
 
 /// Single-client, bounded-memory publisher used by the out-of-process Media
@@ -74,6 +90,12 @@ impl FramePublisher {
             changed: Condvar::new(),
             stop: AtomicBool::new(false),
             failure: Mutex::new(None),
+            published_sequence: AtomicU64::new(0),
+            connected: AtomicBool::new(false),
+            transmitted_sequence: AtomicU64::new(0),
+            write_failures: AtomicU64::new(0),
+            connection_count: AtomicU64::new(0),
+            connection_failures: AtomicU64::new(0),
         });
         let worker_shared = Arc::clone(&shared);
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
@@ -117,6 +139,10 @@ impl FramePublisher {
             shared: Arc::clone(&self.shared),
         }
     }
+
+    pub fn diagnostics(&self) -> FramePublisherDiagnostics {
+        self.sink().diagnostics()
+    }
 }
 
 impl FramePublisherSink {
@@ -133,8 +159,9 @@ impl FramePublisherSink {
             .lock()
             .map_err(|_| "frame publisher state is poisoned")?;
         latest.sequence = latest.sequence.wrapping_add(1).max(1);
+        let sequence = latest.sequence;
         latest.header = FrameHeader {
-            sequence: latest.sequence,
+            sequence,
             size: frame.size,
             stride: frame.stride,
             timestamp_100ns: frame.timestamp_100ns,
@@ -144,6 +171,9 @@ impl FramePublisherSink {
         .map_err(|error| format!("invalid IPC frame: {error:?}"))?;
         latest.pixels = frame.pixels_arc();
         drop(latest);
+        self.shared
+            .published_sequence
+            .store(sequence, Ordering::Release);
         self.shared.changed.notify_all();
         Ok(())
     }
@@ -156,13 +186,28 @@ impl FramePublisherSink {
             .lock()
             .map_err(|_| "frame publisher state is poisoned")?;
         latest.sequence = latest.sequence.wrapping_add(1).max(1);
-        latest.header = FrameHeader::invalidation(latest.sequence)
+        let sequence = latest.sequence;
+        latest.header = FrameHeader::invalidation(sequence)
             .and_then(FrameHeader::encode)
             .map_err(|error| format!("invalid IPC invalidation: {error:?}"))?;
         latest.pixels = Arc::from([]);
         drop(latest);
+        self.shared
+            .published_sequence
+            .store(sequence, Ordering::Release);
         self.shared.changed.notify_all();
         Ok(())
+    }
+
+    pub fn diagnostics(&self) -> FramePublisherDiagnostics {
+        FramePublisherDiagnostics {
+            published_sequence: self.shared.published_sequence.load(Ordering::Acquire),
+            transmitted_sequence: self.shared.transmitted_sequence.load(Ordering::Acquire),
+            connected: self.shared.connected.load(Ordering::Acquire),
+            write_failures: self.shared.write_failures.load(Ordering::Acquire),
+            connection_count: self.shared.connection_count.load(Ordering::Acquire),
+            connection_failures: self.shared.connection_failures.load(Ordering::Acquire),
+        }
     }
 
     fn check_worker(&self) -> Result<(), String> {
@@ -271,41 +316,62 @@ fn server_loop(
                 .map_err(|_| "frame publisher startup receiver was dropped".to_string())?;
         }
         // SAFETY: pipe is a live server-side named-pipe handle.
-        let connected = unsafe { ConnectNamedPipe(pipe.0, None) }.is_ok()
-            || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
+        let connected = if unsafe { ConnectNamedPipe(pipe.0, None) }.is_ok() {
+            true
+        } else {
+            let error = unsafe { GetLastError() };
+            if error == ERROR_PIPE_CONNECTED {
+                true
+            } else {
+                if !shared.stop.load(Ordering::Acquire) {
+                    shared.connection_failures.fetch_add(1, Ordering::Relaxed);
+                }
+                false
+            }
+        };
         if !connected {
             continue;
         }
-        send_frames(pipe.0, shared);
+        shared.connected.store(true, Ordering::Release);
+        shared.connection_count.fetch_add(1, Ordering::Relaxed);
+        let write_failed = send_frames(pipe.0, shared);
+        shared.connected.store(false, Ordering::Release);
+        if write_failed && !shared.stop.load(Ordering::Acquire) {
+            shared.write_failures.fetch_add(1, Ordering::Relaxed);
+        }
         // SAFETY: pipe remains live through this call.
         let _ = unsafe { DisconnectNamedPipe(pipe.0) };
     }
     Ok(())
 }
 
-fn send_frames(pipe: HANDLE, shared: &Shared) {
+fn send_frames(pipe: HANDLE, shared: &Shared) -> bool {
     let mut sent = 0;
     while !shared.stop.load(Ordering::Acquire) {
         let Ok(latest) = shared.latest.lock() else {
-            return;
+            return false;
         };
         let Ok(latest) = shared.changed.wait_while(latest, |latest| {
             latest.sequence == sent && !shared.stop.load(Ordering::Acquire)
         }) else {
-            return;
+            return false;
         };
         if shared.stop.load(Ordering::Acquire) {
-            return;
+            return false;
         }
         let sequence = latest.sequence;
         let header = latest.header;
         let pixels = Arc::clone(&latest.pixels);
         drop(latest);
         if !write_all(pipe, &header) || (!pixels.is_empty() && !write_all(pipe, &pixels)) {
-            return;
+            return true;
         }
         sent = sequence;
+        shared
+            .transmitted_sequence
+            .store(sequence, Ordering::Release);
     }
+    false
 }
 
 fn write_all(pipe: HANDLE, mut bytes: &[u8]) -> bool {

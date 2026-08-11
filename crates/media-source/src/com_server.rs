@@ -14,6 +14,7 @@ use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows_core::{BOOL, Error, GUID, HRESULT, IUnknown, Interface, PCWSTR, Ref, implement};
 
 mod activation;
+mod diagnostics;
 mod media_source;
 mod media_stream;
 mod pipe_reader;

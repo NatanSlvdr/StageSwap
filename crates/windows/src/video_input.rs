@@ -32,23 +32,48 @@ use windows_core::{HRESULT, Interface, PCWSTR, PWSTR, Ref, implement};
 const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 const WEBCAM_FAILURE_THRESHOLD: u32 = 3;
 
-fn webcam_error_message(context: &str, code: HRESULT) -> String {
+fn device_identity_tag(device_id: &str) -> u64 {
+    device_id.bytes().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
+fn webcam_error_message(
+    context: &str,
+    code: HRESULT,
+    device_tag: u64,
+    capture_generation: u64,
+) -> String {
+    let details = if device_tag == 0 {
+        format!(
+            "HRESULT=0x{:08X}, device=unknown, capture_generation={capture_generation}",
+            code.0 as u32
+        )
+    } else {
+        format!(
+            "HRESULT=0x{:08X}, device_tag={device_tag:016x}, capture_generation={capture_generation}",
+            code.0 as u32,
+        )
+    };
     if code == E_ACCESSDENIED {
         return format!(
-            "{context}: camera access was denied or camera privacy is disabled; open Windows Settings > Privacy & security > Camera"
+            "{context}: camera access was denied or camera privacy is disabled; open Windows Settings > Privacy & security > Camera ({details})"
         );
     }
     if code == MF_E_VIDEO_RECORDING_DEVICE_PREEMPTED {
         return format!(
-            "{context}: the webcam is in use; close Zoom, Teams, or another application using it, then restart the webcam"
+            "{context}: the webcam is in use; close Zoom, Teams, or another application using it, then restart the webcam ({details})"
         );
     }
     if code == MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED {
         return format!(
-            "{context}: the webcam was disconnected or invalidated; reconnect it and restart the webcam"
+            "{context}: the webcam was disconnected or invalidated; reconnect it and restart the webcam ({details})"
         );
     }
-    format!("{context}: {}", windows_core::Error::from_hresult(code))
+    format!(
+        "{context}: {} ({details})",
+        windows_core::Error::from_hresult(code)
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -62,6 +87,7 @@ struct WebcamFormatCandidate {
     size: Size,
     frame_rate_numerator: u32,
     frame_rate_denominator: u32,
+    subtype: &'static str,
     subtype_rank: u8,
 }
 
@@ -76,14 +102,14 @@ fn ranked_native_formats(reader: &IMFSourceReader) -> Vec<WebcamFormatCandidate>
         let Ok(subtype) = (unsafe { media_type.GetGUID(&MF_MT_SUBTYPE) }) else {
             continue;
         };
-        let subtype_rank = if subtype == MFVideoFormat_RGB32 {
-            0
+        let (subtype, subtype_rank) = if subtype == MFVideoFormat_RGB32 {
+            ("RGB32", 0)
         } else if subtype == MFVideoFormat_NV12 {
-            1
+            ("NV12", 1)
         } else if subtype == MFVideoFormat_YUY2 {
-            2
+            ("YUY2", 2)
         } else if subtype == MFVideoFormat_MJPG {
-            3
+            ("MJPG", 3)
         } else {
             continue;
         };
@@ -101,6 +127,7 @@ fn ranked_native_formats(reader: &IMFSourceReader) -> Vec<WebcamFormatCandidate>
             size: Size::new((frame_size >> 32) as u32, frame_size as u32),
             frame_rate_numerator: (frame_rate >> 32) as u32,
             frame_rate_denominator: frame_rate as u32,
+            subtype,
             subtype_rank,
         };
         if candidate.size.width > 0
@@ -147,7 +174,8 @@ fn negotiate_rgb32_output(
         || "no ranked native format".to_owned(),
         |format| {
             format!(
-                "{}x{} {}/{} fps subtype-rank {}",
+                "{} {}x{} {}/{} fps subtype-rank {}",
+                format.subtype,
                 format.size.width,
                 format.size.height,
                 format.frame_rate_numerator,
@@ -160,6 +188,7 @@ fn negotiate_rgb32_output(
         size: PIPELINE_SIZE,
         frame_rate_numerator: 30,
         frame_rate_denominator: 1,
+        subtype: "RGB32",
         subtype_rank: 0,
     };
     let mut candidates = vec![exact];
@@ -173,7 +202,8 @@ fn negotiate_rgb32_output(
             | u64::from(candidate.frame_rate_denominator);
         let Some(row_bytes) = candidate.size.width.checked_mul(4) else {
             last_error = format!(
-                "{}x{} at {}/{} fps has an overflowing RGB32 row size",
+                "{} {}x{} at {}/{} fps has an overflowing RGB32 row size",
+                candidate.subtype,
                 candidate.size.width,
                 candidate.size.height,
                 candidate.frame_rate_numerator,
@@ -183,7 +213,8 @@ fn negotiate_rgb32_output(
         };
         let Some(sample_size) = row_bytes.checked_mul(candidate.size.height) else {
             last_error = format!(
-                "{}x{} at {}/{} fps has an overflowing RGB32 sample size",
+                "{} {}x{} at {}/{} fps has an overflowing RGB32 sample size",
+                candidate.subtype,
                 candidate.size.width,
                 candidate.size.height,
                 candidate.frame_rate_numerator,
@@ -208,7 +239,8 @@ fn negotiate_rgb32_output(
         })();
         if let Err(error) = configured {
             last_error = format!(
-                "{}x{} at {}/{} fps was rejected: {error}",
+                "{} {}x{} at {}/{} fps was rejected: {error}",
+                candidate.subtype,
                 candidate.size.width,
                 candidate.size.height,
                 candidate.frame_rate_numerator,
@@ -493,6 +525,7 @@ struct CaptureState {
     generation: AtomicU64,
     sequence: AtomicU64,
     dropped_frames: AtomicU64,
+    device_tag: AtomicU64,
 }
 
 impl Default for CaptureState {
@@ -514,6 +547,7 @@ impl Default for CaptureState {
             generation: AtomicU64::new(0),
             sequence: AtomicU64::new(0),
             dropped_frames: AtomicU64::new(0),
+            device_tag: AtomicU64::new(0),
         }
     }
 }
@@ -610,8 +644,17 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
             return Ok(());
         }
         if status.is_err() {
-            self.state
-                .set_failure(webcam_error_message("webcam sample failed", status), true);
+            let device_tag = self.state.device_tag.load(Ordering::Acquire);
+            let capture_generation = self.state.generation.load(Ordering::Acquire);
+            self.state.set_failure(
+                webcam_error_message(
+                    "webcam sample failed",
+                    status,
+                    device_tag,
+                    capture_generation,
+                ),
+                true,
+            );
             return Ok(());
         } else if flags & MF_SOURCE_READERF_ERROR.0 as u32 != 0 {
             self.state
@@ -847,8 +890,16 @@ impl VideoInput for MediaFoundationVideoInput {
             Ok(())
         })()
         .map_err(|error| format!("could not configure video source: {error}"))?;
-        let source = unsafe { MFCreateDeviceSource(&source_attributes) }
-            .map_err(|error| webcam_error_message("could not open video source", error.code()))?;
+        let device_tag = device_identity_tag(device_id);
+        let capture_generation = self.state.generation.load(Ordering::Acquire);
+        let source = unsafe { MFCreateDeviceSource(&source_attributes) }.map_err(|error| {
+            webcam_error_message(
+                "could not open video source",
+                error.code(),
+                device_tag,
+                capture_generation,
+            )
+        })?;
         let expected_generation = self.state.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let callback: IMFSourceReaderCallback = ReaderCallback {
             state: Arc::clone(&self.state),
@@ -882,6 +933,7 @@ impl VideoInput for MediaFoundationVideoInput {
             .lock()
             .map_err(|_| "webcam format state is poisoned")? = format.size;
         self.state.stride.store(format.stride, Ordering::Release);
+        self.state.device_tag.store(device_tag, Ordering::Release);
         self.state.clear_failure();
         *self
             .state
@@ -908,6 +960,7 @@ impl VideoInput for MediaFoundationVideoInput {
             *aspect_ratio = None;
         }
         self.state.stride.store(0, Ordering::Release);
+        self.state.device_tag.store(0, Ordering::Release);
         if let Ok(mut format) = self.state.format.lock() {
             *format = Size::default();
         }

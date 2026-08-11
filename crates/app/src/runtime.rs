@@ -20,9 +20,9 @@ use stageswap_core::{MonitorDescriptor, RestartTarget};
 use stageswap_core::{MonitorScore, MonitorTracker, MonitorTrackerSettings};
 #[cfg(windows)]
 use stageswap_windows::{
-    FramePublisher, FramePublisherSink, InputDevice, MediaFoundationVideoInput, ScreenInput,
-    VideoInput, VirtualCameraController, WindowsGraphicsScreenInput, choose_video_device,
-    frame_pipe_name,
+    FramePublisher, FramePublisherDiagnostics, FramePublisherSink, InputDevice,
+    MediaFoundationVideoInput, ScreenInput, VideoInput, VirtualCameraController,
+    WindowsGraphicsScreenInput, choose_video_device, frame_pipe_name,
 };
 #[cfg(any(windows, test))]
 use std::collections::HashSet;
@@ -660,6 +660,19 @@ struct RuntimeState {
     pending_reference_capture: Option<Arc<Frame>>,
     #[cfg(any(windows, test))]
     webcam_crop: WebcamCropCache,
+    #[cfg(windows)]
+    publisher_diagnostics: PublisherDiagnosticsState,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct PublisherDiagnosticsState {
+    last_published_sequence: u64,
+    last_transmitted_sequence: u64,
+    last_connected: Option<bool>,
+    last_write_failures: u64,
+    last_connection_failures: u64,
+    last_reported_at: Option<Instant>,
 }
 
 impl RuntimeState {
@@ -713,6 +726,8 @@ impl RuntimeState {
             pending_reference_capture: None,
             #[cfg(any(windows, test))]
             webcam_crop: WebcamCropCache::default(),
+            #[cfg(windows)]
+            publisher_diagnostics: PublisherDiagnosticsState::default(),
         }
     }
 
@@ -737,6 +752,43 @@ impl RuntimeState {
     fn clear_warning(&mut self, source: WarningSource) {
         if self.warnings.clear(source) {
             self.snapshot.warning = self.warnings.top();
+        }
+    }
+
+    #[cfg(windows)]
+    fn record_publisher_diagnostics(
+        &mut self,
+        diagnostics: FramePublisherDiagnostics,
+        now: Instant,
+    ) {
+        let previous = &self.publisher_diagnostics;
+        let state_changed = previous.last_connected != Some(diagnostics.connected)
+            || diagnostics.write_failures != previous.last_write_failures
+            || diagnostics.connection_failures != previous.last_connection_failures;
+        let progress_changed = diagnostics.published_sequence != previous.last_published_sequence
+            || diagnostics.transmitted_sequence != previous.last_transmitted_sequence;
+        let heartbeat_due = previous
+            .last_reported_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(5));
+        let should_report = state_changed || (progress_changed && heartbeat_due);
+        self.publisher_diagnostics = PublisherDiagnosticsState {
+            last_published_sequence: diagnostics.published_sequence,
+            last_transmitted_sequence: diagnostics.transmitted_sequence,
+            last_connected: Some(diagnostics.connected),
+            last_write_failures: diagnostics.write_failures,
+            last_connection_failures: diagnostics.connection_failures,
+            last_reported_at: should_report.then_some(now),
+        };
+        if should_report {
+            self.record(format!(
+                "Virtual camera pipe status: connected={}, published_sequence={}, transmitted_sequence={}, write_failures={}, connection_count={}, connection_failures={}",
+                diagnostics.connected,
+                diagnostics.published_sequence,
+                diagnostics.transmitted_sequence,
+                diagnostics.write_failures,
+                diagnostics.connection_count,
+                diagnostics.connection_failures,
+            ));
         }
     }
 
@@ -863,7 +915,17 @@ impl RuntimeState {
 
     fn record_command(&mut self, enabled: bool, message: impl Into<String>) {
         if enabled {
-            self.record(message);
+            let message = message.into();
+            let is_coalesced_device_request = matches!(
+                message.as_str(),
+                "Video device list refreshed" | "Monitor rescan requested"
+            ) && self
+                .activity
+                .back()
+                .is_some_and(|previous| previous == &message);
+            if !is_coalesced_device_request {
+                self.record(message);
+            }
         }
     }
 
@@ -1334,33 +1396,72 @@ fn persist_rgba_atomic(
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
     {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("could not create reference directory: {error}"))?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "could not create reference directory {}: {error}",
+                parent.display()
+            )
+        })?;
     }
     let pending = pending_reference_path(destination);
-    cleanup_pending_reference(destination);
-    let result = (|| {
-        image::save_buffer(
-            &pending,
-            rgba.as_raw(),
-            rgba.width(),
-            rgba.height(),
-            image::ColorType::Rgba8,
-        )
-        .map_err(|error| format!("could not encode pending reference image: {error}"))?;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&pending)
-            .and_then(|file| file.sync_all())
-            .map_err(|error| format!("could not flush pending reference image: {error}"))?;
-        validate_pending_reference(&pending, rgba.width(), rgba.height())?;
-        replace_reference_atomic(&pending, destination)
-    })();
-    if result.is_err() {
+    let mut last_error = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            let delay = Duration::from_millis(50 * (1_u64 << (attempt - 1)));
+            thread::sleep(delay);
+        }
         cleanup_pending_reference(destination);
+        match persist_rgba_once(rgba, destination, &pending) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(format!("attempt {}: {error}", attempt + 1));
+            }
+        }
     }
-    result
+    cleanup_pending_reference(destination);
+    Err(format!(
+        "could not persist reference image at {} (pending {}): {}",
+        destination.display(),
+        pending.display(),
+        last_error.unwrap_or_else(|| "unknown persistence failure".into())
+    ))
+}
+
+fn persist_rgba_once(
+    rgba: &image::RgbaImage,
+    destination: &std::path::Path,
+    pending: &std::path::Path,
+) -> Result<(), String> {
+    image::save_buffer(
+        pending,
+        rgba.as_raw(),
+        rgba.width(),
+        rgba.height(),
+        image::ColorType::Rgba8,
+    )
+    .map_err(|error| {
+        format!(
+            "could not encode pending reference image {}: {error}",
+            pending.display()
+        )
+    })?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(pending)
+        .map_err(|error| {
+            format!(
+                "could not open pending reference image {} for flush: {error}",
+                pending.display()
+            )
+        })?;
+    file.sync_all().map_err(|error| {
+        format!(
+            "could not flush pending reference image {}: {error}",
+            pending.display()
+        )
+    })?;
+    validate_pending_reference(pending, rgba.width(), rgba.height())?;
+    replace_reference_atomic(pending, destination)
 }
 
 fn validate_pending_reference(
@@ -1370,15 +1471,26 @@ fn validate_pending_reference(
 ) -> Result<(), String> {
     use image::ImageDecoder;
     let decoder = image::codecs::png::PngDecoder::new(std::io::BufReader::new(
-        std::fs::File::open(pending)
-            .map_err(|error| format!("could not reopen pending reference image: {error}"))?,
+        std::fs::File::open(pending).map_err(|error| {
+            format!(
+                "could not reopen pending reference image {}: {error}",
+                pending.display()
+            )
+        })?,
     ))
-    .map_err(|error| format!("pending reference is not a valid PNG: {error}"))?;
+    .map_err(|error| {
+        format!(
+            "pending reference {} is not a valid PNG: {error}",
+            pending.display()
+        )
+    })?;
     let dimensions = decoder.dimensions();
     if dimensions != (expected_width, expected_height) {
         return Err(format!(
-            "pending reference dimensions changed from {expected_width}x{expected_height} to {}x{}",
-            dimensions.0, dimensions.1
+            "pending reference {} dimensions changed from {expected_width}x{expected_height} to {}x{}",
+            pending.display(),
+            dimensions.0,
+            dimensions.1
         ));
     }
     Ok(())
@@ -1389,8 +1501,13 @@ fn replace_reference_atomic(
     source: &std::path::Path,
     destination: &std::path::Path,
 ) -> Result<(), String> {
-    stageswap_windows::replace_file_atomic(source, destination)
-        .map_err(|error| format!("could not atomically replace reference image: {error}"))
+    stageswap_windows::replace_file_atomic(source, destination).map_err(|error| {
+        format!(
+            "could not atomically replace reference image {} -> {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })
 }
 
 #[cfg(not(windows))]
@@ -1398,8 +1515,13 @@ fn replace_reference_atomic(
     source: &std::path::Path,
     destination: &std::path::Path,
 ) -> Result<(), String> {
-    std::fs::rename(source, destination)
-        .map_err(|error| format!("could not atomically replace reference image: {error}"))
+    std::fs::rename(source, destination).map_err(|error| {
+        format!(
+            "could not atomically replace reference image {} -> {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -2050,6 +2172,14 @@ struct DevicePlatform {
 
 #[cfg(windows)]
 impl DevicePlatform {
+    fn record_webcam_format(state: &mut RuntimeState, webcam: &MediaFoundationVideoInput) {
+        let native = webcam.selected_native_format().unwrap_or("unknown");
+        let output = webcam.selected_output_format().unwrap_or("unknown");
+        state.record(format!(
+            "Webcam format negotiated: native={native}; output={output}"
+        ));
+    }
+
     fn new(
         state: &mut RuntimeState,
         output_ready: impl FnOnce(&RuntimeState, Option<FramePublisherSink>),
@@ -2075,7 +2205,10 @@ impl DevicePlatform {
             pipe_name
                 .as_ref()
                 .and_then(|pipe_name| match FramePublisher::start(pipe_name) {
-                    Ok(publisher) => Some(publisher),
+                    Ok(publisher) => {
+                        state.record("Virtual camera frame pipe created");
+                        Some(publisher)
+                    }
                     Err(error) => {
                         state
                             .snapshot
@@ -2169,6 +2302,7 @@ impl DevicePlatform {
                         webcam.selected_native_format().map(str::to_owned);
                     state.snapshot.webcam_output_format =
                         webcam.selected_output_format().map(str::to_owned);
+                    Self::record_webcam_format(state, &webcam);
                     state.record("Webcam initialized");
                 } else if devices.is_empty() {
                     state
@@ -2210,7 +2344,11 @@ impl DevicePlatform {
                                 .snapshot
                                 .screen_component
                                 .waiting_for_first_frame(now, now + SCREEN_FIRST_FRAME_TIMEOUT);
-                            state.record(format!("Screen capture initialized: {}", monitor.label));
+                            state.record(format!(
+                                "Screen capture initialized: {} generation={}",
+                                monitor.label,
+                                screen.generation()
+                            ));
                             Some(monitor)
                         }
                         Err(error) => {
@@ -2333,6 +2471,7 @@ impl DevicePlatform {
                                     self.webcam.selected_native_format().map(str::to_owned);
                                 state.snapshot.webcam_output_format =
                                     self.webcam.selected_output_format().map(str::to_owned);
+                                Self::record_webcam_format(state, &self.webcam);
                             }
                             Err(error) => {
                                 state.snapshot.webcam_state = DeviceState::Failed;
@@ -2524,6 +2663,7 @@ impl DevicePlatform {
                     self.webcam.selected_native_format().map(str::to_owned);
                 state.snapshot.webcam_output_format =
                     self.webcam.selected_output_format().map(str::to_owned);
+                Self::record_webcam_format(state, &self.webcam);
                 state.record("Webcam restarted");
             }
             Err(error) => {
@@ -2699,7 +2839,10 @@ impl DevicePlatform {
             state.snapshot.screen_component.last_success_at = Some(received_at);
             state.snapshot.previews.screen = Some(screen);
             if !was_ready {
-                state.record("Screen capture first frame received");
+                state.record(format!(
+                    "Screen capture first frame received generation={}",
+                    self.screen.generation()
+                ));
             }
         } else if state
             .snapshot
@@ -2801,7 +2944,10 @@ impl DevicePlatform {
                     .snapshot
                     .screen_component
                     .waiting_for_first_frame(now, now + SCREEN_FIRST_FRAME_TIMEOUT);
-                state.record("Screen capture restarted");
+                state.record(format!(
+                    "Screen capture restarted generation={}",
+                    self.screen.generation()
+                ));
             }
             Err(error) => {
                 state.snapshot.screen_state = DeviceState::Failed;
@@ -2845,14 +2991,16 @@ impl DevicePlatform {
         {
             ScreenCaptureRecoveryObservation::Clear => {}
             ScreenCaptureRecoveryObservation::AwaitingConfirmation => {
-                state.record(
-                    "Screen capture is black or unavailable; awaiting the next automatic recovery check",
-                );
+                state.record(format!(
+                    "Screen capture is black or unavailable; awaiting the next automatic recovery check generation={}",
+                    self.screen.generation()
+                ));
             }
             ScreenCaptureRecoveryObservation::Restart => {
-                state.record(
-                    "Screen capture remains black or unavailable; restarting screen capture",
-                );
+                state.record(format!(
+                    "Screen capture remains black or unavailable; restarting screen capture generation={}",
+                    self.screen.generation()
+                ));
                 self.restart_screen_with_policy(state, true);
             }
         }
@@ -3369,6 +3517,7 @@ impl Platform {
                     }
                 }
             }
+            state.record_publisher_diagnostics(publisher.diagnostics(), now);
         }
     }
 
@@ -4158,6 +4307,26 @@ mod tests {
         assert!(state.command(Command::Start));
         assert_eq!(state.snapshot.recent_activity.len(), 1);
         assert_eq!(state.snapshot.recent_activity[0], "Automation started");
+    }
+
+    #[test]
+    fn duplicate_device_refresh_and_rescan_activity_is_coalesced() {
+        let mut state = RuntimeState::new(AppConfig::default());
+
+        assert!(state.command(Command::RefreshVideoDevices));
+        assert!(state.command(Command::RefreshVideoDevices));
+        assert!(state.command(Command::Rescan));
+        assert!(state.command(Command::Rescan));
+
+        assert_eq!(state.snapshot.recent_activity.len(), 2);
+        assert_eq!(
+            state.snapshot.recent_activity[0],
+            "Video device list refreshed"
+        );
+        assert_eq!(
+            state.snapshot.recent_activity[1],
+            "Monitor rescan requested"
+        );
     }
 
     #[test]

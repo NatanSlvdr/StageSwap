@@ -9,7 +9,7 @@ use std::sync::Arc;
 #[cfg(windows)]
 mod pipe;
 #[cfg(windows)]
-pub use pipe::{FramePublisher, FramePublisherSink};
+pub use pipe::{FramePublisher, FramePublisherDiagnostics, FramePublisherSink};
 #[cfg(windows)]
 mod virtual_camera;
 #[cfg(windows)]
