@@ -20,8 +20,9 @@ use stageswap_core::{MonitorDescriptor, RestartTarget};
 use stageswap_core::{MonitorScore, MonitorTracker, MonitorTrackerSettings};
 #[cfg(windows)]
 use stageswap_windows::{
-    FramePublisher, FramePublisherSink, MediaFoundationVideoInput, ScreenInput, VideoInput,
-    VirtualCameraController, WindowsGraphicsScreenInput, choose_video_device, frame_pipe_name,
+    FramePublisher, FramePublisherSink, InputDevice, MediaFoundationVideoInput, ScreenInput,
+    VideoInput, VirtualCameraController, WindowsGraphicsScreenInput, choose_video_device,
+    frame_pipe_name,
 };
 #[cfg(any(windows, test))]
 use std::collections::HashSet;
@@ -29,7 +30,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(windows)]
 use std::sync::mpsc::{self, Receiver};
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use std::sync::{Condvar, Mutex};
 
 const COMMAND_CAPACITY: usize = 32;
@@ -61,7 +62,7 @@ fn finish_worker_shutdown(
 const FPS_TRACKING_WINDOW: Duration = Duration::from_secs(1);
 #[cfg(any(windows, test))]
 use stageswap_core::ComponentLifecycle;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use stageswap_core::FRAME_STALE_AFTER;
 #[cfg(windows)]
 use stageswap_core::{ComponentFailureKind, ScreenFailureKind, WebcamFailureKind};
@@ -776,31 +777,35 @@ impl RuntimeState {
     }
 
     fn command(&mut self, command: Command) -> bool {
+        self.apply_command(command, true)
+    }
+
+    fn apply_command(&mut self, command: Command, record_activity: bool) -> bool {
         match command {
             Command::Start => {
                 self.snapshot.run_state = RunState::Running;
-                self.record("Automation started");
+                self.record_command(record_activity, "Automation started");
             }
             Command::Stop => {
                 self.snapshot.run_state = RunState::Stopped;
                 self.show_off_output(Instant::now());
-                self.record("Automation stopped");
+                self.record_command(record_activity, "Automation stopped");
             }
             Command::ToggleDisco => {
                 if self.disco.is_some() {
                     self.disco = None;
                     self.snapshot.disco_enabled = false;
-                    self.record("Disco mode disabled");
+                    self.record_command(record_activity, "Disco mode disabled");
                 } else {
                     self.disco = Some(DiscoEffect::new(PIPELINE_SIZE));
                     self.snapshot.disco_enabled = true;
-                    self.record("Disco mode enabled");
+                    self.record_command(record_activity, "Disco mode enabled");
                 }
             }
             Command::SetMode(mode) => {
                 self.snapshot.mode = mode;
                 self.config.output_mode = mode;
-                self.record(format!("Output mode changed to {mode:?}"));
+                self.record_command(record_activity, format!("Output mode changed to {mode:?}"));
             }
             Command::UpdateSettings(config) | Command::ReloadSettings(config) => {
                 let threshold_changed =
@@ -821,32 +826,45 @@ impl RuntimeState {
                     });
                     self.snapshot.detection = stageswap_core::DetectionState::Unknown;
                 }
-                self.record("Settings updated");
+                self.record_command(record_activity, "Settings updated");
             }
             Command::CaptureReference => {
-                self.record("Reference capture requested");
+                self.record_command(record_activity, "Reference capture requested");
             }
             Command::CaptureReferenceCandidate => {
-                self.record("Reference candidate capture requested")
+                self.record_command(record_activity, "Reference candidate capture requested")
             }
-            Command::ConfirmReferenceCandidate => {
-                self.record("Reference candidate confirmation requested")
-            }
+            Command::ConfirmReferenceCandidate => self.record_command(
+                record_activity,
+                "Reference candidate confirmation requested",
+            ),
             Command::DiscardReferenceCandidate => {
                 self.discard_reference_candidate();
-                self.record("Reference candidate discarded")
+                self.record_command(record_activity, "Reference candidate discarded")
             }
             Command::ImportReference(path) => {
                 let _ = path;
-                self.record("Reference import requested");
+                self.record_command(record_activity, "Reference import requested");
             }
-            Command::SelectMonitor(_) => self.record("Tracked monitor selection requested"),
-            Command::RefreshVideoDevices => self.record("Video device list refreshed"),
-            Command::Rescan => self.record("Monitor rescan requested"),
-            Command::Restart(target) => self.record(format!("Restart requested: {target:?}")),
+            Command::SelectMonitor(_) => {
+                self.record_command(record_activity, "Tracked monitor selection requested")
+            }
+            Command::RefreshVideoDevices => {
+                self.record_command(record_activity, "Video device list refreshed")
+            }
+            Command::Rescan => self.record_command(record_activity, "Monitor rescan requested"),
+            Command::Restart(target) => {
+                self.record_command(record_activity, format!("Restart requested: {target:?}"))
+            }
             Command::Exit => return false,
         }
         true
+    }
+
+    fn record_command(&mut self, enabled: bool, message: impl Into<String>) {
+        if enabled {
+            self.record(message);
+        }
     }
 
     fn show_off_output(&mut self, now: Instant) {
@@ -1330,7 +1348,10 @@ fn persist_rgba_atomic(
             image::ColorType::Rgba8,
         )
         .map_err(|error| format!("could not encode pending reference image: {error}"))?;
-        std::fs::File::open(&pending)
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&pending)
             .and_then(|file| file.sync_all())
             .map_err(|error| format!("could not flush pending reference image: {error}"))?;
         validate_pending_reference(&pending, rgba.width(), rgba.height())?;
@@ -1737,28 +1758,226 @@ struct MonitorScanResult {
     scores: Vec<MonitorScore>,
 }
 
+#[cfg(any(windows, test))]
+struct CoalescingSlot<T> {
+    pending: Mutex<Option<T>>,
+    changed: Condvar,
+}
+
+#[cfg(any(windows, test))]
+impl<T> CoalescingSlot<T> {
+    fn new() -> Self {
+        Self {
+            pending: Mutex::new(None),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn replace(&self, value: T) -> bool {
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        *pending = Some(value);
+        self.changed.notify_one();
+        true
+    }
+
+    #[cfg(test)]
+    fn take(&self) -> Option<T> {
+        self.pending
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take())
+    }
+
+    #[cfg(windows)]
+    fn wait_take(&self, stop: &StdAtomicBool) -> Option<T> {
+        let mut pending = self
+            .pending
+            .lock()
+            .expect("coalescing worker request state is not poisoned");
+        while pending.is_none() && !stop.load(StdOrdering::Acquire) {
+            pending = self
+                .changed
+                .wait(pending)
+                .expect("coalescing worker request state is not poisoned");
+        }
+        if stop.load(StdOrdering::Acquire) {
+            None
+        } else {
+            pending.take()
+        }
+    }
+
+    fn clear(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = None;
+        }
+    }
+
+    #[cfg(windows)]
+    fn wake(&self) {
+        self.changed.notify_all();
+    }
+}
+
 #[cfg(windows)]
 struct MonitorScanWorker {
-    result: Option<MonitorScanResult>,
+    pending: Arc<CoalescingSlot<MonitorScanRequest>>,
+    result: Arc<Mutex<Option<MonitorScanResult>>>,
+    stop: Arc<AtomicBool>,
+    done: Receiver<()>,
+    worker: Option<JoinHandle<()>>,
 }
 
 #[cfg(windows)]
 impl MonitorScanWorker {
     fn start() -> Result<Self, String> {
-        Ok(Self { result: None })
+        let pending = Arc::new(CoalescingSlot::new());
+        let worker_pending = Arc::clone(&pending);
+        let result = Arc::new(Mutex::new(None));
+        let worker_result = Arc::clone(&result);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let (done_sender, done) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("stageswap-monitor-scan".into())
+            .spawn(move || {
+                loop {
+                    let request = worker_pending.wait_take(&worker_stop);
+                    let Some(request) = request else {
+                        break;
+                    };
+                    let scan = scan_monitors(request);
+                    if let Ok(mut result) = worker_result.lock() {
+                        *result = Some(scan);
+                    }
+                }
+                let _ = done_sender.try_send(());
+            })
+            .map_err(|error| format!("could not start monitor scan worker: {error}"))?;
+        Ok(Self {
+            pending,
+            result,
+            stop,
+            done,
+            worker: Some(worker),
+        })
     }
 
-    fn request(&mut self, request: MonitorScanRequest) -> bool {
-        self.result = Some(scan_monitors(request));
-        true
+    fn request(&self, request: MonitorScanRequest) -> bool {
+        if self.stop.load(Ordering::Acquire) {
+            return false;
+        }
+        self.pending.replace(request)
     }
 
-    fn poll(&mut self) -> Option<MonitorScanResult> {
-        self.result.take()
+    fn poll(&self) -> Option<MonitorScanResult> {
+        self.result.lock().ok().and_then(|mut result| result.take())
     }
 
-    fn clear_pending(&mut self) {
-        self.result = None;
+    fn clear_pending(&self) {
+        self.pending.clear();
+        if let Ok(mut result) = self.result.lock() {
+            *result = None;
+        }
+    }
+
+    fn signal_shutdown(&self) {
+        self.stop.store(true, Ordering::Release);
+        self.pending.wake();
+    }
+
+    fn finish_shutdown(&mut self) {
+        self.signal_shutdown();
+        let _ = finish_worker_shutdown(&self.done, &mut self.worker, WORKER_SHUTDOWN_TIMEOUT);
+    }
+}
+
+#[cfg(windows)]
+impl Drop for MonitorScanWorker {
+    fn drop(&mut self) {
+        if self.worker.is_some() {
+            self.finish_shutdown();
+        }
+    }
+}
+
+#[cfg(windows)]
+type VideoDeviceEnumeration = Result<Vec<InputDevice>, String>;
+
+#[cfg(windows)]
+struct VideoDeviceWorker {
+    pending: Arc<CoalescingSlot<()>>,
+    result: Arc<Mutex<Option<VideoDeviceEnumeration>>>,
+    stop: Arc<AtomicBool>,
+    done: Receiver<()>,
+    worker: Option<JoinHandle<()>>,
+}
+
+#[cfg(windows)]
+impl VideoDeviceWorker {
+    fn start() -> Result<Self, String> {
+        let pending = Arc::new(CoalescingSlot::new());
+        let worker_pending = Arc::clone(&pending);
+        let result = Arc::new(Mutex::new(None));
+        let worker_result = Arc::clone(&result);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let (done_sender, done) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("stageswap-video-device-enumeration".into())
+            .spawn(move || {
+                let input = MediaFoundationVideoInput::default();
+                loop {
+                    if worker_pending.wait_take(&worker_stop).is_none() {
+                        break;
+                    }
+                    let enumeration = input.enumerate();
+                    if let Ok(mut result) = worker_result.lock() {
+                        *result = Some(enumeration);
+                    }
+                }
+                let _ = done_sender.try_send(());
+            })
+            .map_err(|error| format!("could not start video device enumeration worker: {error}"))?;
+        Ok(Self {
+            pending,
+            result,
+            stop,
+            done,
+            worker: Some(worker),
+        })
+    }
+
+    fn request(&self) -> bool {
+        if self.stop.load(Ordering::Acquire) {
+            return false;
+        }
+        self.pending.replace(())
+    }
+
+    fn poll(&self) -> Option<VideoDeviceEnumeration> {
+        self.result.lock().ok().and_then(|mut result| result.take())
+    }
+
+    fn signal_shutdown(&self) {
+        self.stop.store(true, Ordering::Release);
+        self.pending.wake();
+    }
+
+    fn finish_shutdown(&mut self) {
+        self.signal_shutdown();
+        let _ = finish_worker_shutdown(&self.done, &mut self.worker, WORKER_SHUTDOWN_TIMEOUT);
+    }
+}
+
+#[cfg(windows)]
+impl Drop for VideoDeviceWorker {
+    fn drop(&mut self) {
+        if self.worker.is_some() {
+            self.finish_shutdown();
+        }
     }
 }
 
@@ -1826,6 +2045,7 @@ struct DevicePlatform {
     last_screen_capture_recovery_check: Instant,
     monitor_scan_generation: u64,
     monitor_scan_worker: Option<MonitorScanWorker>,
+    video_device_worker: Option<VideoDeviceWorker>,
 }
 
 #[cfg(windows)]
@@ -2055,6 +2275,13 @@ impl DevicePlatform {
                 None
             }
         };
+        let video_device_worker = match VideoDeviceWorker::start() {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                state.record(error);
+                None
+            }
+        };
         let mut platform = Self {
             owner_thread: thread::current().id(),
             publisher,
@@ -2070,6 +2297,7 @@ impl DevicePlatform {
             last_screen_capture_recovery_check: Instant::now(),
             monitor_scan_generation: 1,
             monitor_scan_worker,
+            video_device_worker,
         };
         if state.config.automatic_monitor_rescans {
             platform.request_monitor_scan(state, state.config.cursor_visible);
@@ -2085,6 +2313,8 @@ impl DevicePlatform {
                 if config.selected_video_device_id != state.config.selected_video_device_id {
                     let now = Instant::now();
                     self.webcam.stop();
+                    state.snapshot.webcam_native_format = None;
+                    state.snapshot.webcam_output_format = None;
                     if config.selected_video_device_id.is_empty() {
                         state.snapshot.webcam_state = DeviceState::Unavailable;
                         state
@@ -2150,14 +2380,10 @@ impl DevicePlatform {
                     );
                     return;
                 }
-                if let Some(frame) = self
-                    .screen
-                    .latest_frame()
-                    .filter(|frame| frame.is_fresh_at(Instant::now(), FRAME_STALE_AFTER))
-                {
+                if let Some(frame) = self.screen.latest_frame() {
                     state.pending_reference_capture = Some(frame);
                 } else {
-                    state.record("Reference capture failed: no fresh screen frame");
+                    state.record("Reference capture failed: no screen frame");
                 }
             }
             Command::CaptureReferenceCandidate => {
@@ -2167,15 +2393,11 @@ impl DevicePlatform {
                     );
                     return;
                 }
-                if let Some(frame) = self
-                    .screen
-                    .latest_frame()
-                    .filter(|frame| frame.is_fresh_at(Instant::now(), FRAME_STALE_AFTER))
-                {
+                if let Some(frame) = self.screen.latest_frame() {
                     state.stage_reference_candidate(frame);
                     state.record("Reference candidate captured for review");
                 } else {
-                    state.record("Reference candidate capture failed: no fresh screen frame");
+                    state.record("Reference candidate capture failed: no screen frame");
                 }
             }
             Command::ConfirmReferenceCandidate => {}
@@ -2211,20 +2433,15 @@ impl DevicePlatform {
                     state.record("Tracked monitor selection failed: monitor unavailable");
                 }
             }
-            Command::RefreshVideoDevices => match self.webcam.enumerate() {
-                Ok(devices) => {
-                    state.snapshot.video_devices = devices
-                        .into_iter()
-                        .map(|device| stageswap_core::VideoDeviceChoice {
-                            id: device.id,
-                            name: device.name,
-                        })
-                        .collect::<Vec<_>>()
-                        .into();
-                    state.record("Video device list refreshed from settings");
+            Command::RefreshVideoDevices => {
+                if self
+                    .video_device_worker
+                    .as_ref()
+                    .is_none_or(|worker| !worker.request())
+                {
+                    state.record("Video device refresh worker is unavailable");
                 }
-                Err(error) => state.record(format!("Video device refresh failed: {error}")),
-            },
+            }
             Command::Rescan => {
                 self.request_monitor_scan(state, state.config.cursor_visible);
             }
@@ -2285,6 +2502,8 @@ impl DevicePlatform {
             .webcam_component
             .transition(ComponentLifecycle::Restarting, now);
         self.webcam.stop();
+        state.snapshot.webcam_native_format = None;
+        state.snapshot.webcam_output_format = None;
         if id.is_empty() {
             state.snapshot.webcam_state = DeviceState::Unavailable;
             state
@@ -2359,6 +2578,7 @@ impl DevicePlatform {
 
     fn refresh_inputs(&mut self, state: &mut RuntimeState, now: Instant) {
         self.assert_owner_thread();
+        self.refresh_video_device_result(state);
         self.refresh_monitor_scan(state);
         let (monitor_scan_due, screen_capture_recovery_due) = automatic_screen_tasks_due(
             state.config.automatic_monitor_rescans,
@@ -2380,6 +2600,7 @@ impl DevicePlatform {
         let webcam = (!webcam_is_stale).then_some(webcam).flatten();
         state.snapshot.availability.camera_ready = webcam.is_some();
         if let Some(error) = self.webcam.last_error() {
+            state.snapshot.availability.camera_ready = false;
             state.set_warning(WarningSource::WebcamCapture, error.clone());
             if state.snapshot.webcam_state != DeviceState::Failed {
                 state.record(error.clone());
@@ -2438,10 +2659,7 @@ impl DevicePlatform {
             state.snapshot.previews.webcam = Some(webcam);
         }
         let screen = self.screen.latest_frame();
-        let screen_is_stale = screen.as_ref().is_some_and(|frame| {
-            now.saturating_duration_since(frame.received_at) > FRAME_STALE_AFTER
-        });
-        let screen = (!screen_is_stale).then_some(screen).flatten();
+        state.snapshot.previews.screen = None;
         state.snapshot.availability.screen_ready = screen.is_some()
             && !(self.selected_display_hdr_unsupported
                 && state.snapshot.mode == stageswap_core::OutputMode::Automatic);
@@ -2458,7 +2676,9 @@ impl DevicePlatform {
                 ComponentFailureKind::Screen(ScreenFailureKind::UnsupportedHdr),
                 "HDR or 10-bit color must be disabled for automatic matching",
             );
+            state.snapshot.previews.screen = None;
         } else if let Some(error) = self.screen.last_error() {
+            state.snapshot.availability.screen_ready = false;
             state.set_warning(WarningSource::ScreenCapture, error.clone());
             if state.snapshot.screen_state != DeviceState::Failed {
                 state.record(error.clone());
@@ -2469,17 +2689,6 @@ impl DevicePlatform {
                 ComponentFailureKind::Screen(screen_failure_kind(&error)),
                 error,
             );
-            state.snapshot.previews.screen = None;
-        } else if screen_is_stale {
-            state.set_warning(
-                WarningSource::ScreenCapture,
-                "Screen frames are stale; safe fallback is active",
-            );
-            state.snapshot.screen_state = DeviceState::Failed;
-            state
-                .snapshot
-                .screen_component
-                .transition(ComponentLifecycle::Stale, now);
             state.snapshot.previews.screen = None;
         } else if let Some(screen) = screen {
             state.clear_warning(WarningSource::ScreenCapture);
@@ -2526,6 +2735,30 @@ impl DevicePlatform {
         }
     }
 
+    fn refresh_video_device_result(&mut self, state: &mut RuntimeState) {
+        let Some(result) = self
+            .video_device_worker
+            .as_ref()
+            .and_then(VideoDeviceWorker::poll)
+        else {
+            return;
+        };
+        match result {
+            Ok(devices) => {
+                state.snapshot.video_devices = devices
+                    .into_iter()
+                    .map(|device| stageswap_core::VideoDeviceChoice {
+                        id: device.id,
+                        name: device.name,
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+                state.record("Video device list refreshed from settings");
+            }
+            Err(error) => state.record(format!("Video device refresh failed: {error}")),
+        }
+    }
+
     fn restart_screen(&mut self, state: &mut RuntimeState) {
         self.restart_screen_with_policy(state, false);
     }
@@ -2548,6 +2781,8 @@ impl DevicePlatform {
         self.screen_capture_recovery.reset();
         self.last_screen_capture_recovery_check = now;
         self.screen.stop();
+        state.snapshot.previews.screen = None;
+        state.snapshot.availability.screen_ready = false;
         let Some(monitor) = self.selected_monitor.as_ref() else {
             state.snapshot.screen_state = DeviceState::Unavailable;
             state.snapshot.screen_component.mark_failed(
@@ -2604,11 +2839,10 @@ impl DevicePlatform {
 
     fn check_screen_capture_recovery(&mut self, state: &mut RuntimeState, now: Instant) {
         self.last_screen_capture_recovery_check = now;
-        match self.screen_capture_recovery.observe(
-            self.screen.latest_frame().as_deref().filter(|frame| {
-                now.saturating_duration_since(frame.received_at) <= FRAME_STALE_AFTER
-            }),
-        ) {
+        match self
+            .screen_capture_recovery
+            .observe(self.screen.latest_frame().as_deref())
+        {
             ScreenCaptureRecoveryObservation::Clear => {}
             ScreenCaptureRecoveryObservation::AwaitingConfirmation => {
                 state.record(
@@ -2649,7 +2883,7 @@ impl DevicePlatform {
     fn refresh_monitor_scan(&mut self, state: &mut RuntimeState) {
         let Some(result) = self
             .monitor_scan_worker
-            .as_mut()
+            .as_ref()
             .and_then(MonitorScanWorker::poll)
         else {
             return;
@@ -2855,7 +3089,7 @@ impl DeviceWorker {
                     for command in commands {
                         let started = Instant::now();
                         platform.command(&command, &mut state);
-                        state.command(command.clone());
+                        state.apply_command(command.clone(), false);
                         if matches!(
                             command,
                             Command::CaptureReferenceCandidate | Command::DiscardReferenceCandidate
@@ -3075,21 +3309,7 @@ impl Platform {
                 .webcam_component
                 .transition(ComponentLifecycle::Stale, now);
         }
-        let screen_is_stale = app
-            .previews
-            .screen
-            .as_ref()
-            .is_some_and(|frame| !frame.is_fresh_at(now, FRAME_STALE_AFTER));
-        state.snapshot.previews.screen = (!screen_is_stale)
-            .then(|| app.previews.screen.clone())
-            .flatten();
-        if screen_is_stale {
-            state.snapshot.screen_state = DeviceState::Failed;
-            state
-                .snapshot
-                .screen_component
-                .transition(ComponentLifecycle::Stale, now);
-        }
+        state.snapshot.previews.screen = app.previews.screen.clone();
         state.snapshot.availability.camera_ready = state.snapshot.previews.webcam.is_some();
         state.snapshot.availability.screen_ready =
             app.availability.screen_ready && state.snapshot.previews.screen.is_some();
@@ -3683,6 +3903,19 @@ mod tests {
     }
 
     #[test]
+    fn an_old_but_visible_session_frame_remains_usable() {
+        let mut visible = frame_with_bright_pixels(200);
+        visible.received_at = Instant::now() - FRAME_STALE_AFTER - Duration::from_secs(1);
+        let mut recovery = ScreenCaptureRecovery::default();
+
+        assert_eq!(
+            recovery.observe(Some(&visible)),
+            ScreenCaptureRecoveryObservation::Clear
+        );
+        assert_eq!(recovery.consecutive_failures, 0);
+    }
+
+    #[test]
     fn near_black_then_missing_frame_restarts_screen_capture() {
         let black = frame_with_bright_pixels(0);
         let mut recovery = ScreenCaptureRecovery::default();
@@ -3917,6 +4150,17 @@ mod tests {
     }
 
     #[test]
+    fn device_command_application_does_not_replay_user_activity() {
+        let mut state = RuntimeState::new(AppConfig::default());
+        assert!(state.apply_command(Command::Start, false));
+        assert!(state.snapshot.recent_activity.is_empty());
+
+        assert!(state.command(Command::Start));
+        assert_eq!(state.snapshot.recent_activity.len(), 1);
+        assert_eq!(state.snapshot.recent_activity[0], "Automation started");
+    }
+
+    #[test]
     fn settings_only_reload_reference_when_required() {
         let now = Instant::now();
         let config = AppConfig::default();
@@ -3971,6 +4215,18 @@ mod tests {
         assert!(!commands.contains(&Command::Restart(RestartTarget::Webcam)));
         assert!(!commands.contains(&Command::Restart(RestartTarget::ScreenCapture)));
         assert!(pending.take().0.is_empty());
+    }
+
+    #[test]
+    fn discovery_request_slots_keep_only_the_latest_pending_work() {
+        let slot = CoalescingSlot::new();
+        assert!(slot.replace(1_u64));
+        assert!(slot.replace(2_u64));
+        assert_eq!(slot.take(), Some(2));
+        assert_eq!(slot.take(), None);
+        assert!(slot.replace(3_u64));
+        slot.clear();
+        assert_eq!(slot.take(), None);
     }
 
     #[test]

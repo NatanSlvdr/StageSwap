@@ -171,11 +171,26 @@ fn negotiate_rgb32_output(
         let frame_size = (u64::from(candidate.size.width) << 32) | u64::from(candidate.size.height);
         let frame_rate = (u64::from(candidate.frame_rate_numerator) << 32)
             | u64::from(candidate.frame_rate_denominator);
-        let sample_size = candidate
-            .size
-            .width
-            .saturating_mul(candidate.size.height)
-            .saturating_mul(4);
+        let Some(row_bytes) = candidate.size.width.checked_mul(4) else {
+            last_error = format!(
+                "{}x{} at {}/{} fps has an overflowing RGB32 row size",
+                candidate.size.width,
+                candidate.size.height,
+                candidate.frame_rate_numerator,
+                candidate.frame_rate_denominator
+            );
+            continue;
+        };
+        let Some(sample_size) = row_bytes.checked_mul(candidate.size.height) else {
+            last_error = format!(
+                "{}x{} at {}/{} fps has an overflowing RGB32 sample size",
+                candidate.size.width,
+                candidate.size.height,
+                candidate.frame_rate_numerator,
+                candidate.frame_rate_denominator
+            );
+            continue;
+        };
         let configured = (|| -> windows_core::Result<()> {
             // SAFETY: reader, media type, and attributes are live.
             unsafe {
@@ -184,7 +199,7 @@ fn negotiate_rgb32_output(
                 output.SetUINT64(&MF_MT_FRAME_SIZE, frame_size)?;
                 output.SetUINT64(&MF_MT_FRAME_RATE, frame_rate)?;
                 output.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-                output.SetUINT32(&MF_MT_DEFAULT_STRIDE, candidate.size.width * 4)?;
+                output.SetUINT32(&MF_MT_DEFAULT_STRIDE, row_bytes)?;
                 output.SetUINT32(&MF_MT_FIXED_SIZE_SAMPLES, 1)?;
                 output.SetUINT32(&MF_MT_SAMPLE_SIZE, sample_size)?;
                 reader.SetCurrentMediaType(STREAM, None, &output)?;
@@ -393,6 +408,42 @@ fn allocated_string(activation: &IMFActivate, key: &windows_core::GUID) -> Optio
     result
 }
 
+fn resolve_negotiated_layout(
+    size: Size,
+    default_stride: Option<u32>,
+    sample_size: Option<u32>,
+) -> Result<NegotiatedFormat, String> {
+    let row_bytes = size
+        .width
+        .checked_mul(4)
+        .ok_or_else(|| "negotiated webcam row size overflowed".to_owned())?;
+    let row_bytes_i32 = i32::try_from(row_bytes)
+        .map_err(|_| "negotiated webcam row size exceeds the supported stride range".to_owned())?;
+    // MF_MT_DEFAULT_STRIDE is a UINT32 attribute carrying a signed stride. It is a
+    // default contiguous stride, not the pitch of every individual surface. When
+    // the attribute is absent, RGB32's checked tightly packed row size is the
+    // documented default; IMF2DBuffer2 supplies the actual pitch at copy time.
+    let stride = default_stride
+        .map(|value| i32::from_ne_bytes(value.to_ne_bytes()))
+        .unwrap_or(row_bytes_i32);
+    if stride == 0 || stride.unsigned_abs() < row_bytes {
+        return Err(format!(
+            "negotiated webcam stride {stride} is too short for {row_bytes}-byte rows"
+        ));
+    }
+    let required = stride
+        .unsigned_abs()
+        .checked_mul(size.height)
+        .ok_or_else(|| "negotiated webcam sample size overflowed".to_owned())?;
+    let sample_size = sample_size.unwrap_or(required);
+    if sample_size < required {
+        return Err(format!(
+            "negotiated webcam sample size {sample_size} is smaller than {required} bytes"
+        ));
+    }
+    Ok(NegotiatedFormat { size, stride })
+}
+
 fn validate_negotiated_type(media_type: &IMFMediaType) -> Result<NegotiatedFormat, String> {
     // SAFETY: the media type is live and these attributes have scalar values.
     let subtype = unsafe { media_type.GetGUID(&MF_MT_SUBTYPE) }
@@ -423,24 +474,9 @@ fn validate_negotiated_type(media_type: &IMFMediaType) -> Result<NegotiatedForma
     if fixed_size == 0 {
         return Err("negotiated webcam format does not use fixed-size samples".into());
     }
-    let stride = unsafe { media_type.GetUINT32(&MF_MT_DEFAULT_STRIDE) }
-        .map_err(|error| format!("negotiated webcam format has no stride: {error}"))?
-        as i32;
-    let row_bytes = size.width.saturating_mul(4);
-    if stride == 0 || stride.unsigned_abs() < row_bytes {
-        return Err(format!(
-            "negotiated webcam stride {stride} is too short for {row_bytes}-byte rows"
-        ));
-    }
-    let sample_size = unsafe { media_type.GetUINT32(&MF_MT_SAMPLE_SIZE) }
-        .map_err(|error| format!("negotiated webcam format has no sample size: {error}"))?;
-    let required = stride.unsigned_abs().saturating_mul(size.height);
-    if sample_size < required {
-        return Err(format!(
-            "negotiated webcam sample size {sample_size} is smaller than {required} bytes"
-        ));
-    }
-    Ok(NegotiatedFormat { size, stride })
+    let default_stride = unsafe { media_type.GetUINT32(&MF_MT_DEFAULT_STRIDE) }.ok();
+    let sample_size = unsafe { media_type.GetUINT32(&MF_MT_SAMPLE_SIZE) }.ok();
+    resolve_negotiated_layout(size, default_stride, sample_size)
 }
 
 struct CaptureState {
@@ -773,6 +809,8 @@ impl VideoInput for MediaFoundationVideoInput {
     }
 
     fn start(&mut self, device_id: &str) -> Result<(), String> {
+        self.selected_native_format = None;
+        self.selected_output_format = None;
         if let Some(error) = &self.initialization_error {
             return Err(error.clone());
         }
@@ -869,9 +907,14 @@ impl VideoInput for MediaFoundationVideoInput {
         if let Ok(mut aspect_ratio) = self.state.native_display_aspect_ratio.lock() {
             *aspect_ratio = None;
         }
+        self.state.stride.store(0, Ordering::Release);
+        if let Ok(mut format) = self.state.format.lock() {
+            *format = Size::default();
+        }
         if let Ok(mut latest) = self.state.latest.lock() {
             *latest = None;
         }
+        self.state.clear_failure();
     }
 
     fn latest_frame(&self) -> Option<Arc<Frame>> {
@@ -932,6 +975,29 @@ mod format_tests {
     use super::*;
 
     #[test]
+    fn missing_stride_and_sample_size_use_checked_rgb32_defaults() {
+        let format = resolve_negotiated_layout(Size::new(1280, 720), None, None).unwrap();
+        assert_eq!(format.stride, 1280 * 4);
+    }
+
+    #[test]
+    fn negative_stride_is_validated_by_absolute_row_pitch() {
+        let format = resolve_negotiated_layout(
+            Size::new(2, 2),
+            Some(u32::from_ne_bytes((-12i32).to_ne_bytes())),
+            None,
+        )
+        .unwrap();
+        assert_eq!(format.stride, -12);
+    }
+
+    #[test]
+    fn undersized_declared_sample_is_rejected() {
+        let error = resolve_negotiated_layout(Size::new(2, 2), Some(12), Some(23)).unwrap_err();
+        assert!(error.contains("smaller than 24"));
+    }
+
+    #[test]
     fn row_copy_accepts_padding_and_negative_stride() {
         let size = Size::new(2, 2);
         let top = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -952,6 +1018,14 @@ mod format_tests {
         bottom_up.extend_from_slice(&[0; 4]);
         copy_bgra_rows(&bottom_up, 12, -12, size, &mut destination).unwrap();
         assert_eq!(destination, [top, bottom].concat());
+    }
+
+    #[test]
+    fn row_copy_rejects_an_undersized_buffer() {
+        let size = Size::new(2, 2);
+        let mut destination = Vec::new();
+        let error = copy_bgra_rows(&[0; 20], 0, 12, size, &mut destination).unwrap_err();
+        assert!(error.contains("too short"));
     }
 
     #[test]

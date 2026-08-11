@@ -113,6 +113,18 @@ impl Shared {
     fn is_current(&self, expected_generation: u64) -> bool {
         self.generation.load(Ordering::Acquire) == expected_generation
     }
+
+    fn record_failure(&self, expected_generation: u64, message: impl Into<String>) {
+        if !self.is_current(expected_generation) {
+            return;
+        }
+        if let Ok(mut latest) = self.latest.lock() {
+            *latest = None;
+        }
+        if let Ok(mut failure) = self.failure.lock() {
+            *failure = Some(message.into());
+        }
+    }
 }
 
 struct CaptureFlags {
@@ -161,59 +173,62 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             return Ok(());
         }
         pacer.advance(now);
-        let timestamp = frame.timestamp().map_or(0, |time| time.Duration);
-        let width = frame.width();
-        let height = frame.height();
-        let buffer = frame.buffer().map_err(|error| error.to_string())?;
-        let pixels = buffer.as_nopadding_buffer(&mut self.scratch);
-        let pixels = self
-            .pool
-            .try_write(|destination| {
-                aspect_fit_bgra_into(
-                    pixels,
-                    Size::new(width, height),
-                    width * 4,
-                    destination,
-                    PIPELINE_SIZE,
-                )
-            })
-            .map_err(|error| format!("could not normalize screen frame: {error:?}"))?;
-        let Some(pixels) = pixels else {
-            self.shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
-            return Ok(());
-        };
-        let sequence = self.shared.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        let frame = Frame::new(
-            pixels,
-            PIPELINE_SIZE,
-            PIPELINE_SIZE.width * 4,
-            sequence,
-            timestamp,
-            now,
-        )
-        .map_err(|error| format!("invalid screen frame: {error:?}"))?;
-        if self.shared.is_current(self.expected_generation) {
-            *self
-                .shared
-                .latest
-                .lock()
-                .map_err(|_| "screen frame state is poisoned")? = Some(Arc::new(frame));
-            if let Ok(mut failure) = self.shared.failure.lock() {
-                *failure = None;
+        let result = (|| -> Result<(), String> {
+            let timestamp = frame.timestamp().map_or(0, |time| time.Duration);
+            let width = frame.width();
+            let height = frame.height();
+            let buffer = frame.buffer().map_err(|error| error.to_string())?;
+            let pixels = buffer.as_nopadding_buffer(&mut self.scratch);
+            let pixels = self
+                .pool
+                .try_write(|destination| {
+                    aspect_fit_bgra_into(
+                        pixels,
+                        Size::new(width, height),
+                        width * 4,
+                        destination,
+                        PIPELINE_SIZE,
+                    )
+                })
+                .map_err(|error| format!("could not normalize screen frame: {error:?}"))?;
+            let Some(pixels) = pixels else {
+                self.shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            };
+            let sequence = self.shared.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+            let frame = Frame::new(
+                pixels,
+                PIPELINE_SIZE,
+                PIPELINE_SIZE.width * 4,
+                sequence,
+                timestamp,
+                now,
+            )
+            .map_err(|error| format!("invalid screen frame: {error:?}"))?;
+            if self.shared.is_current(self.expected_generation) {
+                *self
+                    .shared
+                    .latest
+                    .lock()
+                    .map_err(|_| "screen frame state is poisoned")? = Some(Arc::new(frame));
+                if let Ok(mut failure) = self.shared.failure.lock() {
+                    *failure = None;
+                }
             }
+            Ok(())
+        })();
+        if let Err(error) = &result {
+            self.shared
+                .record_failure(self.expected_generation, error.clone());
         }
-        Ok(())
+        result
     }
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
-        if self.shared.is_current(self.expected_generation) {
-            if let Ok(mut latest) = self.shared.latest.lock() {
-                *latest = None;
-            }
-            if let Ok(mut failure) = self.shared.failure.lock() {
-                *failure = Some("selected display closed the screen-capture session".into());
-            }
-        }
+        self.shared.record_failure(
+            self.expected_generation,
+            "selected display closed the screen-capture session",
+        );
         Ok(())
     }
 }
@@ -238,6 +253,24 @@ impl WindowsGraphicsScreenInput {
     }
 
     pub fn last_error(&self) -> Option<String> {
+        if self
+            .control
+            .as_ref()
+            .is_some_and(CaptureControl::is_finished)
+        {
+            let has_failure = self
+                .shared
+                .failure
+                .lock()
+                .ok()
+                .is_some_and(|failure| failure.is_some());
+            if !has_failure {
+                self.shared.record_failure(
+                    self.generation(),
+                    "screen capture worker stopped unexpectedly",
+                );
+            }
+        }
         self.shared
             .failure
             .lock()
@@ -326,6 +359,9 @@ impl ScreenInput for WindowsGraphicsScreenInput {
         if let Ok(mut latest) = self.shared.latest.lock() {
             *latest = None;
         }
+        if let Ok(mut failure) = self.shared.failure.lock() {
+            *failure = None;
+        }
     }
 
     fn latest_frame(&self) -> Option<Arc<Frame>> {
@@ -370,6 +406,20 @@ fn describe_monitor(monitor: Monitor) -> Result<MonitorDescriptor, String> {
 mod tests {
     use super::*;
 
+    fn test_frame() -> Arc<Frame> {
+        Arc::new(
+            Frame::new(
+                vec![255, 255, 255, 255].into(),
+                Size::new(1, 1),
+                4,
+                1,
+                0,
+                Instant::now(),
+            )
+            .unwrap(),
+        )
+    }
+
     #[test]
     fn replacement_generation_rejects_old_callbacks() {
         let shared = Shared::default();
@@ -378,5 +428,36 @@ mod tests {
         shared.generation.fetch_add(1, Ordering::AcqRel);
         assert!(!shared.is_current(7));
         assert!(shared.is_current(8));
+    }
+
+    #[test]
+    fn processing_failure_clears_the_session_frame() {
+        let shared = Shared::default();
+        shared.generation.store(3, Ordering::Release);
+        *shared.latest.lock().unwrap() = Some(test_frame());
+
+        shared.record_failure(3, "normalization failed");
+
+        assert!(shared.latest.lock().unwrap().is_none());
+        assert_eq!(
+            shared.failure.lock().unwrap().as_deref(),
+            Some("normalization failed")
+        );
+    }
+
+    #[test]
+    fn an_old_generation_cannot_clear_or_fail_a_new_session() {
+        let shared = Shared::default();
+        shared.generation.store(4, Ordering::Release);
+        let frame = test_frame();
+        *shared.latest.lock().unwrap() = Some(Arc::clone(&frame));
+
+        shared.record_failure(3, "old callback failed");
+
+        assert!(Arc::ptr_eq(
+            shared.latest.lock().unwrap().as_ref().unwrap(),
+            &frame
+        ));
+        assert!(shared.failure.lock().unwrap().is_none());
     }
 }

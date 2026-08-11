@@ -74,14 +74,14 @@ StageSwap requires a 64-bit Windows 11 computer, a webcam, a secondary screen co
 
 ### Displays and operation
 
-- 🖥️ **Display discovery** looks for the reference image at startup, when Settings opens, after reference changes, and every 30 seconds by default.
-- 🩺 **Black-or-unavailable recovery** checks only the selected display every 30 seconds and restarts capture after two consecutive nearly-black or missing-frame checks.
+- 🖥️ **Display discovery** looks for the reference image at startup, when Settings opens, after reference changes, and every 30 seconds by default without interrupting the 30 fps output loop. Camera-list refreshes are also performed in the background.
+- 🩺 **Black-or-unavailable recovery** checks only the selected display every 30 seconds and restarts capture after two consecutive nearly-black or missing-frame checks. An unchanged but visible JW Library screen remains ready while its capture session is alive; processing errors and closed sessions clear readiness immediately.
 - 🛠️ **Recovery controls** restart the camera, display capture, virtual camera, or the complete pipeline.
 - 🔒 **Local processing** keeps frames on the computer and does not record or upload them.
 
 StageSwap can include or hide the mouse cursor, intelligently crop non-16:9 camera signals while leaving native 16:9 video unchanged, start minimized, begin automation on launch, and continue running when the dashboard is closed to the system tray.
 
-Webcam capture prefers RGB32 1280×720 at 30 fps and can normalize compatible RGB32, NV12, YUY2, or MJPEG camera modes—including padded rows and common 4:3 or non-30-fps inputs—into the fixed local 720p30 output. HDR/10-bit secondary displays are detected but are not tone-mapped; disable HDR on the selected display before automatic matching or reference capture.
+Webcam capture prefers RGB32 1280×720 at 30 fps and can normalize compatible RGB32, NV12, YUY2, or MJPEG camera modes—including missing default stride/sample-size metadata, padded rows, and common 4:3 or non-30-fps inputs—into the fixed local 720p30 output. HDR/10-bit secondary displays are detected but are not tone-mapped; disable HDR on the selected display before automatic matching or reference capture.
 
 ## Everyday controls
 
