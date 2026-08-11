@@ -116,6 +116,12 @@ const SCREEN_RESTART_BACKOFF_BASE: Duration = Duration::from_secs(5);
 #[cfg(any(windows, test))]
 const SCREEN_RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
 #[cfg(any(windows, test))]
+const WEBCAM_RECOVERY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+];
+#[cfg(any(windows, test))]
 const TARGET_WEBCAM_ASPECT_RATIO: f64 = 16.0 / 9.0;
 #[cfg(any(windows, test))]
 const WEBCAM_ASPECT_RATIO_TOLERANCE: f64 = 0.01;
@@ -569,6 +575,76 @@ fn screen_restart_backoff(consecutive_failures: u32) -> Duration {
         .min(SCREEN_RESTART_BACKOFF_MAX)
 }
 
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct WebcamRecovery {
+    active: bool,
+    attempts: u8,
+    next_attempt: Option<Instant>,
+    waiting_for_first_frame: bool,
+}
+
+#[cfg(any(windows, test))]
+impl WebcamRecovery {
+    fn schedule_initial(&mut self, now: Instant) -> bool {
+        if self.active {
+            return false;
+        }
+        self.active = true;
+        self.attempts = 0;
+        self.waiting_for_first_frame = false;
+        self.next_attempt = Some(now + WEBCAM_RECOVERY_DELAYS[0]);
+        true
+    }
+
+    fn begin_due_attempt(&mut self, now: Instant) -> Option<u8> {
+        if !self.active
+            || self.waiting_for_first_frame
+            || self.next_attempt.is_none_or(|attempt_at| now < attempt_at)
+            || usize::from(self.attempts) >= WEBCAM_RECOVERY_DELAYS.len()
+        {
+            return None;
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        self.next_attempt = None;
+        Some(self.attempts)
+    }
+
+    fn attempt_started(&mut self) {
+        self.waiting_for_first_frame = true;
+        self.next_attempt = None;
+    }
+
+    fn attempt_failed(&mut self, now: Instant) -> bool {
+        self.waiting_for_first_frame = false;
+        if usize::from(self.attempts) >= WEBCAM_RECOVERY_DELAYS.len() {
+            self.active = false;
+            self.next_attempt = None;
+            return false;
+        }
+        self.next_attempt = Some(now + WEBCAM_RECOVERY_DELAYS[usize::from(self.attempts)]);
+        true
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn exhaust(&mut self) {
+        self.active = false;
+        self.waiting_for_first_frame = false;
+        self.next_attempt = None;
+    }
+}
+
+#[cfg(windows)]
+fn webcam_failure_is_automatically_recoverable(kind: WebcamFailureKind) -> bool {
+    matches!(
+        kind,
+        WebcamFailureKind::DeviceInvalidated | WebcamFailureKind::DriverFailure
+    )
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -660,17 +736,58 @@ struct RuntimeState {
     pending_reference_capture: Option<Arc<Frame>>,
     #[cfg(any(windows, test))]
     webcam_crop: WebcamCropCache,
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     publisher_diagnostics: PublisherDiagnosticsState,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivityVerbosity {
+    Normal,
+    Verbose,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PublisherDiagnosticsSnapshot {
+    published_sequence: u64,
+    transmitted_sequence: u64,
+    connected: bool,
+    write_failures: u64,
+    disconnect_count: u64,
+    last_write_error: Option<u32>,
+    last_disconnect_error: Option<u32>,
+    connection_count: u64,
+    connection_failures: u64,
+}
+
 #[cfg(windows)]
+impl From<FramePublisherDiagnostics> for PublisherDiagnosticsSnapshot {
+    fn from(value: FramePublisherDiagnostics) -> Self {
+        Self {
+            published_sequence: value.published_sequence,
+            transmitted_sequence: value.transmitted_sequence,
+            connected: value.connected,
+            write_failures: value.write_failures,
+            disconnect_count: value.disconnect_count,
+            last_write_error: value.last_write_error,
+            last_disconnect_error: value.last_disconnect_error,
+            connection_count: value.connection_count,
+            connection_failures: value.connection_failures,
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
 #[derive(Default)]
 struct PublisherDiagnosticsState {
     last_published_sequence: u64,
     last_transmitted_sequence: u64,
     last_connected: Option<bool>,
     last_write_failures: u64,
+    last_disconnect_count: u64,
+    last_write_error: Option<u32>,
+    last_disconnect_error: Option<u32>,
+    last_connection_count: u64,
     last_connection_failures: u64,
     last_reported_at: Option<Instant>,
 }
@@ -726,12 +843,24 @@ impl RuntimeState {
             pending_reference_capture: None,
             #[cfg(any(windows, test))]
             webcam_crop: WebcamCropCache::default(),
-            #[cfg(windows)]
+            #[cfg(any(windows, test))]
             publisher_diagnostics: PublisherDiagnosticsState::default(),
         }
     }
 
     fn record(&mut self, message: impl Into<String>) {
+        self.record_with_verbosity(ActivityVerbosity::Normal, message);
+    }
+
+    #[cfg(any(windows, test))]
+    fn record_verbose(&mut self, message: impl Into<String>) {
+        self.record_with_verbosity(ActivityVerbosity::Verbose, message);
+    }
+
+    fn record_with_verbosity(&mut self, verbosity: ActivityVerbosity, message: impl Into<String>) {
+        if verbosity == ActivityVerbosity::Verbose && !self.config.verbose_logging {
+            return;
+        }
         if self.activity.len() == ACTIVITY_LIMIT {
             self.activity.pop_front();
         }
@@ -755,15 +884,19 @@ impl RuntimeState {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     fn record_publisher_diagnostics(
         &mut self,
-        diagnostics: FramePublisherDiagnostics,
+        diagnostics: PublisherDiagnosticsSnapshot,
         now: Instant,
     ) {
         let previous = &self.publisher_diagnostics;
         let state_changed = previous.last_connected != Some(diagnostics.connected)
             || diagnostics.write_failures != previous.last_write_failures
+            || diagnostics.disconnect_count != previous.last_disconnect_count
+            || diagnostics.last_write_error != previous.last_write_error
+            || diagnostics.last_disconnect_error != previous.last_disconnect_error
+            || diagnostics.connection_count != previous.last_connection_count
             || diagnostics.connection_failures != previous.last_connection_failures;
         let progress_changed = diagnostics.published_sequence != previous.last_published_sequence
             || diagnostics.transmitted_sequence != previous.last_transmitted_sequence;
@@ -771,24 +904,41 @@ impl RuntimeState {
             .last_reported_at
             .is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(5));
         let should_report = state_changed || (progress_changed && heartbeat_due);
+        let last_reported_at = if should_report {
+            Some(now)
+        } else {
+            previous.last_reported_at
+        };
         self.publisher_diagnostics = PublisherDiagnosticsState {
             last_published_sequence: diagnostics.published_sequence,
             last_transmitted_sequence: diagnostics.transmitted_sequence,
             last_connected: Some(diagnostics.connected),
             last_write_failures: diagnostics.write_failures,
+            last_disconnect_count: diagnostics.disconnect_count,
+            last_write_error: diagnostics.last_write_error,
+            last_disconnect_error: diagnostics.last_disconnect_error,
+            last_connection_count: diagnostics.connection_count,
             last_connection_failures: diagnostics.connection_failures,
-            last_reported_at: should_report.then_some(now),
+            last_reported_at,
         };
         if should_report {
-            self.record(format!(
-                "Virtual camera pipe status: connected={}, published_sequence={}, transmitted_sequence={}, write_failures={}, connection_count={}, connection_failures={}",
+            let message = format!(
+                "Virtual camera pipe status: connected={}, published_sequence={}, transmitted_sequence={}, disconnect_count={}, last_disconnect_error={:?}, write_failures={}, last_write_error={:?}, connection_count={}, connection_failures={}",
                 diagnostics.connected,
                 diagnostics.published_sequence,
                 diagnostics.transmitted_sequence,
+                diagnostics.disconnect_count,
+                diagnostics.last_disconnect_error,
                 diagnostics.write_failures,
+                diagnostics.last_write_error,
                 diagnostics.connection_count,
                 diagnostics.connection_failures,
-            ));
+            );
+            if state_changed {
+                self.record(message);
+            } else {
+                self.record_verbose(message);
+            }
         }
     }
 
@@ -2163,6 +2313,7 @@ struct DevicePlatform {
     selected_display_hdr_unsupported: bool,
     monitor_tracker: MonitorTracker,
     screen_capture_recovery: ScreenCaptureRecovery,
+    webcam_recovery: WebcamRecovery,
     last_monitor_scan: Instant,
     last_screen_capture_recovery_check: Instant,
     monitor_scan_generation: u64,
@@ -2431,6 +2582,7 @@ impl DevicePlatform {
             selected_display_hdr_unsupported,
             monitor_tracker,
             screen_capture_recovery: ScreenCaptureRecovery::default(),
+            webcam_recovery: WebcamRecovery::default(),
             last_monitor_scan: Instant::now(),
             last_screen_capture_recovery_check: Instant::now(),
             monitor_scan_generation: 1,
@@ -2450,6 +2602,7 @@ impl DevicePlatform {
                 let reload_settings = matches!(command, Command::ReloadSettings(_));
                 if config.selected_video_device_id != state.config.selected_video_device_id {
                     let now = Instant::now();
+                    self.webcam_recovery.reset();
                     self.webcam.stop();
                     state.snapshot.webcam_native_format = None;
                     state.snapshot.webcam_output_format = None;
@@ -2630,12 +2783,115 @@ impl DevicePlatform {
         );
     }
 
+    fn queue_webcam_recovery(&mut self, state: &mut RuntimeState, now: Instant, reason: &str) {
+        self.webcam.stop();
+        state.snapshot.previews.webcam = None;
+        state.snapshot.availability.camera_ready = false;
+        let scheduled =
+            if self.webcam_recovery.active && self.webcam_recovery.waiting_for_first_frame {
+                self.webcam_recovery.attempt_failed(now)
+            } else {
+                self.webcam_recovery.schedule_initial(now)
+            };
+        state.snapshot.webcam_component.consecutive_restart_failures =
+            u32::from(self.webcam_recovery.attempts);
+        state.snapshot.webcam_component.next_permitted_retry = self.webcam_recovery.next_attempt;
+        if scheduled {
+            let delay = self.webcam_recovery.next_attempt.map_or(0, |attempt_at| {
+                attempt_at.saturating_duration_since(now).as_millis()
+            });
+            state.record(format!(
+                "Webcam automatic recovery scheduled in {delay} ms after: {reason}"
+            ));
+        } else if !self.webcam_recovery.active {
+            state.record(format!(
+                "Webcam automatic recovery exhausted after {} attempts: {reason}",
+                self.webcam_recovery.attempts
+            ));
+        }
+    }
+
+    fn attempt_webcam_recovery(&mut self, state: &mut RuntimeState, now: Instant) {
+        let Some(attempt) = self.webcam_recovery.begin_due_attempt(now) else {
+            return;
+        };
+        let id = state.config.selected_video_device_id.clone();
+        state.snapshot.webcam_component.consecutive_restart_failures = u32::from(attempt);
+        state.snapshot.webcam_component.next_permitted_retry = None;
+        state
+            .snapshot
+            .webcam_component
+            .transition(ComponentLifecycle::Restarting, now);
+        state.record(format!(
+            "Webcam automatic recovery attempt {attempt}/{}",
+            WEBCAM_RECOVERY_DELAYS.len()
+        ));
+        self.webcam.stop();
+        state.snapshot.webcam_native_format = None;
+        state.snapshot.webcam_output_format = None;
+        if id.is_empty() {
+            self.webcam_recovery.exhaust();
+            state.snapshot.webcam_state = DeviceState::Unavailable;
+            state.snapshot.webcam_component.mark_failed(
+                now,
+                "webcam automatic recovery cannot continue without a selected device",
+            );
+            state.record("Webcam automatic recovery stopped: no video input selected");
+            return;
+        }
+        match self.webcam.start(&id) {
+            Ok(()) => {
+                self.webcam_recovery.attempt_started();
+                state.snapshot.webcam_state = DeviceState::Initializing;
+                state
+                    .snapshot
+                    .webcam_component
+                    .waiting_for_first_frame(now, now + WEBCAM_FIRST_FRAME_TIMEOUT);
+                state.snapshot.webcam_component.consecutive_restart_failures = u32::from(attempt);
+                state.snapshot.webcam_native_format =
+                    self.webcam.selected_native_format().map(str::to_owned);
+                state.snapshot.webcam_output_format =
+                    self.webcam.selected_output_format().map(str::to_owned);
+                Self::record_webcam_format(state, &self.webcam);
+                state.record(format!(
+                    "Webcam automatic recovery attempt {attempt} started capture_generation={}",
+                    self.webcam.capture_generation()
+                ));
+            }
+            Err(error) => {
+                state.snapshot.webcam_state = DeviceState::Failed;
+                let kind = webcam_failure_kind(&error);
+                state.snapshot.webcam_component.mark_failed_with_kind(
+                    now,
+                    ComponentFailureKind::Webcam(kind),
+                    error.clone(),
+                );
+                state.snapshot.webcam_component.consecutive_restart_failures = u32::from(attempt);
+                let retry = webcam_failure_is_automatically_recoverable(kind)
+                    && self.webcam_recovery.attempt_failed(now);
+                state.snapshot.webcam_component.next_permitted_retry =
+                    self.webcam_recovery.next_attempt;
+                if retry {
+                    state.record(format!(
+                        "Webcam automatic recovery attempt {attempt} failed; another attempt is scheduled: {error}"
+                    ));
+                } else {
+                    self.webcam_recovery.exhaust();
+                    state.record(format!(
+                        "Webcam automatic recovery stopped after attempt {attempt}: {error}"
+                    ));
+                }
+            }
+        }
+    }
+
     fn restart_webcam(&mut self, state: &mut RuntimeState) {
         let now = Instant::now();
         let id = state.config.selected_video_device_id.clone();
         if state.snapshot.webcam_component.lifecycle == ComponentLifecycle::Restarting {
             return;
         }
+        self.webcam_recovery.reset();
         state
             .snapshot
             .webcam_component
@@ -2739,7 +2995,9 @@ impl DevicePlatform {
         });
         let webcam = (!webcam_is_stale).then_some(webcam).flatten();
         state.snapshot.availability.camera_ready = webcam.is_some();
-        if let Some(error) = self.webcam.last_error() {
+        if let Some(failure) = self.webcam.last_failure() {
+            let error = failure.message.clone();
+            let kind = webcam_failure_kind(&error);
             state.snapshot.availability.camera_ready = false;
             state.set_warning(WarningSource::WebcamCapture, error.clone());
             if state.snapshot.webcam_state != DeviceState::Failed {
@@ -2748,22 +3006,27 @@ impl DevicePlatform {
             state.snapshot.webcam_state = DeviceState::Failed;
             state.snapshot.webcam_component.mark_failed_with_kind(
                 now,
-                ComponentFailureKind::Webcam(webcam_failure_kind(&error)),
-                error,
+                ComponentFailureKind::Webcam(kind),
+                error.clone(),
             );
             state.snapshot.previews.webcam = None;
+            if failure.recoverable && webcam_failure_is_automatically_recoverable(kind) {
+                self.queue_webcam_recovery(state, now, &error);
+            }
         } else if webcam_is_stale {
-            state.set_warning(
-                WarningSource::WebcamCapture,
-                "Webcam frames are stale; safe fallback is active",
-            );
+            let error = "Webcam frames are stale; safe fallback is active";
+            state.set_warning(WarningSource::WebcamCapture, error);
             state.snapshot.webcam_state = DeviceState::Failed;
             state
                 .snapshot
                 .webcam_component
                 .transition(ComponentLifecycle::Stale, now);
             state.snapshot.previews.webcam = None;
+            self.queue_webcam_recovery(state, now, error);
         } else if webcam.is_some() {
+            let recovered = self.webcam_recovery.active;
+            let recovery_attempts = self.webcam_recovery.attempts;
+            self.webcam_recovery.reset();
             state.clear_warning(WarningSource::WebcamCapture);
             state.snapshot.webcam_state = DeviceState::Ready;
             let was_ready = state.snapshot.webcam_component.lifecycle == ComponentLifecycle::Ready;
@@ -2773,31 +3036,33 @@ impl DevicePlatform {
             if !was_ready {
                 state.record("Webcam first frame received");
             }
+            if recovered {
+                state.record(format!(
+                    "Webcam automatic recovery succeeded after {recovery_attempts} attempt(s) capture_generation={}",
+                    self.webcam.capture_generation()
+                ));
+            }
         } else if state
             .snapshot
             .webcam_component
             .first_frame_deadline
             .is_some_and(|deadline| now >= deadline)
         {
-            self.webcam.stop();
-            state.set_warning(
-                WarningSource::WebcamCapture,
-                "webcam did not deliver a frame before the startup deadline",
-            );
+            let error = "webcam did not deliver a frame before the startup deadline";
+            state.set_warning(WarningSource::WebcamCapture, error);
             state.snapshot.webcam_state = DeviceState::Failed;
-            state.snapshot.webcam_component.mark_failed(
-                now,
-                "webcam did not deliver a frame before the startup deadline",
-            );
+            state.snapshot.webcam_component.mark_failed(now, error);
             state.snapshot.webcam_component.last_failure_kind = Some(ComponentFailureKind::Webcam(
                 WebcamFailureKind::DriverFailure,
             ));
             state.snapshot.previews.webcam = None;
             state.record("Webcam first-frame deadline expired");
+            self.queue_webcam_recovery(state, now, error);
         }
         if let Some(webcam) = webcam {
             state.snapshot.previews.webcam = Some(webcam);
         }
+        self.attempt_webcam_recovery(state, now);
         let screen = self.screen.latest_frame();
         state.snapshot.previews.screen = None;
         state.snapshot.availability.screen_ready = screen.is_some()
@@ -2991,7 +3256,7 @@ impl DevicePlatform {
         {
             ScreenCaptureRecoveryObservation::Clear => {}
             ScreenCaptureRecoveryObservation::AwaitingConfirmation => {
-                state.record(format!(
+                state.record_verbose(format!(
                     "Screen capture is black or unavailable; awaiting the next automatic recovery check generation={}",
                     self.screen.generation()
                 ));
@@ -3259,7 +3524,10 @@ impl DeviceWorker {
                             && started.saturating_duration_since(last_slow_command_log)
                                 >= Duration::from_secs(30)
                         {
-                            state.record(format!("Device command took {} ms", elapsed.as_millis()));
+                            state.record_verbose(format!(
+                                "Device command took {} ms",
+                                elapsed.as_millis()
+                            ));
                             last_slow_command_log = started;
                         }
                     }
@@ -3517,7 +3785,7 @@ impl Platform {
                     }
                 }
             }
-            state.record_publisher_diagnostics(publisher.diagnostics(), now);
+            state.record_publisher_diagnostics(publisher.diagnostics().into(), now);
         }
     }
 
@@ -4136,6 +4404,145 @@ mod tests {
         assert_eq!(screen_restart_backoff(2), Duration::from_secs(10));
         assert_eq!(screen_restart_backoff(3), Duration::from_secs(20));
         assert_eq!(screen_restart_backoff(10), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn publisher_heartbeat_is_suppressed_when_verbose_logging_is_off() {
+        let now = Instant::now();
+        let mut state = RuntimeState::new_at(AppConfig::default(), now);
+        let mut diagnostics = PublisherDiagnosticsSnapshot {
+            connected: true,
+            published_sequence: 1,
+            transmitted_sequence: 1,
+            connection_count: 1,
+            ..PublisherDiagnosticsSnapshot::default()
+        };
+        state.record_publisher_diagnostics(diagnostics, now);
+        assert_eq!(state.activity.len(), 1);
+
+        for frame in 2..=120 {
+            diagnostics.published_sequence = frame;
+            diagnostics.transmitted_sequence = frame;
+            state
+                .record_publisher_diagnostics(diagnostics, now + Duration::from_millis(frame * 33));
+        }
+        assert_eq!(state.activity.len(), 1);
+
+        diagnostics.published_sequence = 152;
+        diagnostics.transmitted_sequence = 152;
+        state.record_publisher_diagnostics(diagnostics, now + Duration::from_secs(5));
+        assert_eq!(state.activity.len(), 1);
+    }
+
+    #[test]
+    fn publisher_heartbeat_is_recorded_when_verbose_logging_is_on() {
+        let now = Instant::now();
+        let mut state = RuntimeState::new_at(
+            AppConfig {
+                verbose_logging: true,
+                ..AppConfig::default()
+            },
+            now,
+        );
+        let mut diagnostics = PublisherDiagnosticsSnapshot {
+            connected: true,
+            published_sequence: 1,
+            transmitted_sequence: 1,
+            connection_count: 1,
+            ..PublisherDiagnosticsSnapshot::default()
+        };
+        state.record_publisher_diagnostics(diagnostics, now);
+        diagnostics.published_sequence = 152;
+        diagnostics.transmitted_sequence = 152;
+        state.record_publisher_diagnostics(diagnostics, now + Duration::from_secs(5));
+        assert_eq!(state.activity.len(), 2);
+    }
+
+    #[test]
+    fn verbose_activity_is_filtered_before_entering_the_activity_stream() {
+        let now = Instant::now();
+        let mut compact = RuntimeState::new_at(AppConfig::default(), now);
+        compact.record_verbose("debug details");
+        assert!(compact.activity.is_empty());
+
+        let mut verbose = RuntimeState::new_at(
+            AppConfig {
+                verbose_logging: true,
+                ..AppConfig::default()
+            },
+            now,
+        );
+        verbose.record_verbose("debug details");
+        assert_eq!(verbose.activity.len(), 1);
+        assert_eq!(verbose.activity[0], "debug details");
+    }
+
+    #[test]
+    fn publisher_connection_and_error_changes_bypass_heartbeat_throttle() {
+        let now = Instant::now();
+        let mut state = RuntimeState::new_at(AppConfig::default(), now);
+        let mut diagnostics = PublisherDiagnosticsSnapshot::default();
+        state.record_publisher_diagnostics(diagnostics, now);
+        diagnostics.connection_count = 1;
+        diagnostics.disconnect_count = 1;
+        diagnostics.last_disconnect_error = Some(109);
+        state.record_publisher_diagnostics(diagnostics, now + Duration::from_millis(10));
+        assert_eq!(state.activity.len(), 2);
+    }
+
+    #[test]
+    fn webcam_recovery_uses_three_nonblocking_attempts_then_exhausts() {
+        let started_at = Instant::now();
+        let mut recovery = WebcamRecovery::default();
+        assert!(recovery.schedule_initial(started_at));
+        assert_eq!(
+            recovery.next_attempt,
+            Some(started_at + Duration::from_millis(500))
+        );
+        assert_eq!(
+            recovery.begin_due_attempt(started_at + Duration::from_millis(499)),
+            None
+        );
+
+        let first_at = started_at + Duration::from_millis(500);
+        assert_eq!(recovery.begin_due_attempt(first_at), Some(1));
+        recovery.attempt_started();
+        assert!(recovery.attempt_failed(first_at));
+        assert_eq!(
+            recovery.next_attempt,
+            Some(first_at + Duration::from_secs(1))
+        );
+
+        let second_at = first_at + Duration::from_secs(1);
+        assert_eq!(recovery.begin_due_attempt(second_at), Some(2));
+        assert!(recovery.attempt_failed(second_at));
+        assert_eq!(
+            recovery.next_attempt,
+            Some(second_at + Duration::from_secs(2))
+        );
+
+        let third_at = second_at + Duration::from_secs(2);
+        assert_eq!(recovery.begin_due_attempt(third_at), Some(3));
+        assert!(!recovery.attempt_failed(third_at));
+        assert!(!recovery.active);
+        assert_eq!(recovery.next_attempt, None);
+    }
+
+    #[test]
+    fn webcam_recovery_success_and_manual_reset_clear_all_retry_state() {
+        let now = Instant::now();
+        let mut recovery = WebcamRecovery::default();
+        recovery.schedule_initial(now);
+        assert_eq!(
+            recovery.begin_due_attempt(now + Duration::from_millis(500)),
+            Some(1)
+        );
+        recovery.attempt_started();
+        recovery.exhaust();
+        assert!(!recovery.active);
+        assert!(!recovery.waiting_for_first_frame);
+        recovery.reset();
+        assert_eq!(recovery, WebcamRecovery::default());
     }
 
     #[test]

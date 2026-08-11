@@ -4140,6 +4140,12 @@ impl SwitcherApp {
             "Log directory",
             &self.log.directory().display().to_string(),
         );
+        settings_toggle_row(
+            ui,
+            &mut self.config.verbose_logging,
+            "Verbose diagnostic logging",
+            "Include detailed runtime activity and periodic health checks in local logs. Enable this only while troubleshooting.",
+        );
         settings_action_row(
             ui,
             "Diagnostic logs",
@@ -10345,6 +10351,20 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("Could not save settings"))
         );
+    }
+
+    #[test]
+    fn verbose_logging_setting_uses_the_normal_settings_save_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        let mut app = SwitcherApp::new(AppConfig::default(), Vec::new(), store.clone());
+
+        app.config.verbose_logging = true;
+        app.queue_settings_save();
+        app.flush_settings();
+
+        assert!(matches!(app.settings_save_state, SettingsSaveState::Saved));
+        assert!(store.load().config.verbose_logging);
     }
 
     #[test]

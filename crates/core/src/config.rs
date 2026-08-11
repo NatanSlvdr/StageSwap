@@ -24,6 +24,7 @@ pub struct AppConfig {
     pub start_automatically: bool,
     pub close_to_tray: bool,
     pub show_notifications: bool,
+    pub verbose_logging: bool,
     pub interface_language: String,
     pub confirm_exit: bool,
     pub output_mode: OutputMode,
@@ -47,6 +48,7 @@ impl Default for AppConfig {
             start_automatically: true,
             close_to_tray: true,
             show_notifications: true,
+            verbose_logging: false,
             interface_language: "en-US".into(),
             confirm_exit: true,
             output_mode: OutputMode::Automatic,
@@ -72,6 +74,7 @@ struct AppConfigFile {
     start_automatically: bool,
     close_to_tray: bool,
     show_notifications: bool,
+    verbose_logging: bool,
     interface_language: String,
     confirm_exit: bool,
     output_mode: OutputMode,
@@ -96,6 +99,7 @@ impl Default for AppConfigFile {
             start_automatically: config.start_automatically,
             close_to_tray: config.close_to_tray,
             show_notifications: config.show_notifications,
+            verbose_logging: config.verbose_logging,
             interface_language: config.interface_language,
             confirm_exit: config.confirm_exit,
             output_mode: config.output_mode,
@@ -127,6 +131,7 @@ impl<'de> Deserialize<'de> for AppConfig {
             start_automatically: file.start_automatically,
             close_to_tray: file.close_to_tray,
             show_notifications: file.show_notifications,
+            verbose_logging: file.verbose_logging,
             interface_language: file.interface_language,
             confirm_exit: file.confirm_exit,
             output_mode: file.output_mode,
@@ -648,6 +653,7 @@ mod tests {
             crop_webcam_to_16_9: false,
             selected_monitor_label: "Studio Display".into(),
             automatic_monitor_rescans: false,
+            verbose_logging: true,
             output_mode: OutputMode::ForceScreen,
             ..AppConfig::default()
         };
@@ -665,6 +671,7 @@ mod tests {
         assert!(config.selected_monitor_label.is_empty());
         assert!(config.automatic_monitor_rescans);
         assert!(config.automatic_screen_capture_recovery);
+        assert!(!config.verbose_logging);
     }
 
     #[test]
@@ -765,6 +772,7 @@ mod tests {
         let replacement = AppConfig {
             selected_video_device_id: "replacement-camera".into(),
             reference_image_path: config_store.reference_path().display().to_string(),
+            verbose_logging: true,
             ..AppConfig::default()
         };
         let replaced = admin_store.save(&replacement).unwrap();

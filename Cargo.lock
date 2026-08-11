@@ -3272,7 +3272,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stageswap"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "eframe",
  "egui-phosphor",
@@ -3290,7 +3290,7 @@ dependencies = [
 
 [[package]]
 name = "stageswap-core"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "image",
  "serde",
@@ -3300,11 +3300,11 @@ dependencies = [
 
 [[package]]
 name = "stageswap-i18n"
-version = "0.2.17"
+version = "0.2.18"
 
 [[package]]
 name = "stageswap-media-source"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "stageswap-core",
  "windows 0.62.2",
@@ -3313,7 +3313,7 @@ dependencies = [
 
 [[package]]
 name = "stageswap-windows"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "notify-rust",
  "stageswap-core",
@@ -4759,7 +4759,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "anyhow",
  "tempfile",

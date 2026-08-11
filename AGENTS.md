@@ -17,7 +17,7 @@ StageSwap is a local-only, native Windows 11 x64 virtual camera for automatic Zo
 - Output uses deadline-based 30 fps pacing. Visible dashboard previews use latest-only conversion workers and display-sized textures. FPS is runtime-owned and remains meaningful while the dashboard is hidden.
 - While automation is stopped, a fixed black screen with the centered StageSwap icon is published at 30 fps. The virtual camera generates the same frame whenever the app publisher is absent.
 - The app includes the dashboard, five settings categories, contextual previews, shared executable/window/tray icon, synchronized tray controls, warning notifications, exit confirmation, 14-day JSONL logs, and individual/all component restarts.
-- There is no general hot-plug manager, monitor-reselection system, sleep/resume recovery, docking recovery, dynamic output-format management, OBS integration, or kernel driver. Compatible webcam media-type changes are revalidated, but failures require an explicit webcam restart. Screen recovery only retries a selected capture that is black or unavailable, using its stored display identity.
+- There is no general hot-plug manager, monitor-reselection system, sleep/resume recovery, docking recovery, dynamic output-format management, OBS integration, or kernel driver. Compatible webcam media-type changes are revalidated; invalidation, driver failure, and stale capture retry the saved webcam up to three times without rediscovery, while other failures retain the explicit restart path. Screen recovery only retries a selected capture that is black or unavailable, using its stored display identity.
 
 Configuration schema 1, references, and logs live under `%LocalAppData%\StageSwap`. Frames are never recorded or uploaded.
 

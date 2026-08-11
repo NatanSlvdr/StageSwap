@@ -9,6 +9,13 @@ pub const HEADER_LEN: usize = 40;
 pub const MAX_FRAME_BYTES: u32 = 1280 * 720 * 4;
 pub const FRAME_EXPIRY: Duration = Duration::from_secs(2);
 
+pub fn is_expected_pipe_disconnect(error: u32) -> bool {
+    // ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED, and
+    // ERROR_OPERATION_ABORTED are normal when a camera consumer closes or the
+    // publisher is shutting down.
+    matches!(error, 109 | 232 | 233 | 995)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FrameHeader {
     pub sequence: u64,
@@ -212,6 +219,15 @@ mod tests {
             frame_bytes: 1920 * 1080 * 4,
         };
         assert_eq!(invalid.validate(), Err(HeaderError::InvalidFrameBytes));
+    }
+
+    #[test]
+    fn expected_windows_pipe_disconnects_are_not_transport_failures() {
+        for error in [109, 232, 233, 995] {
+            assert!(is_expected_pipe_disconnect(error));
+        }
+        assert!(!is_expected_pipe_disconnect(5));
+        assert!(!is_expected_pipe_disconnect(87));
     }
 
     #[test]

@@ -5,21 +5,22 @@ use stageswap_core::{PIPELINE_SIZE, SharedFrameCache, off_frame_pixels};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use windows::Win32::Foundation::{E_NOTIMPL, E_POINTER, S_OK};
+use windows::Win32::Foundation::{E_POINTER, S_OK};
 use windows::Win32::Media::KernelStreaming::PINNAME_VIDEO_CAPTURE;
 use windows::Win32::Media::MediaFoundation::{
-    IMF2DBuffer2, IMFAsyncCallback, IMFAsyncCallback_Impl, IMFAsyncResult, IMFAttributes,
-    IMFMediaBuffer, IMFMediaEvent, IMFMediaEventGenerator_Impl, IMFMediaEventQueue, IMFMediaSource,
-    IMFMediaStream_Impl, IMFMediaStream2, IMFMediaStream2_Impl, IMFSample, IMFStreamDescriptor,
-    MEMediaSample, MEStreamStarted, MEStreamStopped, MF_DEVICESTREAM_ATTRIBUTE_FRAMESOURCE_TYPES,
+    IMF2DBuffer2, IMFAsyncCallback, IMFAsyncResult, IMFAttributes, IMFMediaEvent,
+    IMFMediaEventGenerator_Impl, IMFMediaEventQueue, IMFMediaSource, IMFMediaStream_Impl,
+    IMFMediaStream2, IMFMediaStream2_Impl, IMFSample, IMFStreamDescriptor,
+    IMFVideoSampleAllocatorCallback, IMFVideoSampleAllocatorEx, MEMediaSample, MEStreamStarted,
+    MEStreamStopped, MF_DEVICESTREAM_ATTRIBUTE_FRAMESOURCE_TYPES,
     MF_DEVICESTREAM_FRAMESERVER_SHARED, MF_DEVICESTREAM_STREAM_CATEGORY, MF_DEVICESTREAM_STREAM_ID,
-    MF_E_INVALID_STATE_TRANSITION, MF_E_INVALIDREQUEST, MF_E_NOTACCEPTING, MF_E_SHUTDOWN,
+    MF_E_INVALID_STATE_TRANSITION, MF_E_INVALIDREQUEST, MF_E_SHUTDOWN,
     MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE,
     MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
     MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE,
     MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX, MF_STREAM_STATE, MF_STREAM_STATE_PAUSED,
-    MF_STREAM_STATE_RUNNING, MF_STREAM_STATE_STOPPED, MFCreate2DMediaBuffer, MFCreateAttributes,
-    MFCreateEventQueue, MFCreateMediaType, MFCreateSample, MFCreateStreamDescriptor,
+    MF_STREAM_STATE_RUNNING, MF_STREAM_STATE_STOPPED, MFCreateAttributes, MFCreateEventQueue,
+    MFCreateMediaType, MFCreateStreamDescriptor, MFCreateVideoSampleAllocatorEx,
     MFFrameSourceTypes_Color, MFGetSystemTime, MFMediaType_Video, MFNominalRange_16_235,
     MFVideoFormat_NV12, MFVideoFormat_RGB32, MFVideoInterlace_Progressive,
     MFVideoTransferMatrix_BT601,
@@ -33,8 +34,7 @@ const STRIDE: u32 = WIDTH * 4;
 const FRAME_BYTES: u32 = STRIDE * HEIGHT;
 const NV12_FRAME_BYTES: u32 = WIDTH * HEIGHT * 3 / 2;
 const FRAME_DURATION_100NS: i64 = 10_000_000 / 30;
-const MEDIA_BUFFER_POOL_CAPACITY: usize = 4;
-const BUFFER_LEASE_ATTRIBUTE: GUID = GUID::from_u128(0xe277d93c_506f_487d_920d_59b030aa8a4a);
+const SAMPLE_ALLOCATOR_CAPACITY: u32 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BufferFormat {
@@ -43,126 +43,9 @@ enum BufferFormat {
 }
 
 #[derive(Default)]
-struct MediaBufferPoolBuffers {
-    rgb32: Vec<IMFMediaBuffer>,
-    nv12: Vec<IMFMediaBuffer>,
-}
-
-#[derive(Default)]
-struct MediaBufferPoolAvailability {
-    rgb32: Vec<bool>,
-    nv12: Vec<bool>,
-}
-
-struct MediaBufferPool {
-    buffers: Mutex<MediaBufferPoolBuffers>,
-    availability: Arc<Mutex<MediaBufferPoolAvailability>>,
-}
-
-struct AcquiredMediaBuffer {
-    buffer: IMFMediaBuffer,
-    lease: IUnknown,
-}
-
-impl MediaBufferPool {
-    fn new() -> Self {
-        Self {
-            buffers: Mutex::new(MediaBufferPoolBuffers::default()),
-            availability: Arc::new(Mutex::new(MediaBufferPoolAvailability::default())),
-        }
-    }
-
-    fn acquire(&self, format: BufferFormat) -> windows_core::Result<AcquiredMediaBuffer> {
-        let mut buffer_state = self.buffers.lock().expect("media buffer pool poisoned");
-        let mut availability = self
-            .availability
-            .lock()
-            .expect("media buffer pool availability poisoned");
-        let (format_buffers, in_use) = match format {
-            BufferFormat::Rgb32 => (&mut buffer_state.rgb32, &mut availability.rgb32),
-            BufferFormat::Nv12 => (&mut buffer_state.nv12, &mut availability.nv12),
-        };
-        let index = if let Some(index) = in_use.iter().position(|in_use| !in_use) {
-            index
-        } else if format_buffers.len() < MEDIA_BUFFER_POOL_CAPACITY {
-            // MFCreate2DMediaBuffer supplies a format-aware surface whose
-            // ContiguousCopyFrom implementation handles pitch and planar NV12
-            // layout for the consumer's selected media type.
-            let buffer = unsafe {
-                MFCreate2DMediaBuffer(
-                    WIDTH,
-                    HEIGHT,
-                    match format {
-                        BufferFormat::Rgb32 => MFVideoFormat_RGB32.data1,
-                        BufferFormat::Nv12 => MFVideoFormat_NV12.data1,
-                    },
-                    false,
-                )?
-            };
-            format_buffers.push(buffer);
-            in_use.push(false);
-            format_buffers.len() - 1
-        } else {
-            return Err(Error::from_hresult(MF_E_NOTACCEPTING));
-        };
-        in_use[index] = true;
-        let buffer = format_buffers[index].clone();
-        drop(availability);
-        drop(buffer_state);
-        let callback: IMFAsyncCallback =
-            BufferLease::new(Arc::clone(&self.availability), format, index).into();
-        Ok(AcquiredMediaBuffer {
-            buffer,
-            lease: callback.into(),
-        })
-    }
-}
-
-#[implement(IMFAsyncCallback)]
-struct BufferLease {
-    availability: Arc<Mutex<MediaBufferPoolAvailability>>,
-    format: BufferFormat,
-    index: usize,
-}
-
-impl BufferLease {
-    fn new(
-        availability: Arc<Mutex<MediaBufferPoolAvailability>>,
-        format: BufferFormat,
-        index: usize,
-    ) -> Self {
-        OBJECTS.fetch_add(1, Ordering::Relaxed);
-        Self {
-            availability,
-            format,
-            index,
-        }
-    }
-}
-
-impl Drop for BufferLease {
-    fn drop(&mut self) {
-        if let Ok(mut availability) = self.availability.lock() {
-            let in_use = match self.format {
-                BufferFormat::Rgb32 => &mut availability.rgb32,
-                BufferFormat::Nv12 => &mut availability.nv12,
-            };
-            if let Some(in_use) = in_use.get_mut(self.index) {
-                *in_use = false;
-            }
-        }
-        OBJECTS.fetch_sub(1, Ordering::Release);
-    }
-}
-
-impl IMFAsyncCallback_Impl for BufferLease_Impl {
-    fn GetParameters(&self, _flags: *mut u32, _queue: *mut u32) -> windows_core::Result<()> {
-        Err(Error::from_hresult(E_NOTIMPL))
-    }
-
-    fn Invoke(&self, _result: Ref<IMFAsyncResult>) -> windows_core::Result<()> {
-        Err(Error::from_hresult(E_NOTIMPL))
-    }
+struct SampleAllocatorState {
+    allocator: Option<IMFVideoSampleAllocatorEx>,
+    subtype: Option<GUID>,
 }
 
 fn create_video_type(
@@ -240,13 +123,11 @@ struct StreamState {
     parent: Option<IMFMediaSource>,
     state: MF_STREAM_STATE,
     shutdown: bool,
-    next_time_100ns: i64,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct StreamCheckpoint {
     state: MF_STREAM_STATE,
-    next_time_100ns: i64,
 }
 
 #[derive(Default)]
@@ -265,7 +146,7 @@ pub(super) struct MediaStream {
     off_bgra: Arc<[u8]>,
     off_nv12: Arc<[u8]>,
     nv12_cache: Mutex<Nv12Cache>,
-    buffer_pool: MediaBufferPool,
+    sample_allocator: Mutex<SampleAllocatorState>,
     _pipe_reader: PipeReader,
     state: Mutex<StreamState>,
     request_samples: AtomicU64,
@@ -319,13 +200,12 @@ impl MediaStream {
             off_bgra,
             off_nv12: off_nv12.into(),
             nv12_cache: Mutex::new(Nv12Cache::default()),
-            buffer_pool: MediaBufferPool::new(),
+            sample_allocator: Mutex::new(SampleAllocatorState::default()),
             _pipe_reader: pipe_reader,
             state: Mutex::new(StreamState {
                 parent: None,
                 state: MF_STREAM_STATE_STOPPED,
                 shutdown: false,
-                next_time_100ns: 0,
             }),
             request_samples: AtomicU64::new(0),
             queued_samples: AtomicU64::new(0),
@@ -360,8 +240,65 @@ impl MediaStream {
                 .lock()
                 .expect("NV12 cache lock poisoned")
                 .converted = None;
+            self.initialize_sample_allocator(media_type)?;
         }
         result
+    }
+
+    fn initialize_sample_allocator(
+        &self,
+        media_type: &windows::Win32::Media::MediaFoundation::IMFMediaType,
+    ) -> windows_core::Result<()> {
+        let subtype = unsafe { media_type.GetGUID(&MF_MT_SUBTYPE)? };
+        {
+            let state = self.state.lock().expect("stream state lock poisoned");
+            if state.shutdown {
+                return Err(Error::from_hresult(MF_E_SHUTDOWN));
+            }
+        }
+        let mut state = self
+            .sample_allocator
+            .lock()
+            .expect("sample allocator state poisoned");
+        if state.subtype == Some(subtype) && state.allocator.is_some() {
+            return Ok(());
+        }
+        if let Some(allocator) = state.allocator.take() {
+            let _ = unsafe { allocator.UninitializeSampleAllocator() };
+        }
+        let mut raw = core::ptr::null_mut();
+        unsafe {
+            MFCreateVideoSampleAllocatorEx(&IMFVideoSampleAllocatorEx::IID, &mut raw)?;
+        }
+        if raw.is_null() {
+            return Err(Error::from_hresult(E_POINTER));
+        }
+        let allocator = unsafe { IMFVideoSampleAllocatorEx::from_raw(raw) };
+        unsafe {
+            allocator.InitializeSampleAllocator(SAMPLE_ALLOCATOR_CAPACITY, media_type)?;
+        }
+        diagnostics::always(format!(
+            "sample allocator initialized subtype={subtype:?} capacity={SAMPLE_ALLOCATOR_CAPACITY}"
+        ));
+        state.allocator = Some(allocator);
+        state.subtype = Some(subtype);
+        Ok(())
+    }
+
+    fn allocate_sample(&self) -> windows_core::Result<(IMFSample, Option<i32>)> {
+        let allocator = self
+            .sample_allocator
+            .lock()
+            .expect("sample allocator state poisoned")
+            .allocator
+            .clone()
+            .ok_or_else(|| Error::from_hresult(MF_E_INVALIDREQUEST))?;
+        let sample = unsafe { allocator.AllocateSample()? };
+        let free_samples = allocator
+            .cast::<IMFVideoSampleAllocatorCallback>()
+            .ok()
+            .and_then(|callback| unsafe { callback.GetFreeSampleCount() }.ok());
+        Ok((sample, free_samples))
     }
 
     fn nv12_frame(&self, sequence: u64, bgra: &[u8]) -> Arc<[u8]> {
@@ -389,9 +326,7 @@ impl MediaStream {
         }
         state.state = MF_STREAM_STATE_RUNNING;
         // SAFETY: MFGetSystemTime returns the current monotonic MF clock value.
-        let start_time_100ns = unsafe { MFGetSystemTime() };
-        state.next_time_100ns = start_time_100ns;
-        Ok(start_time_100ns)
+        Ok(unsafe { MFGetSystemTime() })
     }
 
     pub(super) fn queue_started(
@@ -414,17 +349,13 @@ impl MediaStream {
         if state.shutdown {
             return Err(Error::from_hresult(MF_E_SHUTDOWN));
         }
-        Ok(StreamCheckpoint {
-            state: state.state,
-            next_time_100ns: state.next_time_100ns,
-        })
+        Ok(StreamCheckpoint { state: state.state })
     }
 
     pub(super) fn restore(&self, checkpoint: StreamCheckpoint) {
         let mut state = self.state.lock().expect("stream state lock poisoned");
         if !state.shutdown {
             state.state = checkpoint.state;
-            state.next_time_100ns = checkpoint.next_time_100ns;
         }
     }
 
@@ -459,11 +390,19 @@ impl MediaStream {
         state.state = MF_STREAM_STATE_STOPPED;
         state.parent = None;
         drop(state);
+        if let Ok(mut allocator) = self.sample_allocator.lock()
+            && let Some(allocator) = allocator.allocator.take()
+        {
+            let _ = unsafe { allocator.UninitializeSampleAllocator() };
+        }
         // SAFETY: shutting down an owned event queue is idempotent for our state machine.
         let _ = unsafe { self.events.Shutdown() };
     }
 
-    fn make_output_sample(&self, token: Option<IUnknown>) -> windows_core::Result<IMFSample> {
+    fn make_output_sample(
+        &self,
+        token: Option<IUnknown>,
+    ) -> windows_core::Result<(IMFSample, i64, Option<i32>)> {
         {
             let state = self.state.lock().expect("stream state lock poisoned");
             if state.shutdown {
@@ -506,8 +445,8 @@ impl MediaStream {
                 .expect("NV12 cache lock poisoned")
                 .converted = None;
         }
-        let acquired = self.buffer_pool.acquire(format)?;
-        let buffer = &acquired.buffer;
+        let (sample, free_samples) = self.allocate_sample()?;
+        let buffer = unsafe { sample.GetBufferByIndex(0)? };
         let output: &[u8] = if format == BufferFormat::Nv12 {
             converted_nv12.as_deref().unwrap_or(self.off_nv12.as_ref())
         } else {
@@ -519,33 +458,27 @@ impl MediaStream {
             return Err(Error::from_hresult(E_POINTER));
         }
         let buffer_2d: IMF2DBuffer2 = buffer.cast()?;
-        // SAFETY: the 2D buffer is owned by the bounded pool and the source
+        // SAFETY: the 2D buffer is owned by the Media Foundation allocator and the source
         // slice exactly matches the selected media type's contiguous layout.
         // ContiguousCopyFrom copies into the native surface pitch, including
         // the plane layout used by NV12.
         unsafe {
             buffer_2d.ContiguousCopyFrom(output)?;
         }
-        let timestamp = {
-            let mut state = self.state.lock().expect("stream state lock poisoned");
+        {
+            let state = self.state.lock().expect("stream state lock poisoned");
             if state.shutdown {
                 return Err(Error::from_hresult(MF_E_SHUTDOWN));
             }
             if state.state != MF_STREAM_STATE_RUNNING {
                 return Err(Error::from_hresult(MF_E_INVALIDREQUEST));
             }
-            let timestamp = state.next_time_100ns;
-            state.next_time_100ns = state.next_time_100ns.saturating_add(FRAME_DURATION_100NS);
-            timestamp
-        };
-        // SAFETY: Media Foundation constructors return owned COM interfaces.
-        let sample = unsafe { MFCreateSample()? };
-        // SAFETY: sample and buffer are valid owned interfaces.
+        }
+        // SAFETY: MFGetSystemTime is QPC-correlated and the allocator returned a valid sample.
+        let timestamp = unsafe { MFGetSystemTime() };
         unsafe {
-            sample.AddBuffer(buffer)?;
             sample.SetSampleTime(timestamp)?;
             sample.SetSampleDuration(FRAME_DURATION_100NS)?;
-            sample.SetUnknown(&BUFFER_LEASE_ATTRIBUTE, &acquired.lease)?;
             if let Some(token) = token {
                 sample.SetUnknown(
                     &windows::Win32::Media::MediaFoundation::MFSampleExtension_Token,
@@ -553,7 +486,7 @@ impl MediaStream {
                 )?;
             }
         }
-        Ok(sample)
+        Ok((sample, timestamp, free_samples))
     }
 }
 
@@ -627,14 +560,23 @@ impl IMFMediaStream_Impl for MediaStream_Impl {
             Duration::from_secs(5),
             format!("sample requests count={request_count}"),
         );
-        let sample = match self.make_output_sample(token.cloned()) {
+        let (sample, timestamp, free_samples) = match self.make_output_sample(token.cloned()) {
             Ok(sample) => sample,
             Err(error) => {
                 let failure_count = self.sample_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                let allocator_free = self
+                    .sample_allocator
+                    .lock()
+                    .ok()
+                    .and_then(|state| state.allocator.clone())
+                    .and_then(|allocator| allocator.cast::<IMFVideoSampleAllocatorCallback>().ok())
+                    .and_then(|callback| unsafe { callback.GetFreeSampleCount() }.ok());
                 diagnostics::rate_limited(
                     "sample-creation-failures",
                     Duration::from_secs(5),
-                    format!("sample creation failed count={failure_count} error={error}"),
+                    format!(
+                        "sample creation failed count={failure_count} allocator_free={allocator_free:?} error={error}"
+                    ),
                 );
                 return Err(error);
             }
@@ -650,7 +592,9 @@ impl IMFMediaStream_Impl for MediaStream_Impl {
                 diagnostics::rate_limited(
                     "sample-queued",
                     Duration::from_secs(5),
-                    format!("samples queued count={queued_count}"),
+                    format!(
+                        "samples queued count={queued_count} timestamp_100ns={timestamp} allocator_free={free_samples:?}"
+                    ),
                 );
                 Ok(())
             }
@@ -675,12 +619,23 @@ impl IMFMediaStream2_Impl for MediaStream_Impl {
         {
             return Err(Error::from_hresult(MF_E_INVALID_STATE_TRANSITION));
         }
+        {
+            let state = self.state.lock().expect("stream state lock poisoned");
+            if state.shutdown {
+                return Err(Error::from_hresult(MF_E_SHUTDOWN));
+            }
+            if value == MF_STREAM_STATE_PAUSED && state.state != MF_STREAM_STATE_RUNNING {
+                return Err(Error::from_hresult(MF_E_INVALID_STATE_TRANSITION));
+            }
+        }
+        if value == MF_STREAM_STATE_RUNNING {
+            let handler = unsafe { self.descriptor.GetMediaTypeHandler()? };
+            let media_type = unsafe { handler.GetCurrentMediaType()? };
+            self.initialize_sample_allocator(&media_type)?;
+        }
         let mut state = self.state.lock().expect("stream state lock poisoned");
         if state.shutdown {
             return Err(Error::from_hresult(MF_E_SHUTDOWN));
-        }
-        if value == MF_STREAM_STATE_PAUSED && state.state != MF_STREAM_STATE_RUNNING {
-            return Err(Error::from_hresult(MF_E_INVALID_STATE_TRANSITION));
         }
         state.state = value;
         Ok(())
@@ -697,9 +652,8 @@ impl IMFMediaStream2_Impl for MediaStream_Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::Foundation::S_FALSE;
     use windows::Win32::Media::MediaFoundation::{
-        MF_VERSION, MFSTARTUP_FULL, MFShutdown, MFStartup,
+        MF_E_SAMPLEALLOCATOR_EMPTY, MF_VERSION, MFSTARTUP_FULL, MFShutdown, MFStartup,
     };
 
     struct MediaFoundation;
@@ -727,8 +681,9 @@ mod tests {
             unsafe { current.GetGUID(&MF_MT_SUBTYPE)? },
             MFVideoFormat_RGB32
         );
+        stream.set_media_type(&current)?;
         stream.start()?;
-        let first = stream.make_output_sample(None)?;
+        let (first, first_timestamp, _) = stream.make_output_sample(None)?;
         // SAFETY: the sample owns one contiguous RGB32 buffer.
         let buffer = unsafe { first.ConvertToContiguousBuffer()? };
         let mut bytes = core::ptr::null_mut();
@@ -752,11 +707,11 @@ mod tests {
             MFVideoTransferMatrix_BT601.0 as u32
         );
         stream.set_media_type(&nv12)?;
-        let second = stream.make_output_sample(None)?;
-        assert_eq!(
-            unsafe { second.GetSampleTime()? } - unsafe { first.GetSampleTime()? },
-            FRAME_DURATION_100NS
-        );
+        let (second, second_timestamp, _) = stream.make_output_sample(None)?;
+        assert_eq!(unsafe { first.GetSampleTime()? }, first_timestamp);
+        assert_eq!(unsafe { second.GetSampleTime()? }, second_timestamp);
+        assert!(second_timestamp >= first_timestamp);
+        assert_eq!(unsafe { second.GetSampleDuration()? }, FRAME_DURATION_100NS);
         let buffer = unsafe { second.ConvertToContiguousBuffer()? };
         unsafe { buffer.Lock(&mut bytes, None, Some(&mut length))? };
         assert_eq!(length, NV12_FRAME_BYTES);
@@ -771,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn media_buffers_backpressure_and_reuse_after_sample_release() -> windows_core::Result<()> {
+    fn sample_allocator_backpressure_and_reuse_after_release() -> windows_core::Result<()> {
         let _test_lock = super::super::TEST_LOCK
             .lock()
             .expect("media-source test lock poisoned");
@@ -780,26 +735,25 @@ mod tests {
         let _foundation = MediaFoundation;
         let stream = MediaStream::new(r"\\.\pipe\StageSwap.Nonexistent.Pool.Test".into())?;
         let handler = unsafe { stream.descriptor.GetMediaTypeHandler()? };
-        stream.start()?;
-
         for media_type_index in 0..2 {
             let media_type = unsafe { handler.GetMediaTypeByIndex(media_type_index)? };
             stream.set_media_type(&media_type)?;
+            stream.start()?;
             let mut samples = Vec::new();
             let mut buffer_pointers = Vec::new();
-            for _ in 0..MEDIA_BUFFER_POOL_CAPACITY {
-                let sample = stream.make_output_sample(None)?;
+            for _ in 0..SAMPLE_ALLOCATOR_CAPACITY {
+                let (sample, _, _) = stream.make_output_sample(None)?;
                 let buffer = unsafe { sample.GetBufferByIndex(0)? };
                 buffer_pointers.push(buffer.as_raw());
                 samples.push(sample);
             }
             assert_eq!(
                 stream.make_output_sample(None).unwrap_err().code(),
-                MF_E_NOTACCEPTING
+                MF_E_SAMPLEALLOCATOR_EMPTY
             );
             let released = samples.remove(0);
             drop(released);
-            let reused = stream.make_output_sample(None)?;
+            let (reused, _, _) = stream.make_output_sample(None)?;
             let reused_buffer = unsafe { reused.GetBufferByIndex(0)? };
             assert_eq!(reused_buffer.as_raw(), buffer_pointers[0]);
             assert!(buffer_pointers.iter().enumerate().all(|(index, pointer)| {
@@ -810,15 +764,15 @@ mod tests {
             drop(reused_buffer);
             drop(reused);
             drop(samples);
+            stream.stop(false)?;
         }
 
-        stream.stop(false)?;
         stream.shutdown();
         Ok(())
     }
 
     #[test]
-    fn live_sample_lease_prevents_dll_unload() -> windows_core::Result<()> {
+    fn allocator_sample_survives_source_shutdown_without_pinning_dll() -> windows_core::Result<()> {
         let _test_lock = super::super::TEST_LOCK
             .lock()
             .expect("media-source test lock poisoned");
@@ -826,13 +780,20 @@ mod tests {
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
         let _foundation = MediaFoundation;
         let stream = MediaStream::new(r"\\.\pipe\StageSwap.Nonexistent.Lease.Test".into())?;
+        let media_type = unsafe {
+            stream
+                .descriptor
+                .GetMediaTypeHandler()?
+                .GetCurrentMediaType()?
+        };
+        stream.set_media_type(&media_type)?;
         stream.start()?;
-        let sample = stream.make_output_sample(None)?;
+        let (sample, _, _) = stream.make_output_sample(None)?;
         stream.stop(false)?;
         stream.shutdown();
         drop(stream);
 
-        assert_eq!(super::super::DllCanUnloadNow(), S_FALSE);
+        assert_eq!(super::super::DllCanUnloadNow(), S_OK);
         drop(sample);
         assert_eq!(super::super::DllCanUnloadNow(), S_OK);
         Ok(())

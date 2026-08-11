@@ -3,7 +3,7 @@
 | Contract | Rust implementation | Verification |
 |---|---|---|
 | Immutable BGRA frame, fixed 720p30 | `stageswap-core::Frame`, app compositor | invalid-frame, fit, blend tests |
-| Saved-then-unique webcam, tiered progressive input negotiation, no rediscovery loop | `MediaFoundationVideoInput`, `choose_video_device` | ranking/optional-metadata/stride tests, x64 build, native RGB32/MJPEG/YUY2/NV12 checks |
+| Saved-then-unique webcam, tiered progressive input negotiation, bounded same-device recovery without rediscovery | `MediaFoundationVideoInput`, `WebcamRecovery`, `choose_video_device` | ranking/optional-metadata/stride/recovery-state tests, x64 build, native RGB32/MJPEG/YUY2/NV12 checks |
 | Windows Graphics Capture, cursor option, capability/HDR preflight, session-valid screen health, generation-safe failure handling | `WindowsGraphicsScreenInput`, `DevicePlatform` | lifecycle/error/old-frame tests, x64 build, native SDR/HDR/restart-race checks |
 | Reference detection 250 ms, 5/3 debounce | runtime detector, `DebouncedDetector` | debounce test and switching checks |
 | Two-scan monitor selection and nonblocking discovery | `MonitorTracker`, bounded monitor/video-device workers | coalescing/shutdown/nonblocking tests, monitor test, and multi-monitor checks |

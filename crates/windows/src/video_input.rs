@@ -32,6 +32,15 @@ use windows_core::{HRESULT, Interface, PCWSTR, PWSTR, Ref, implement};
 const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 const WEBCAM_FAILURE_THRESHOLD: u32 = 3;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebcamCaptureFailure {
+    pub message: String,
+    pub hresult: Option<i32>,
+    pub device_tag: u64,
+    pub capture_generation: u64,
+    pub recoverable: bool,
+}
+
 fn device_identity_tag(device_id: &str) -> u64 {
     device_id.bytes().fold(0xcbf29ce484222325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
@@ -67,7 +76,7 @@ fn webcam_error_message(
     }
     if code == MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED {
         return format!(
-            "{context}: the webcam was disconnected or invalidated; reconnect it and restart the webcam ({details})"
+            "{context}: the webcam was disconnected or invalidated; StageSwap will retry the saved webcam automatically, or you can reconnect it and use Restart Webcam if recovery is exhausted ({details})"
         );
     }
     format!(
@@ -519,7 +528,7 @@ struct CaptureState {
     stride: AtomicI32,
     scratch: Mutex<Vec<u8>>,
     pool: Mutex<FrameBufferPool>,
-    failure: Mutex<Option<String>>,
+    failure: Mutex<Option<WebcamCaptureFailure>>,
     running: AtomicBool,
     consecutive_failures: AtomicU32,
     generation: AtomicU64,
@@ -572,17 +581,31 @@ impl CaptureState {
         if let Some(reader) = reader {
             // SAFETY: asynchronous mode requires all output pointers to be null.
             if let Err(error) = unsafe { reader.ReadSample(STREAM, 0, None, None, None, None) } {
-                let message = format!("webcam sample request failed: {error}");
-                self.set_failure(message.clone(), true);
+                let device_tag = self.device_tag.load(Ordering::Acquire);
+                let capture_generation = self.generation.load(Ordering::Acquire);
+                let failure = WebcamCaptureFailure {
+                    message: webcam_error_message(
+                        "webcam sample request failed",
+                        error.code(),
+                        device_tag,
+                        capture_generation,
+                    ),
+                    hresult: Some(error.code().0),
+                    device_tag,
+                    capture_generation,
+                    recoverable: webcam_hresult_is_recoverable(error.code()),
+                };
+                let message = failure.message.clone();
+                self.set_failure(failure, true);
                 return Err(message);
             }
         }
         Ok(())
     }
 
-    fn set_failure(&self, message: impl Into<String>, terminal: bool) {
+    fn set_failure(&self, details: WebcamCaptureFailure, terminal: bool) {
         if let Ok(mut failure) = self.failure.lock() {
-            *failure = Some(message.into());
+            *failure = Some(details);
         }
         let failures = self.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1;
         if terminal || failures >= WEBCAM_FAILURE_THRESHOLD {
@@ -625,6 +648,31 @@ impl CaptureState {
     }
 }
 
+fn webcam_hresult_is_recoverable(code: HRESULT) -> bool {
+    code != E_ACCESSDENIED && code != MF_E_VIDEO_RECORDING_DEVICE_PREEMPTED
+}
+
+fn webcam_failure_without_hresult(
+    state: &CaptureState,
+    message: impl Into<String>,
+    recoverable: bool,
+) -> WebcamCaptureFailure {
+    let device_tag = state.device_tag.load(Ordering::Acquire);
+    let capture_generation = state.generation.load(Ordering::Acquire);
+    let identity = if device_tag == 0 {
+        format!("device=unknown, capture_generation={capture_generation}")
+    } else {
+        format!("device_tag={device_tag:016x}, capture_generation={capture_generation}")
+    };
+    WebcamCaptureFailure {
+        message: format!("{} (HRESULT=unavailable, {identity})", message.into()),
+        hresult: None,
+        device_tag,
+        capture_generation,
+        recoverable,
+    }
+}
+
 #[implement(IMFSourceReaderCallback)]
 struct ReaderCallback {
     state: Arc<CaptureState>,
@@ -647,18 +695,30 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
             let device_tag = self.state.device_tag.load(Ordering::Acquire);
             let capture_generation = self.state.generation.load(Ordering::Acquire);
             self.state.set_failure(
-                webcam_error_message(
-                    "webcam sample failed",
-                    status,
+                WebcamCaptureFailure {
+                    message: webcam_error_message(
+                        "webcam sample failed",
+                        status,
+                        device_tag,
+                        capture_generation,
+                    ),
+                    hresult: Some(status.0),
                     device_tag,
                     capture_generation,
-                ),
+                    recoverable: webcam_hresult_is_recoverable(status),
+                },
                 true,
             );
             return Ok(());
         } else if flags & MF_SOURCE_READERF_ERROR.0 as u32 != 0 {
-            self.state
-                .set_failure("webcam source reader reported a capture error", true);
+            self.state.set_failure(
+                webcam_failure_without_hresult(
+                    &self.state,
+                    "webcam source reader reported a capture error",
+                    true,
+                ),
+                true,
+            );
             return Ok(());
         }
         if flags
@@ -668,7 +728,11 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
             && let Err(error) = self.state.update_current_format()
         {
             self.state.set_failure(
-                format!("webcam media-type change is incompatible: {error}"),
+                webcam_failure_without_hresult(
+                    &self.state,
+                    format!("webcam media-type change is incompatible: {error}"),
+                    false,
+                ),
                 true,
             );
             return Ok(());
@@ -779,11 +843,20 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
                         Ok(())
                     });
                 if let Err(error) = copy_result {
-                    self.state.set_failure(error, false);
+                    self.state.set_failure(
+                        webcam_failure_without_hresult(&self.state, error, true),
+                        false,
+                    );
                 }
             } else {
-                self.state
-                    .set_failure("could not obtain a contiguous webcam buffer", false);
+                self.state.set_failure(
+                    webcam_failure_without_hresult(
+                        &self.state,
+                        "could not obtain a contiguous webcam buffer",
+                        true,
+                    ),
+                    false,
+                );
             }
         }
         let _ = self.state.request_next(self.expected_generation);
@@ -989,11 +1062,19 @@ impl MediaFoundationVideoInput {
     }
 
     pub fn last_error(&self) -> Option<String> {
+        self.last_failure().map(|failure| failure.message)
+    }
+
+    pub fn last_failure(&self) -> Option<WebcamCaptureFailure> {
         self.state
             .failure
             .lock()
             .ok()
             .and_then(|failure| failure.clone())
+    }
+
+    pub fn capture_generation(&self) -> u64 {
+        self.state.generation.load(Ordering::Acquire)
     }
 
     pub fn selected_native_format(&self) -> Option<&str> {
@@ -1086,7 +1167,10 @@ mod format_tests {
         let state = CaptureState::default();
         state.running.store(true, Ordering::Release);
         for _ in 0..WEBCAM_FAILURE_THRESHOLD {
-            state.set_failure("scripted callback failure", false);
+            state.set_failure(
+                webcam_failure_without_hresult(&state, "scripted callback failure", true),
+                false,
+            );
         }
         assert!(!state.running.load(Ordering::Acquire));
         assert!(state.latest.lock().unwrap().is_none());

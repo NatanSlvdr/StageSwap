@@ -1,6 +1,8 @@
-use stageswap_core::{Frame, FrameHeader, HEADER_LEN, MAX_FRAME_BYTES};
+use stageswap_core::{
+    Frame, FrameHeader, HEADER_LEN, MAX_FRAME_BYTES, is_expected_pipe_disconnect,
+};
 use std::os::windows::io::AsRawHandle;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -45,6 +47,9 @@ struct Shared {
     connected: AtomicBool,
     transmitted_sequence: AtomicU64,
     write_failures: AtomicU64,
+    disconnect_count: AtomicU64,
+    last_write_error: AtomicU32,
+    last_disconnect_error: AtomicU32,
     connection_count: AtomicU64,
     connection_failures: AtomicU64,
 }
@@ -55,6 +60,9 @@ pub struct FramePublisherDiagnostics {
     pub transmitted_sequence: u64,
     pub connected: bool,
     pub write_failures: u64,
+    pub disconnect_count: u64,
+    pub last_write_error: Option<u32>,
+    pub last_disconnect_error: Option<u32>,
     pub connection_count: u64,
     pub connection_failures: u64,
 }
@@ -94,6 +102,9 @@ impl FramePublisher {
             connected: AtomicBool::new(false),
             transmitted_sequence: AtomicU64::new(0),
             write_failures: AtomicU64::new(0),
+            disconnect_count: AtomicU64::new(0),
+            last_write_error: AtomicU32::new(0),
+            last_disconnect_error: AtomicU32::new(0),
             connection_count: AtomicU64::new(0),
             connection_failures: AtomicU64::new(0),
         });
@@ -205,6 +216,11 @@ impl FramePublisherSink {
             transmitted_sequence: self.shared.transmitted_sequence.load(Ordering::Acquire),
             connected: self.shared.connected.load(Ordering::Acquire),
             write_failures: self.shared.write_failures.load(Ordering::Acquire),
+            disconnect_count: self.shared.disconnect_count.load(Ordering::Acquire),
+            last_write_error: nonzero_error(self.shared.last_write_error.load(Ordering::Acquire)),
+            last_disconnect_error: nonzero_error(
+                self.shared.last_disconnect_error.load(Ordering::Acquire),
+            ),
             connection_count: self.shared.connection_count.load(Ordering::Acquire),
             connection_failures: self.shared.connection_failures.load(Ordering::Acquire),
         }
@@ -334,10 +350,23 @@ fn server_loop(
         }
         shared.connected.store(true, Ordering::Release);
         shared.connection_count.fetch_add(1, Ordering::Relaxed);
-        let write_failed = send_frames(pipe.0, shared);
+        let result = send_frames(pipe.0, shared);
         shared.connected.store(false, Ordering::Release);
-        if write_failed && !shared.stop.load(Ordering::Acquire) {
-            shared.write_failures.fetch_add(1, Ordering::Relaxed);
+        if !shared.stop.load(Ordering::Acquire) {
+            match result {
+                SendFramesResult::ClientDisconnected(error) => {
+                    shared.disconnect_count.fetch_add(1, Ordering::Relaxed);
+                    shared.last_disconnect_error.store(error, Ordering::Release);
+                }
+                SendFramesResult::WriteFailed(error) => {
+                    shared.write_failures.fetch_add(1, Ordering::Relaxed);
+                    shared.last_write_error.store(error, Ordering::Release);
+                }
+                SendFramesResult::StatePoisoned => {
+                    return Err("frame publisher state is poisoned".into());
+                }
+                SendFramesResult::Stopped => {}
+            }
         }
         // SAFETY: pipe remains live through this call.
         let _ = unsafe { DisconnectNamedPipe(pipe.0) };
@@ -345,47 +374,71 @@ fn server_loop(
     Ok(())
 }
 
-fn send_frames(pipe: HANDLE, shared: &Shared) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SendFramesResult {
+    Stopped,
+    ClientDisconnected(u32),
+    WriteFailed(u32),
+    StatePoisoned,
+}
+
+fn send_frames(pipe: HANDLE, shared: &Shared) -> SendFramesResult {
     let mut sent = 0;
     while !shared.stop.load(Ordering::Acquire) {
         let Ok(latest) = shared.latest.lock() else {
-            return false;
+            return SendFramesResult::StatePoisoned;
         };
         let Ok(latest) = shared.changed.wait_while(latest, |latest| {
             latest.sequence == sent && !shared.stop.load(Ordering::Acquire)
         }) else {
-            return false;
+            return SendFramesResult::StatePoisoned;
         };
         if shared.stop.load(Ordering::Acquire) {
-            return false;
+            return SendFramesResult::Stopped;
         }
         let sequence = latest.sequence;
         let header = latest.header;
         let pixels = Arc::clone(&latest.pixels);
         drop(latest);
-        if !write_all(pipe, &header) || (!pixels.is_empty() && !write_all(pipe, &pixels)) {
-            return true;
+        let write_result = write_all(pipe, &header).and_then(|()| {
+            if pixels.is_empty() {
+                Ok(())
+            } else {
+                write_all(pipe, &pixels)
+            }
+        });
+        if let Err(error) = write_result {
+            return if is_expected_pipe_disconnect(error) {
+                SendFramesResult::ClientDisconnected(error)
+            } else {
+                SendFramesResult::WriteFailed(error)
+            };
         }
         sent = sequence;
         shared
             .transmitted_sequence
             .store(sequence, Ordering::Release);
     }
-    false
+    SendFramesResult::Stopped
 }
 
-fn write_all(pipe: HANDLE, mut bytes: &[u8]) -> bool {
+fn write_all(pipe: HANDLE, mut bytes: &[u8]) -> Result<(), u32> {
     while !bytes.is_empty() {
         let mut written = 0;
         // SAFETY: pipe is live, the slice is readable, and written is writable.
-        if unsafe { WriteFile(pipe, Some(bytes), Some(&mut written), None) }.is_err()
-            || written == 0
-        {
-            return false;
+        if unsafe { WriteFile(pipe, Some(bytes), Some(&mut written), None) }.is_err() {
+            return Err(unsafe { GetLastError() }.0);
+        }
+        if written == 0 {
+            return Err(29); // ERROR_WRITE_FAULT
         }
         bytes = &bytes[written as usize..];
     }
-    true
+    Ok(())
+}
+
+fn nonzero_error(error: u32) -> Option<u32> {
+    (error != 0).then_some(error)
 }
 
 #[cfg(test)]

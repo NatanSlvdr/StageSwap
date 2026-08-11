@@ -17,7 +17,7 @@ pub use virtual_camera::{VirtualCameraController, frame_pipe_name, remove_virtua
 #[cfg(windows)]
 mod video_input;
 #[cfg(windows)]
-pub use video_input::{MediaFoundationVideoInput, enumerate_video_devices};
+pub use video_input::{MediaFoundationVideoInput, WebcamCaptureFailure, enumerate_video_devices};
 #[cfg(windows)]
 mod deployment;
 #[cfg(windows)]

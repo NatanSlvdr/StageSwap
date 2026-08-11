@@ -96,7 +96,7 @@ Webcam capture prefers RGB32 1280×720 at 30 fps and can normalize compatible RG
 
 ## Privacy
 
-Camera and display frames are processed locally and are not recorded or uploaded. Settings, the reference image, and 14-day diagnostic logs are stored under `%LocalAppData%\StageSwap`.
+Camera and display frames are processed locally and are not recorded or uploaded. Settings, the reference image, and 14-day diagnostic logs are stored under `%LocalAppData%\StageSwap`. Diagnostic logs keep compact errors and infrequent state changes by default; enable **Verbose diagnostic logging** under **Settings → Diagnostics** when detailed runtime telemetry is needed for troubleshooting.
 
 Anything visible on the selected secondary screen can appear in Zoom while Auto or Screen mode is active.
 
