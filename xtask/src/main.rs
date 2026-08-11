@@ -144,8 +144,6 @@ impl ReleaseStage {
                 "Select release track",
                 "Load release context",
                 "Select version bump",
-                "Edit release version",
-                "Confirm stable release",
                 "Check release target",
             ],
             Self::Checks => &[
@@ -700,8 +698,6 @@ fn short_substep_label(label: &str) -> &str {
         "Check release target" => "Target",
         "Select release track" => "Track",
         "Select version bump" => "Bump",
-        "Confirm stable release" => "Confirm",
-        "Edit release version" => "Edit version",
         "Prepare release version" => "Version",
         "Prepare verification package" => "Verification",
         "Build media-source DLL" => "Media DLL",
@@ -747,19 +743,8 @@ fn publish_release_cli() -> Result<()> {
         })?;
     let highest = published.iter().copied().max();
     let version_suggestions = VersionSuggestions::new(current, highest)?;
-    let version = prompt_version(&progress, version_suggestions)?;
-    if highest.is_some_and(|highest| version <= highest) {
-        bail!("release version {version} must be newer than every published version");
-    }
+    let version = prompt_version(&progress, version_suggestions, track, highest)?;
     let tag = format!("v{version}");
-    if track == ReleaseTrack::Release {
-        let confirmation = progress.step(ReleaseStage::Infos, "Confirm stable release", || {
-            confirm_prompt(&progress, &format!("Publish {tag} as a stable release?"))
-        })?;
-        if !confirmation {
-            bail!("stable release confirmation declined");
-        }
-    }
     let incomplete_draft = progress.step(ReleaseStage::Infos, "Check release target", || {
         let incomplete_draft = incomplete_draft_exists(&tag)?;
         if !incomplete_draft {
@@ -936,6 +921,8 @@ impl VersionSuggestions {
 fn prompt_version(
     progress: &ReleaseProgress,
     suggestions: VersionSuggestions,
+    track: ReleaseTrack,
+    highest: Option<ReleaseVersion>,
 ) -> Result<ReleaseVersion> {
     let items = [
         format!("Patch ({})", suggestions.patch),
@@ -943,8 +930,8 @@ fn prompt_version(
         format!("Major ({})", suggestions.major),
         format!("Manual (edit {})", suggestions.patch),
     ];
-    let selection = progress.step(ReleaseStage::Infos, "Select version bump", || {
-        if Term::stderr().is_term() {
+    progress.step(ReleaseStage::Infos, "Select version bump", || {
+        let selection = if Term::stderr().is_term() {
             progress.select_prompt_interactive("Version bump", &items)
         } else {
             eprintln!("Version bump:");
@@ -958,29 +945,39 @@ fn prompt_version(
                 "4" => Ok(3),
                 _ => bail!("version bump must be 1, 2, 3, or 4"),
             }
+        }?;
+        let version = match selection {
+            0 => suggestions.patch,
+            1 => suggestions.minor,
+            2 => suggestions.major,
+            3 => prompt_manual_version(progress, suggestions.patch)?,
+            _ => bail!("version bump selection was out of range"),
+        };
+        if highest.is_some_and(|highest| version <= highest) {
+            bail!("release version {version} must be newer than every published version");
         }
-    })?;
-    match selection {
-        0 => Ok(suggestions.patch),
-        1 => Ok(suggestions.minor),
-        2 => Ok(suggestions.major),
-        3 => prompt_manual_version(progress, suggestions.patch),
-        _ => bail!("version bump selection was out of range"),
-    }
+        if track == ReleaseTrack::Release
+            && !confirm_prompt(
+                progress,
+                &format!("Publish v{version} as a stable release?"),
+            )?
+        {
+            bail!("stable release confirmation declined");
+        }
+        Ok(version)
+    })
 }
 
 fn prompt_manual_version(
     progress: &ReleaseProgress,
     suggested: ReleaseVersion,
 ) -> Result<ReleaseVersion> {
-    progress.step(ReleaseStage::Infos, "Edit release version", || {
-        let value = if Term::stderr().is_term() {
-            progress.edit_prompt_interactive("Version: ", &suggested.to_string())?
-        } else {
-            read_prompt(&format!("Version [{suggested}]: "))?
-        };
-        parse_version_input(&value, suggested)
-    })
+    let value = if Term::stderr().is_term() {
+        progress.edit_prompt_interactive("Version: ", &suggested.to_string())?
+    } else {
+        read_prompt(&format!("Version [{suggested}]: "))?
+    };
+    parse_version_input(&value, suggested)
 }
 
 fn confirm_prompt(progress: &ReleaseProgress, message: &str) -> Result<bool> {
