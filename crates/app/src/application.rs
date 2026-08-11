@@ -484,7 +484,7 @@ impl SettingsTab {
                     "Capture the screen JW Library shows when no media is playing. StageSwap compares the live screen with it to detect media."
                 }
                 Self::Updates => {
-                    "Check GitHub for new StageSwap versions and choose when to install them."
+                    "Check for new StageSwap versions and choose when to install them."
                 }
                 Self::Diagnostics => {
                     "Check video connections, troubleshoot problems, and view logs."
@@ -4173,7 +4173,7 @@ impl SwitcherApp {
     fn updates_settings(&mut self, ui: &mut egui::Ui) {
         settings_section_heading(
             ui,
-            UiIcon::Download,
+            UiIcon::Settings,
             "Update preferences",
             "Choose which published StageSwap versions you want to receive.",
         );
@@ -7268,9 +7268,7 @@ fn update_channel_label(channel: UpdateChannel, locale: Locale) -> std::borrow::
 fn update_status_text(locale: Locale, status: &UpdateStatus) -> String {
     match status {
         UpdateStatus::Idle => localized_text(locale, "Waiting for an update check.").into_owned(),
-        UpdateStatus::Checking => {
-            localized_text(locale, "Checking GitHub for updates…").into_owned()
-        }
+        UpdateStatus::Checking => localized_text(locale, "Checking for updates…").into_owned(),
         UpdateStatus::UpToDate => localized_text(locale, "StageSwap is up to date.").into_owned(),
         UpdateStatus::Available(release) => {
             let template = if release.prerelease {

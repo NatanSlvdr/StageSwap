@@ -168,7 +168,7 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
 
         // Updates.
         "Updates" => ("Mises à jour", "Actualizaciones"),
-        "Check GitHub for new StageSwap versions and choose when to install them." => ("Recherchez de nouvelles versions de StageSwap sur GitHub et choisissez quand les installer.", "Busca nuevas versiones de StageSwap en GitHub y elige cuándo instalarlas."),
+        "Check for new StageSwap versions and choose when to install them." => ("Recherchez de nouvelles versions de StageSwap et choisissez quand les installer.", "Busca nuevas versiones de StageSwap y elige cuándo instalarlas."),
         "Update preferences" => ("Préférences de mise à jour", "Preferencias de actualización"),
         "Choose which published StageSwap versions you want to receive." => ("Choisissez les versions publiées de StageSwap que vous souhaitez recevoir.", "Elige qué versiones publicadas de StageSwap quieres recibir."),
         "Installed version" => ("Version installée", "Versión instalada"),
@@ -181,7 +181,7 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Update status" => ("État des mises à jour", "Estado de actualización"),
         "StageSwap checks once when it starts and only installs after you choose to continue." => ("StageSwap effectue une vérification au démarrage et n’installe qu’après votre confirmation.", "StageSwap comprueba una vez al iniciarse y solo instala después de que elijas continuar."),
         "Waiting for an update check." => ("En attente d’une vérification des mises à jour.", "Esperando una comprobación de actualizaciones."),
-        "Checking GitHub for updates…" => ("Recherche de mises à jour sur GitHub…", "Buscando actualizaciones en GitHub…"),
+        "Checking for updates…" => ("Recherche de mises à jour…", "Buscando actualizaciones…"),
         "StageSwap is up to date." => ("StageSwap est à jour.", "StageSwap está actualizado."),
         "StageSwap {0} is available on the selected channel." => ("StageSwap {0} est disponible sur le canal sélectionné.", "StageSwap {0} está disponible en el canal seleccionado."),
         "StageSwap {0} Beta is available on the selected channel." => ("StageSwap {0} Bêta est disponible sur le canal sélectionné.", "StageSwap {0} Beta está disponible en el canal seleccionado."),
