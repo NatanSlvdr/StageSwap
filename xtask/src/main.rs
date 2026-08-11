@@ -507,7 +507,7 @@ impl ReleaseProgress {
                     .map(|(index, item)| {
                         let line = format!(
                             "{}{}",
-                            if index == selection { "> " } else { "  " },
+                            if index == selection { "→ " } else { "  " },
                             item.to_string()
                         );
                         if self.color && index == selection {
@@ -524,12 +524,12 @@ impl ReleaseProgress {
                     })
                     .collect::<Vec<_>>();
                 let separator = if message.ends_with('?') { " " } else { ": " };
-                self.replace_prompt(&[format!("{message}{separator}{}", choices.join("  |  "))])?;
+                self.replace_prompt(&[format!("{message}{separator}{}", choices.join("   "))])?;
                 match term.read_key().context("read release selection")? {
-                    Key::ArrowDown | Key::Tab | Key::Char('j') => {
+                    Key::ArrowRight => {
                         selection = (selection + 1) % items.len();
                     }
-                    Key::ArrowUp | Key::BackTab | Key::Char('k') => {
+                    Key::ArrowLeft => {
                         selection = selection.checked_sub(1).unwrap_or(items.len() - 1);
                     }
                     Key::Enter | Key::Char(' ') => break,
