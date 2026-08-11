@@ -86,7 +86,7 @@ enum ReleaseTrack {
     Release,
 }
 
-const STAGE_COLUMN_WIDTH: usize = 15;
+const STAGE_COLUMN_WIDTH: usize = 12;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReleaseStage {
@@ -175,13 +175,6 @@ impl ReleaseProgressState {
             prompt_active: false,
         }
     }
-}
-
-#[derive(Clone)]
-struct RenderedRow {
-    stage: Option<ReleaseStage>,
-    stage_status: Option<StageStatus>,
-    substep: Option<SubstepState>,
 }
 
 struct ReleaseProgress {
@@ -324,14 +317,7 @@ impl ReleaseProgress {
             if !success {
                 stage_state.status = StageStatus::Failed;
             }
-            if self.interactive {
-                None
-            } else {
-                stage_state
-                    .substeps
-                    .last()
-                    .map(|substep| self.plain_line(stage, stage_state.status, substep))
-            }
+            (!self.interactive).then(|| render_stage_line(stage, stage_state, false))
         };
         self.refresh();
         if let Some(line) = plain_line {
@@ -369,31 +355,6 @@ impl ReleaseProgress {
         if !state.prompt_active {
             render_frame_locked(&mut state, self.color);
         }
-    }
-
-    fn plain_line(
-        &self,
-        stage: ReleaseStage,
-        status: StageStatus,
-        substep: &SubstepState,
-    ) -> String {
-        let marker = if status == StageStatus::Failed {
-            "✖"
-        } else {
-            "✔"
-        };
-        let stage_text = format!("{marker} {}", stage.label());
-        let stage_text = format!("{stage_text:<width$}", width = STAGE_COLUMN_WIDTH);
-        let substep_marker = if substep.status == SubstepStatus::Failed {
-            "✖"
-        } else {
-            "✔"
-        };
-        let label = match substep.progress {
-            Some((completed, total)) => format!("{} {completed}/{total}", substep.label),
-            None => substep.label.clone(),
-        };
-        format!("{stage_text}  {substep_marker} {label}")
     }
 
     fn begin_prompt(&self) {
@@ -579,106 +540,92 @@ impl Drop for ReleaseProgress {
 }
 
 fn render_frame_locked(state: &mut ReleaseProgressState, color: bool) {
-    let rows = rendered_rows(state);
     let term = Term::stderr();
     if state.frame_lines > 0 && term.clear_last_lines(state.frame_lines).is_err() {
         return;
     }
-    for row in &rows {
-        let line = render_row_with_color(row, color);
+    for stage in ReleaseStage::ALL {
+        let stage_state = &state.stages[stage.index()];
+        let line = render_stage_line(stage, stage_state, color);
         if term.write_line(&line).is_err() {
             return;
         }
     }
     let _ = term.flush();
-    state.frame_lines = rows.len();
+    state.frame_lines = ReleaseStage::ALL.len();
 }
 
-fn render_row_with_color(row: &RenderedRow, color: bool) -> String {
-    let stage_text = match (row.stage, row.stage_status) {
-        (Some(stage), Some(status)) => {
-            let marker = match status {
-                StageStatus::Pending | StageStatus::Active => "",
-                StageStatus::Complete => "✔",
-                StageStatus::Failed => "✖",
+fn render_stage_line(stage: ReleaseStage, stage_state: &StageState, color: bool) -> String {
+    let stage_text = format!("{:<width$}:", stage.label(), width = STAGE_COLUMN_WIDTH);
+    let children = stage_state
+        .substeps
+        .iter()
+        .map(|substep| {
+            let marker = match substep.status {
+                SubstepStatus::Active => "→ ",
+                SubstepStatus::Complete => "",
+                SubstepStatus::Failed => "✖ ",
             };
-            if marker.is_empty() {
-                stage.label().to_owned()
-            } else {
-                format!("{marker} {}", stage.label())
-            }
-        }
-        _ => String::new(),
-    };
-    let stage_text = format!("{stage_text:<width$}", width = STAGE_COLUMN_WIDTH);
-    let substep_text = row.substep.as_ref().map(|substep| {
-        let marker = match substep.status {
-            SubstepStatus::Active => "→",
-            SubstepStatus::Complete => "✔",
-            SubstepStatus::Failed => "✖",
-        };
-        let label = match substep.progress {
-            Some((completed, total)) => format!("{} {completed}/{total}", substep.label),
-            None => substep.label.clone(),
-        };
-        format!("{marker} {label}")
-    });
+            let label = short_substep_label(&substep.label);
+            let label = match substep.progress {
+                Some((completed, total)) => format!("{label} {completed}/{total}"),
+                None => label.to_owned(),
+            };
+            format!("{marker}{label}")
+        })
+        .collect::<Vec<_>>();
 
     if !color {
-        return format!(
-            "{}{}",
-            stage_text,
-            substep_text.map_or_else(String::new, |text| format!("  {text}"))
-        );
+        return format!("{stage_text}  {}", children.join("  "));
     }
 
-    let stage = match row.stage_status.unwrap_or(StageStatus::Pending) {
+    let stage = match stage_state.status {
         StageStatus::Pending => Term::stderr().style().dim().apply_to(stage_text),
         StageStatus::Active => Term::stderr().style().cyan().bold().apply_to(stage_text),
         StageStatus::Complete => Term::stderr().style().dim().apply_to(stage_text),
-        StageStatus::Failed => Term::stderr().style().red().apply_to(stage_text),
+        StageStatus::Failed => Term::stderr().style().red().bold().apply_to(stage_text),
     }
     .force_styling(true)
     .to_string();
-    let substep = substep_text.map_or_else(String::new, |text| {
-        let styled = match row.stage_status {
-            Some(StageStatus::Complete) => Term::stderr().style().dim().apply_to(text),
-            Some(StageStatus::Failed) => Term::stderr().style().red().apply_to(text),
-            _ => match row.substep.as_ref().map(|value| value.status) {
-                Some(SubstepStatus::Active) => {
-                    Term::stderr().style().yellow().bold().apply_to(text)
-                }
-                Some(SubstepStatus::Complete) => Term::stderr().style().green().apply_to(text),
-                Some(SubstepStatus::Failed) => Term::stderr().style().red().apply_to(text),
-                None => Term::stderr().style().apply_to(text),
-            },
-        };
-        format!("  {}", styled.force_styling(true))
-    });
-    format!("{stage}{substep}")
+    let children = stage_state
+        .substeps
+        .iter()
+        .zip(children)
+        .map(|(substep, text)| {
+            let styled = match substep.status {
+                SubstepStatus::Active => Term::stderr().style().yellow().bold().apply_to(text),
+                SubstepStatus::Complete => Term::stderr().style().green().dim().apply_to(text),
+                SubstepStatus::Failed => Term::stderr().style().red().bold().apply_to(text),
+            };
+            styled.force_styling(true).to_string()
+        })
+        .collect::<Vec<_>>();
+    format!("{stage}  {}", children.join("  "))
 }
 
-fn rendered_rows(state: &ReleaseProgressState) -> Vec<RenderedRow> {
-    let mut rows = Vec::new();
-    for stage in ReleaseStage::ALL {
-        let stage_state = &state.stages[stage.index()];
-        if stage_state.substeps.is_empty() {
-            rows.push(RenderedRow {
-                stage: Some(stage),
-                stage_status: Some(stage_state.status),
-                substep: None,
-            });
-            continue;
-        }
-        for (index, substep) in stage_state.substeps.iter().cloned().enumerate() {
-            rows.push(RenderedRow {
-                stage: (index == 0).then_some(stage),
-                stage_status: Some(stage_state.status),
-                substep: Some(substep),
-            });
-        }
+fn short_substep_label(label: &str) -> &str {
+    match label {
+        "Check release environment" => "Environment",
+        "Load release context" => "Context",
+        "Check release target" => "Target",
+        "Select release track" => "Track",
+        "Select version bump" => "Bump",
+        "Confirm stable release" => "Confirm",
+        "Edit release version" => "Edit version",
+        "Prepare release version" => "Version",
+        "Prepare verification package" => "Verification",
+        "Build media-source DLL" => "Media DLL",
+        "Build StageSwap executable" => "App",
+        "Package verification build" | "Package release (reuse verified build)" => "Package",
+        "Validate verification package" | "Validate release package" => "Verify",
+        "Commit release version" => "Commit",
+        "Publish release" => "Publish",
+        "Check formatting" => "Format",
+        "Run host Clippy" => "Clippy",
+        "Run Windows-target Clippy" => "Win Clippy",
+        "Run workspace tests" => "Tests",
+        _ => label,
     }
-    rows
 }
 
 fn publish_release_cli() -> Result<()> {
