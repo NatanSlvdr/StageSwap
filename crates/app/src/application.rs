@@ -29,8 +29,8 @@ const SETTINGS_BLUE: Color32 = Color32::from_rgb(64, 118, 216);
 const SETTINGS_SWITCH_OFF: Color32 = Color32::from_rgb(49, 56, 68);
 const VISIBLE_REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 30);
 const HIDDEN_REFRESH: Duration = Duration::from_millis(250);
-const MAX_PREVIEW_TEXTURE_WIDTH: u32 = 480;
-const MAX_PREVIEW_TEXTURE_HEIGHT: u32 = 270;
+const DASHBOARD_PREVIEW_TEXTURE_LIMIT: [u32; 2] = [480, 270];
+const ENLARGED_PREVIEW_TEXTURE_LIMIT: [u32; 2] = [1280, 720];
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const SETTINGS_ENTRANCE_DURATION: Duration = Duration::from_millis(160);
 const SETTINGS_SECTION_DURATION: Duration = Duration::from_millis(120);
@@ -798,6 +798,15 @@ impl PreviewKind {
             Self::Output => "No Zoom output frame",
         }
     }
+
+    fn frame(self, snapshot: &AppSnapshot) -> Option<&Arc<Frame>> {
+        match self {
+            Self::Webcam => snapshot.previews.webcam.as_ref(),
+            Self::Screen => snapshot.previews.screen.as_ref(),
+            Self::Reference => snapshot.previews.reference.as_ref(),
+            Self::Output => snapshot.previews.final_output.as_ref(),
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -941,6 +950,7 @@ struct PreviewOptions {
     show_fps: bool,
     fps: Option<u32>,
     empty_message: &'static str,
+    texture_limit: [u32; 2],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1037,6 +1047,16 @@ impl PreviewOptions {
             show_fps: kind.shows_fps(),
             fps,
             empty_message: kind.empty_message(),
+            texture_limit: DASHBOARD_PREVIEW_TEXTURE_LIMIT,
+        }
+    }
+
+    const fn enlarged(kind: PreviewKind, fps: Option<u32>) -> Self {
+        Self {
+            show_fps: kind.shows_fps(),
+            fps,
+            empty_message: kind.empty_message(),
+            texture_limit: ENLARGED_PREVIEW_TEXTURE_LIMIT,
         }
     }
 
@@ -1045,6 +1065,7 @@ impl PreviewOptions {
             show_fps: false,
             fps: None,
             empty_message,
+            texture_limit: DASHBOARD_PREVIEW_TEXTURE_LIMIT,
         }
     }
 }
@@ -1139,6 +1160,7 @@ struct SwitcherApp {
     #[cfg(not(windows))]
     setup_demo_preview_state: Option<SetupDemoPreviewState>,
     setup_animations_enabled: bool,
+    enlarged_dashboard_preview: Option<PreviewKind>,
     exit_requested: bool,
     last_window_size: Option<Vec2>,
     disco_diagnostics_gesture: DiscoDiagnosticsGesture,
@@ -1238,6 +1260,7 @@ impl SwitcherApp {
             setup_animations_enabled: stageswap_windows::client_area_animations_enabled(),
             #[cfg(not(windows))]
             setup_animations_enabled: true,
+            enlarged_dashboard_preview: None,
             exit_requested: false,
             last_window_size: None,
             disco_diagnostics_gesture: DiscoDiagnosticsGesture::default(),
@@ -1560,6 +1583,7 @@ impl SwitcherApp {
     }
 
     fn open_settings(&mut self) {
+        self.enlarged_dashboard_preview = None;
         self.view = AppView::Settings;
         self.disco_diagnostics_gesture.reset();
         self.settings_opened_at = Some(Instant::now());
@@ -2069,6 +2093,9 @@ impl SwitcherApp {
 
     fn root_ui(&mut self, ui: &mut egui::Ui) -> Rect {
         let context = ui.ctx().clone();
+        if self.view != AppView::Dashboard {
+            self.enlarged_dashboard_preview = None;
+        }
         let render_snapshot = self.snapshot();
         let disco_enabled = render_snapshot.disco_enabled;
         self.render_snapshot = Some(render_snapshot);
@@ -2908,6 +2935,10 @@ impl SwitcherApp {
 
     fn dashboard(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.snapshot();
+        if let Some(kind) = self.enlarged_dashboard_preview {
+            self.render_enlarged_dashboard_preview(ui, &snapshot, kind);
+            return;
+        }
         for warning in self
             .load_warnings
             .iter()
@@ -2944,6 +2975,38 @@ impl SwitcherApp {
             debug_assert!(controls.inner.body.sections.iter().all(Rect::is_positive));
             debug_assert!(previews.inner.grid.is_positive());
         });
+    }
+
+    fn render_enlarged_dashboard_preview(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        kind: PreviewKind,
+    ) {
+        let available = ui.available_size().max(egui::vec2(1.0, 1.0));
+        let preview_width = available.x.min(available.y * WINDOW_ASPECT_RATIO);
+        let preview_height = preview_width / WINDOW_ASPECT_RATIO;
+        ui.allocate_ui_with_layout(
+            available,
+            egui::Layout::centered_and_justified(egui::Direction::TopDown),
+            |ui| {
+                self.preview(
+                    ui,
+                    kind,
+                    kind.frame(snapshot),
+                    [preview_width, preview_height],
+                    snapshot.actual_output,
+                    PreviewOptions::enlarged(kind, kind.pipeline_fps(snapshot)),
+                );
+            },
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if ui
+            .ctx()
+            .input(|input| input.pointer.any_click() || input.key_pressed(egui::Key::Escape))
+        {
+            self.enlarged_dashboard_preview = None;
+        }
     }
 
     fn preview_workspace(
@@ -4700,8 +4763,8 @@ impl SwitcherApp {
         size: [f32; 2],
         actual_output: Source,
         fps: Option<u32>,
-    ) {
-        self.preview(
+    ) -> Rect {
+        let preview_rect = self.preview(
             ui,
             kind,
             frame,
@@ -4709,9 +4772,20 @@ impl SwitcherApp {
             actual_output,
             PreviewOptions::dashboard(kind, fps),
         );
+        let click = ui
+            .interact(
+                preview_rect,
+                ui.make_persistent_id((kind.key(), "dashboard-preview-click")),
+                Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if click.clicked() {
+            self.enlarged_dashboard_preview = Some(kind);
+        }
         ui.add_space(8.0);
         preview_caption(ui, kind);
         ui.add_space(16.0);
+        preview_rect
     }
 
     fn preview(
@@ -4776,6 +4850,7 @@ impl SwitcherApp {
                             frame.as_ref(),
                             inner_size,
                             ui.ctx().pixels_per_point(),
+                            options.texture_limit,
                         );
                         let prepared = {
                             let converter = self
@@ -8811,11 +8886,16 @@ fn paint_disco_interface(
     }
 }
 
-fn preview_texture_size(frame: &Frame, maximum: Vec2, pixels_per_point: f32) -> [usize; 2] {
+fn preview_texture_size(
+    frame: &Frame,
+    maximum: Vec2,
+    pixels_per_point: f32,
+    texture_limit: [u32; 2],
+) -> [usize; 2] {
     let maximum_width =
-        ((maximum.x * pixels_per_point).round().max(1.0) as u32).min(MAX_PREVIEW_TEXTURE_WIDTH);
+        ((maximum.x * pixels_per_point).round().max(1.0) as u32).min(texture_limit[0]);
     let maximum_height =
-        ((maximum.y * pixels_per_point).round().max(1.0) as u32).min(MAX_PREVIEW_TEXTURE_HEIGHT);
+        ((maximum.y * pixels_per_point).round().max(1.0) as u32).min(texture_limit[1]);
     let scale = f64::min(
         f64::min(
             f64::from(maximum_width) / f64::from(frame.size.width),
@@ -8974,14 +9054,160 @@ mod tests {
             0,
             Instant::now(),
         );
-        let size = preview_texture_size(&frame, egui::vec2(320.0, 180.0), 1.0);
+        let size = preview_texture_size(
+            &frame,
+            egui::vec2(320.0, 180.0),
+            1.0,
+            DASHBOARD_PREVIEW_TEXTURE_LIMIT,
+        );
         assert_eq!(size, [320, 180]);
         let image = frame_image(&frame, size);
         assert_eq!(image.size, size);
         assert_eq!(image.pixels[0], Color32::from_rgb(3, 2, 1));
 
-        let high_dpi = preview_texture_size(&frame, egui::vec2(640.0, 360.0), 2.0);
+        let high_dpi = preview_texture_size(
+            &frame,
+            egui::vec2(640.0, 360.0),
+            2.0,
+            DASHBOARD_PREVIEW_TEXTURE_LIMIT,
+        );
         assert_eq!(high_dpi, [480, 270]);
+
+        let enlarged = preview_texture_size(
+            &frame,
+            egui::vec2(1280.0, 720.0),
+            1.0,
+            ENLARGED_PREVIEW_TEXTURE_LIMIT,
+        );
+        assert_eq!(enlarged, [1280, 720]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn flow_each_dashboard_preview_can_expand_even_without_a_frame() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            ui_preview_config(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        );
+        let context = egui::Context::default();
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 280.0));
+
+        for kind in [
+            PreviewKind::Webcam,
+            PreviewKind::Screen,
+            PreviewKind::Reference,
+            PreviewKind::Output,
+        ] {
+            app.enlarged_dashboard_preview = None;
+            let mut preview_rect = Rect::NOTHING;
+            let _ = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    ..egui::RawInput::default()
+                },
+                |ui| {
+                    preview_rect =
+                        app.preview_cell(ui, kind, None, [320.0, 180.0], Source::Camera, Some(30));
+                },
+            );
+            let position = preview_rect.center();
+            let _ = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    events: vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                        egui::Event::PointerButton {
+                            pos: position,
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..egui::RawInput::default()
+                },
+                |ui| {
+                    app.preview_cell(ui, kind, None, [320.0, 180.0], Source::Camera, Some(30));
+                },
+            );
+
+            assert_eq!(app.enlarged_dashboard_preview, Some(kind));
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn flow_enlarged_dashboard_preview_closes_on_click_escape_and_navigation() {
+        fn dashboard_input(event: egui::Event) -> egui::RawInput {
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 720.0))),
+                events: vec![event],
+                ..egui::RawInput::default()
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            ui_preview_config(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        )
+        .with_ui_preview(UiPreviewRequest {
+            target: UiPreviewTarget::Settings(SettingsTab::General),
+        });
+        app.view = AppView::Dashboard;
+        let context = egui::Context::default();
+
+        app.enlarged_dashboard_preview = Some(PreviewKind::Webcam);
+        let position = Pos2::new(20.0, 20.0);
+        let _ = context.run_ui(
+            egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 720.0))),
+                ..egui::RawInput::default()
+            },
+            |ui| app.dashboard(ui),
+        );
+        assert_eq!(app.enlarged_dashboard_preview, None);
+
+        app.enlarged_dashboard_preview = Some(PreviewKind::Screen);
+        let _ = context.run_ui(
+            dashboard_input(egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }),
+            |ui| app.dashboard(ui),
+        );
+        assert_eq!(app.enlarged_dashboard_preview, None);
+
+        app.enlarged_dashboard_preview = Some(PreviewKind::Output);
+        app.open_settings();
+        assert_eq!(app.view, AppView::Settings);
+        assert_eq!(app.enlarged_dashboard_preview, None);
     }
 
     #[test]
