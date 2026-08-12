@@ -9,7 +9,7 @@ pub const PIPELINE_SIZE: Size = Size::new(1280, 720);
 pub const PIPELINE_FPS: u32 = 30;
 pub const FRAME_STALE_AFTER: Duration = Duration::from_secs(1);
 pub const CAPTURE_FRAME_POOL_CAPACITY: usize = 4;
-pub const STILL_IMAGE_PIP_SIZE: Size = Size::new(320, 180);
+pub const STILL_IMAGE_PIP_SIZE: Size = Size::new(384, 216);
 pub const STILL_IMAGE_PIP_MARGIN: u32 = 16;
 pub const STILL_IMAGE_PIP_CORNER_RADIUS: f64 = 12.0;
 
@@ -860,10 +860,10 @@ mod tests {
             metadata,
         );
         assert_eq!(pixel(&webcam_main, 15, 600), [0xff, 0, 0, 0xff]);
-        assert_eq!(pixel(&webcam_main, 336, 600), [0xff, 0, 0, 0xff]);
-        assert_eq!(pixel(&webcam_main, 16, 524), [0xff, 0, 0, 0xff]);
-        assert_eq!(pixel(&webcam_main, 176, 614), [0, 0xff, 0, 0xff]);
-        assert_eq!(pixel(&webcam_main, 28, 536), [0, 0xff, 0, 0xff]);
+        assert_eq!(pixel(&webcam_main, 400, 600), [0xff, 0, 0, 0xff]);
+        assert_eq!(pixel(&webcam_main, 16, 488), [0xff, 0, 0, 0xff]);
+        assert_eq!(pixel(&webcam_main, 208, 596), [0, 0xff, 0, 0xff]);
+        assert_eq!(pixel(&webcam_main, 28, 500), [0, 0xff, 0, 0xff]);
 
         let screen_main = compositor.compose_with_pip(
             Some(&camera),
@@ -877,7 +877,7 @@ mod tests {
             metadata,
         );
         assert_eq!(pixel(&screen_main, 0, 0), [0, 0xff, 0, 0xff]);
-        assert_eq!(pixel(&screen_main, 176, 614), [0xff, 0, 0, 0xff]);
+        assert_eq!(pixel(&screen_main, 208, 596), [0xff, 0, 0, 0xff]);
         assert_eq!(camera.pixels(), camera_before.as_ref());
         assert_eq!(screen.pixels(), screen_before.as_ref());
     }
@@ -892,7 +892,7 @@ mod tests {
             timestamp_100ns: 0,
             received_at: now,
         };
-        let center_offset = (614 * PIPELINE_SIZE.width as usize + 176) * 4;
+        let center_offset = (596 * PIPELINE_SIZE.width as usize + 208) * 4;
         let mut compositor = FrameCompositor::default();
         for (mix, expected) in [(0.0, 0), (0.5, 128), (1.0, 255)] {
             let output = compositor.compose_with_pip(

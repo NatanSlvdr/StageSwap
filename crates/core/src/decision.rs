@@ -35,6 +35,7 @@ pub fn decide(
         OutputMode::Automatic => (automatic_target, false, "automatic detection"),
         OutputMode::ForceCamera => (Source::Camera, true, "camera forced"),
         OutputMode::ForceScreen => (Source::Screen, true, "screen forced"),
+        OutputMode::ForcePip => (Source::Screen, true, "picture-in-picture forced"),
     };
     Decision {
         automatic_target,
@@ -93,6 +94,7 @@ mod tests {
             OutputMode::Automatic,
             OutputMode::ForceCamera,
             OutputMode::ForceScreen,
+            OutputMode::ForcePip,
         ];
         let detections = [
             DetectionState::Unknown,
@@ -137,6 +139,7 @@ mod tests {
                         OutputMode::Automatic => expected_automatic,
                         OutputMode::ForceCamera => Source::Camera,
                         OutputMode::ForceScreen => Source::Screen,
+                        OutputMode::ForcePip => Source::Screen,
                     };
                     let expected_output = match requested {
                         Source::Camera if sources.camera_ready => Source::Camera,

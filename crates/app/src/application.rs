@@ -3150,7 +3150,7 @@ impl SwitcherApp {
         let automatic_width = 72.0;
         let icon_width = row_height;
         let heading_width =
-            (ui.available_width() - automatic_width - icon_width * 2.0 - gap * 3.0).max(72.0);
+            (ui.available_width() - automatic_width - icon_width * 3.0 - gap * 4.0).max(72.0);
         let output_mode = ui
             .scope(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
@@ -3200,6 +3200,19 @@ impl SwitcherApp {
                     .clicked()
                     {
                         self.set_mode(OutputMode::ForceScreen);
+                    }
+                    if icon_button(
+                        ui,
+                        UiIcon::Layers,
+                        "",
+                        egui::vec2(icon_width, row_height),
+                        snapshot.mode == OutputMode::ForcePip,
+                        false,
+                    )
+                    .on_hover_text(localized_text(self.locale(), "Picture-in-picture"))
+                    .clicked()
+                    {
+                        self.set_mode(OutputMode::ForcePip);
                     }
                 })
                 .response
@@ -3971,13 +3984,13 @@ impl SwitcherApp {
         settings_section_heading(
             ui,
             UiIcon::Layers,
-            "Still-image picture-in-picture",
-            "Keep the speaker visible when a presentation image stays unchanged.",
+            "Picture-in-picture",
+            "Choose the PIP layout and optionally use it automatically for still images.",
         );
         settings_toggle_row(
             ui,
             &mut self.config.still_image_pip_enabled,
-            "Use picture-in-picture for still images",
+            "Use automatically for still images",
             "In Auto mode, show both feeds after a non-reference image remains unchanged.",
         );
         let enabled = self.config.still_image_pip_enabled;
@@ -4016,34 +4029,34 @@ impl SwitcherApp {
                         });
                 },
             );
-            let main_view = match self.config.still_image_pip_layout {
-                StillImagePipLayout::WebcamMain => tr(ui, "Webcam full screen"),
-                StillImagePipLayout::ScreenMain => tr(ui, "Secondary screen full screen"),
-            };
-            settings_fixed_control_row(
-                ui,
-                "Main view",
-                "The other live feed appears in the bottom-left inset.",
-                220.0,
-                |ui| {
-                    egui::ComboBox::from_id_salt("still-image-pip-layout")
-                        .width(220.0)
-                        .selected_text(main_view)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.config.still_image_pip_layout,
-                                StillImagePipLayout::WebcamMain,
-                                tr(ui, "Webcam full screen").as_ref(),
-                            );
-                            ui.selectable_value(
-                                &mut self.config.still_image_pip_layout,
-                                StillImagePipLayout::ScreenMain,
-                                tr(ui, "Secondary screen full screen").as_ref(),
-                            );
-                        });
-                },
-            );
         });
+        let main_view = match self.config.still_image_pip_layout {
+            StillImagePipLayout::WebcamMain => tr(ui, "Webcam full screen"),
+            StillImagePipLayout::ScreenMain => tr(ui, "Secondary screen full screen"),
+        };
+        settings_fixed_control_row(
+            ui,
+            "Main view",
+            "Used by automatic and forced PIP; the other feed appears in the bottom-left inset.",
+            220.0,
+            |ui| {
+                egui::ComboBox::from_id_salt("still-image-pip-layout")
+                    .width(220.0)
+                    .selected_text(main_view)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.config.still_image_pip_layout,
+                            StillImagePipLayout::WebcamMain,
+                            tr(ui, "Webcam full screen").as_ref(),
+                        );
+                        ui.selectable_value(
+                            &mut self.config.still_image_pip_layout,
+                            StillImagePipLayout::ScreenMain,
+                            tr(ui, "Secondary screen full screen").as_ref(),
+                        );
+                    });
+            },
+        );
     }
 
     fn updates_settings(&mut self, ui: &mut egui::Ui) {

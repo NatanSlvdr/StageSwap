@@ -7,6 +7,7 @@ pub enum OutputMode {
     Automatic,
     ForceCamera,
     ForceScreen,
+    ForcePip,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

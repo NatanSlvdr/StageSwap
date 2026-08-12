@@ -1185,12 +1185,17 @@ impl RuntimeState {
             self.snapshot.availability,
         );
         self.snapshot.automatic_target = decision.automatic_target;
-        let pip_target = self.still_image_detector.active()
+        let automatic_pip = self.still_image_detector.active()
             && self.snapshot.mode == OutputMode::Automatic
-            && self.config.still_image_pip_enabled
+            && self.config.still_image_pip_enabled;
+        let pip_target = (self.snapshot.mode == OutputMode::ForcePip || automatic_pip)
             && self.snapshot.availability.camera_ready
             && self.snapshot.availability.screen_ready;
-        if pip_target && self.pip_transition.target == 0.0 {
+        if pip_target
+            && (self.pip_transition.target == 0.0
+                || (self.snapshot.mode == OutputMode::ForcePip
+                    && self.pip_render_layout != self.config.still_image_pip_layout))
+        {
             self.pip_render_layout = self.config.still_image_pip_layout;
         }
         let pip_mix = self.pip_transition.request(pip_target, now);
@@ -4379,7 +4384,7 @@ mod tests {
             OutputLayout::WebcamMainScreenPip
         );
         let output = latest_published(&engine.platform);
-        let inset_center = (614 * PIPELINE_SIZE.width as usize + 176) * 4;
+        let inset_center = (596 * PIPELINE_SIZE.width as usize + 208) * 4;
         assert_eq!(
             &output.pixels()[inset_center..inset_center + 4],
             &[0, 255, 0, 255]
@@ -4442,6 +4447,47 @@ mod tests {
         assert!(engine.step(start + Duration::from_millis(31_500)));
         assert_eq!(engine.state.snapshot.still_image_pip_mix, 0.0);
         assert_eq!(engine.state.snapshot.output_layout, OutputLayout::Screen);
+    }
+
+    #[test]
+    fn flow_force_pip_bypasses_the_timer_and_automatic_enablement() {
+        let start = Instant::now();
+        let camera = scripted_solid_frame(PIPELINE_SIZE, 0xff20_4080, 1, start);
+        let screen = scripted_solid_frame(PIPELINE_SIZE, 0xff00_ff00, 2, start);
+        let config = AppConfig {
+            still_image_pip_enabled: false,
+            still_image_pip_layout: StillImagePipLayout::WebcamMain,
+            output_mode: OutputMode::ForcePip,
+            ..AppConfig::default()
+        };
+        let mut state = RuntimeState::new_at(config, start);
+        state.snapshot.run_state = RunState::Running;
+        let mut engine = scripted_engine(
+            state,
+            ScriptedRuntimePorts {
+                webcam: Some(Arc::clone(&camera)),
+                screen: Some(Arc::clone(&screen)),
+                ..ScriptedRuntimePorts::default()
+            },
+            start,
+        );
+
+        assert!(engine.step(start));
+        assert!(!engine.state.still_image_detector.active());
+        assert_eq!(engine.state.snapshot.actual_output, Source::Camera);
+        assert!(engine.step(start + Duration::from_millis(500)));
+        assert_eq!(engine.state.snapshot.still_image_pip_mix, 1.0);
+        assert_eq!(
+            engine.state.snapshot.output_layout,
+            OutputLayout::WebcamMainScreenPip
+        );
+
+        engine.platform.screen = None;
+        assert!(engine.step(start + Duration::from_millis(750)));
+        assert_eq!(engine.state.snapshot.actual_output, Source::Camera);
+        assert!(engine.step(start + Duration::from_millis(1_250)));
+        assert_eq!(engine.state.snapshot.still_image_pip_mix, 0.0);
+        assert_eq!(engine.state.snapshot.output_layout, OutputLayout::Camera);
     }
 
     #[test]

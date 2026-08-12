@@ -20,6 +20,7 @@ pub struct Tray {
     automatic: CheckMenuItem,
     camera: CheckMenuItem,
     screen: CheckMenuItem,
+    pip: CheckMenuItem,
     output_mode: Submenu,
     rescan_displays: IconMenuItem,
     restart_screen: IconMenuItem,
@@ -66,10 +67,11 @@ impl Tray {
         let automatic = CheckMenuItem::new(text(locale, "Automatic"), true, true, None);
         let camera = CheckMenuItem::new(text(locale, "Webcam only"), true, false, None);
         let screen = CheckMenuItem::new(text(locale, "Screen only"), true, false, None);
+        let pip = CheckMenuItem::new(text(locale, "Picture-in-picture"), true, false, None);
         let output_mode = Submenu::with_items(
             text(locale, "Output mode"),
             true,
-            &[&automatic, &camera, &screen],
+            &[&automatic, &camera, &screen, &pip],
         )
         .map_err(|error| format!("could not create tray output-mode menu: {error}"))?;
         output_mode.set_icon(Some(action_menu_icon(UiIcon::Route, [64, 118, 216, 255])?));
@@ -164,6 +166,7 @@ impl Tray {
             automatic,
             camera,
             screen,
+            pip,
             output_mode,
             rescan_displays,
             restart_screen,
@@ -183,6 +186,7 @@ impl Tray {
             self.automatic.set_text(text(locale, "Automatic"));
             self.camera.set_text(text(locale, "Webcam only"));
             self.screen.set_text(text(locale, "Screen only"));
+            self.pip.set_text(text(locale, "Picture-in-picture"));
             self.output_mode.set_text(text(locale, "Output mode"));
             self.rescan_displays
                 .set_text(text(locale, "Rescan displays"));
@@ -217,6 +221,7 @@ impl Tray {
         set_checked(&self.automatic, snapshot.mode == OutputMode::Automatic);
         set_checked(&self.camera, snapshot.mode == OutputMode::ForceCamera);
         set_checked(&self.screen, snapshot.mode == OutputMode::ForceScreen);
+        set_checked(&self.pip, snapshot.mode == OutputMode::ForcePip);
         let runtime_accepts_recovery = snapshot.run_state != RunState::Stopping;
         self.rescan_displays.set_enabled(runtime_accepts_recovery);
         self.restart_screen
@@ -245,6 +250,9 @@ impl Tray {
             }
             if id == self.screen.id() {
                 return Some(TrayAction::SetMode(OutputMode::ForceScreen));
+            }
+            if id == self.pip.id() {
+                return Some(TrayAction::SetMode(OutputMode::ForcePip));
             }
             if id == self.settings.id() {
                 return Some(TrayAction::OpenSettings);

@@ -35,7 +35,7 @@ The internal and published contract is immutable CPU BGRA at 1280×720 and 30 fp
 2. Media Foundation ranks progressive RGB32, NV12, YUY2, and MJPEG webcam modes. It prefers RGB32 1280×720 at 30 fps, honors actual row pitch, and normalizes compatible input into the fixed frame contract.
 3. Optional webcam cropping uses the native aspect ratio to create a centered 16:9 crop. Native 16:9 and unknown-aspect input stays unchanged. The crop feeds both preview and output.
 4. Detection derives a 160×90 grayscale image from the screen every 250 ms. Five matches select the webcam; three mismatches select the screen. When enabled, a second detector times exact, consecutive non-reference thumbnails; motion, reference return, near-black input, source loss, or manual mode resets it.
-5. Composition uses aspect-fit scaling, black letterboxing, configurable missing-source fallback, and reversible 500 ms source and PIP blends. Still-image PIP uses a rounded 320×180 bottom-left inset with a 16 px margin and supports either source as the main view.
+5. Composition uses aspect-fit scaling, black letterboxing, configurable missing-source fallback, and reversible 500 ms source and PIP blends. Automatic or forced PIP uses a rounded 384×216 bottom-left inset with a 16 px margin and supports either source as the main view.
 6. A monotonic deadline pacer publishes at 30 fps without catch-up bursts or accumulated drift.
 
 ## Runtime ownership and backpressure

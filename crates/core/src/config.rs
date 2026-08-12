@@ -728,6 +728,13 @@ mod tests {
         );
         assert!(update_json.contains("\"schema_version\":1"));
         assert!(update_json.contains("\"update_channel\":\"beta\""));
+        let forced_pip = AppConfig {
+            output_mode: OutputMode::ForcePip,
+            ..AppConfig::default()
+        };
+        let forced_pip_json = serde_json::to_string(&forced_pip).unwrap();
+        assert!(forced_pip_json.contains("\"output_mode\":\"force_pip\""));
+        assert_eq!(ConfigStore::parse(&forced_pip_json).unwrap(), forced_pip);
     }
 
     #[test]

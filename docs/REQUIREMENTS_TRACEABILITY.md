@@ -11,7 +11,7 @@ This index connects product contracts to their primary implementation areas and 
 | Optional Auto-only still-image PIP requires exact continuous non-reference samples and both live sources | `StillImageDetector`; runtime PIP policy | Stillness reset/timing, forced-mode, source-loss, and paused-content flows |
 | Missing reference or screen falls back to webcam; missing webcam uses the configured placeholder | `decide`; compositor fallback policy | Decision-table and composition contract tests |
 | Reversible 500 ms source transition with black letterboxing | `TransitionController`; `Frame::blend`; aspect-fit cache | Transition reversal, blend boundary, and fit tests |
-| Rounded 320×180 bottom-left PIP supports either main source without changing output format | `FrameCompositor`; PIP mix state | Geometry, rounded-mask, endpoint, midpoint, immutability, and dual-layout tests |
+| Rounded 384×216 bottom-left PIP supports either main source and automatic or forced activation without changing output format | `FrameCompositor`; PIP mix state | Geometry, rounded-mask, endpoint, midpoint, forced-mode, immutability, and dual-layout tests |
 | Stopped automation publishes the canonical StageSwap off frame at 30 fps | Runtime stopped state; shared off-frame generator | Stopped-output and publisher fallback tests |
 
 ## Capture and recovery

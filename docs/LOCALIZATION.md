@@ -10,7 +10,7 @@ StageSwap uses clear, natural product language in English, French, and neutral i
 | Monitored presentation display | Secondary screen | Écran secondaire | Pantalla secundaria |
 | Final virtual-camera video | Zoom output | Sortie Zoom | Salida de Zoom |
 | Main behavior | Automatic switching | Changement automatique | Cambio automático |
-| Compact output modes | Auto / Camera / Screen | Auto / Caméra / Écran | Auto / Cámara / Pantalla |
+| Compact output modes | Auto / Camera / Screen / PIP | Auto / Caméra / Écran / Incrustation | Auto / Cámara / Pantalla / Imagen superpuesta |
 | Physical camera input | Webcam | Webcam | Cámara web |
 | No-content status | No media | Aucun média | Sin contenido multimedia |
 | Content status | Media detected | Média détecté | Contenido multimedia detectado |
