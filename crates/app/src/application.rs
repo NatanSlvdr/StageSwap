@@ -6,8 +6,8 @@ use stageswap_app::{CommandDispatch, RuntimeHandle};
 use stageswap_core::{
     AdminProfileStatus, AdminProfileStore, AdminRestoreOutcome, AppConfig, AppSnapshot, Command,
     ComponentFailureKind, ConfigLoad, ConfigStore, DetectionState, DeviceState, Frame,
-    OutputLayout, OutputMode, RestartTarget, RunState, Source, StillImagePipLayout, UpdateChannel,
-    WebcamFailureKind,
+    OutputLayout, OutputMode, RestartTarget, RunState, Source, StillImagePipLayout,
+    StillImagePipSize, UpdateChannel, WebcamFailureKind,
 };
 use stageswap_i18n::{Locale, format_text, text as localized_text};
 use std::collections::HashMap;
@@ -4117,6 +4117,35 @@ impl SwitcherApp {
                             StillImagePipLayout::ScreenMain,
                             tr(ui, "Secondary screen full screen").as_ref(),
                         );
+                    });
+            },
+        );
+        let pip_size = match self.config.still_image_pip_size {
+            StillImagePipSize::Mini => tr(ui, "Mini"),
+            StillImagePipSize::Medium => tr(ui, "Medium"),
+            StillImagePipSize::Large => tr(ui, "Large"),
+        };
+        settings_fixed_control_row(
+            ui,
+            "PIP size",
+            "Choose how much of the main view the inset covers.",
+            180.0,
+            |ui| {
+                egui::ComboBox::from_id_salt("still-image-pip-size")
+                    .width(180.0)
+                    .selected_text(pip_size)
+                    .show_ui(ui, |ui| {
+                        for (size, label) in [
+                            (StillImagePipSize::Mini, "Mini"),
+                            (StillImagePipSize::Medium, "Medium"),
+                            (StillImagePipSize::Large, "Large"),
+                        ] {
+                            ui.selectable_value(
+                                &mut self.config.still_image_pip_size,
+                                size,
+                                tr(ui, label).as_ref(),
+                            );
+                        }
                     });
             },
         );
@@ -9984,6 +10013,7 @@ mod tests {
         app.config.still_image_pip_enabled = true;
         app.config.still_image_pip_delay_seconds = 120;
         app.config.still_image_pip_layout = StillImagePipLayout::ScreenMain;
+        app.config.still_image_pip_size = StillImagePipSize::Large;
         app.pending_settings_save = Some(started_at);
 
         assert!(!app.settings_save_due(started_at + SETTINGS_SAVE_DEBOUNCE / 2));
@@ -10001,6 +10031,7 @@ mod tests {
             saved.still_image_pip_layout,
             StillImagePipLayout::ScreenMain
         );
+        assert_eq!(saved.still_image_pip_size, StillImagePipSize::Large);
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if app.runtime.snapshot().selected_video_device_id == "new-camera" {

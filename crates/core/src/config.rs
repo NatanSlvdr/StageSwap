@@ -24,6 +24,15 @@ pub enum StillImagePipLayout {
     ScreenMain,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StillImagePipSize {
+    Mini,
+    #[default]
+    Medium,
+    Large,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AppConfig {
     pub schema_version: u32,
@@ -38,6 +47,7 @@ pub struct AppConfig {
     pub still_image_pip_enabled: bool,
     pub still_image_pip_delay_seconds: u32,
     pub still_image_pip_layout: StillImagePipLayout,
+    pub still_image_pip_size: StillImagePipSize,
     pub start_with_windows: bool,
     pub start_minimized: bool,
     pub start_automatically: bool,
@@ -64,9 +74,10 @@ impl Default for AppConfig {
             cursor_visible: false,
             automatic_monitor_rescans: true,
             automatic_screen_capture_recovery: true,
-            still_image_pip_enabled: false,
+            still_image_pip_enabled: true,
             still_image_pip_delay_seconds: 45,
             still_image_pip_layout: StillImagePipLayout::WebcamMain,
+            still_image_pip_size: StillImagePipSize::Medium,
             start_with_windows: false,
             start_minimized: true,
             start_automatically: true,
@@ -98,6 +109,7 @@ struct AppConfigFile {
     still_image_pip_enabled: bool,
     still_image_pip_delay_seconds: u32,
     still_image_pip_layout: StillImagePipLayout,
+    still_image_pip_size: StillImagePipSize,
     start_with_windows: bool,
     start_minimized: bool,
     start_automatically: bool,
@@ -128,6 +140,7 @@ impl Default for AppConfigFile {
             still_image_pip_enabled: config.still_image_pip_enabled,
             still_image_pip_delay_seconds: config.still_image_pip_delay_seconds,
             still_image_pip_layout: config.still_image_pip_layout,
+            still_image_pip_size: config.still_image_pip_size,
             start_with_windows: config.start_with_windows,
             start_minimized: config.start_minimized,
             start_automatically: config.start_automatically,
@@ -165,6 +178,7 @@ impl<'de> Deserialize<'de> for AppConfig {
             still_image_pip_enabled: file.still_image_pip_enabled,
             still_image_pip_delay_seconds: file.still_image_pip_delay_seconds,
             still_image_pip_layout: file.still_image_pip_layout,
+            still_image_pip_size: file.still_image_pip_size,
             start_with_windows: file.start_with_windows,
             start_minimized: file.start_minimized,
             start_automatically: file.start_automatically,
@@ -707,11 +721,13 @@ mod tests {
             still_image_pip_enabled: true,
             still_image_pip_delay_seconds: 120,
             still_image_pip_layout: StillImagePipLayout::ScreenMain,
+            still_image_pip_size: StillImagePipSize::Large,
             verbose_logging: true,
             output_mode: OutputMode::ForceScreen,
             ..AppConfig::default()
         };
         let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"still_image_pip_size\":\"large\""));
         assert_eq!(ConfigStore::parse(&json).unwrap(), config);
         assert_eq!(ConfigStore::parse("{}").unwrap(), AppConfig::default());
         let invalid_schema = serde_json::json!({ "schema_version": 2 }).to_string();
@@ -756,6 +772,10 @@ mod tests {
             .to_string();
             assert!(ConfigStore::parse(&json).is_err());
         }
+        assert!(
+            ConfigStore::parse(r#"{"schema_version":1,"still_image_pip_size":"extra_large"}"#)
+                .is_err()
+        );
 
         let config = ConfigStore::parse(
             &serde_json::json!({
@@ -806,12 +826,13 @@ mod tests {
         assert_eq!(config.update_channel, UpdateChannel::Stable);
         assert!(config.notify_updates);
         assert!(!config.verbose_logging);
-        assert!(!config.still_image_pip_enabled);
+        assert!(config.still_image_pip_enabled);
         assert_eq!(config.still_image_pip_delay_seconds, 45);
         assert_eq!(
             config.still_image_pip_layout,
             StillImagePipLayout::WebcamMain
         );
+        assert_eq!(config.still_image_pip_size, StillImagePipSize::Medium);
         let disabled =
             ConfigStore::parse(r#"{"schema_version":1,"automatic_monitor_rescans":false}"#)
                 .unwrap();
@@ -880,6 +901,7 @@ mod tests {
         let original = AppConfig {
             selected_video_device_id: "admin-camera".into(),
             reference_image_path: config_store.reference_path().display().to_string(),
+            still_image_pip_size: StillImagePipSize::Large,
             ..AppConfig::default()
         };
 
@@ -890,6 +912,15 @@ mod tests {
                 auto_restore_on_launch: false,
                 reference_included: true,
             }
+        );
+        assert_eq!(
+            admin_store
+                .load_profile()
+                .unwrap()
+                .unwrap()
+                .config
+                .still_image_pip_size,
+            StillImagePipSize::Large
         );
         admin_store.set_auto_restore_on_launch(true).unwrap();
         write_reference(&config_store.reference_path(), [0, 255, 0, 255]);

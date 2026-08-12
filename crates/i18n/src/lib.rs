@@ -245,6 +245,11 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Used by automatic and forced PIP; the other feed appears in the bottom-left inset." => ("Utilisée pour l’incrustation automatique et forcée ; l’autre source apparaît en bas à gauche.", "Se usa para la imagen superpuesta automática y forzada; la otra fuente aparece en la esquina inferior izquierda."),
         "Webcam full screen" => ("Webcam en plein écran", "Cámara web a pantalla completa"),
         "Secondary screen full screen" => ("Écran secondaire en plein écran", "Pantalla secundaria a pantalla completa"),
+        "PIP size" => ("Taille de l’incrustation", "Tamaño de la imagen superpuesta"),
+        "Choose how much of the main view the inset covers." => ("Choisissez la portion de la vue principale couverte par l’incrustation.", "Elige cuánto espacio de la vista principal ocupa la imagen superpuesta."),
+        "Mini" => ("Petite", "Pequeña"),
+        "Medium" => ("Moyenne", "Mediana"),
+        "Large" => ("Grande", "Grande"),
 
         // Diagnostics.
         "Component health" => ("État des composants", "Estado de los componentes"),
@@ -684,6 +689,11 @@ mod tests {
             "Used by automatic and forced PIP; the other feed appears in the bottom-left inset.",
             "Webcam full screen",
             "Secondary screen full screen",
+            "PIP size",
+            "Choose how much of the main view the inset covers.",
+            "Mini",
+            "Medium",
+            "Large",
         ];
 
         for source in strings {

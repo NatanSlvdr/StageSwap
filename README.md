@@ -24,7 +24,7 @@ StageSwap gives Zoom one camera to select: **Stageswap Camera**. In the normal *
 
 - When the screen matches the reference image, Zoom receives the webcam.
 - When the screen changes enough to indicate media, Zoom receives the secondary screen.
-- Optionally, when a non-reference image stays unchanged, Zoom receives the webcam with the live secondary screen inset—or the reverse.
+- By default, when a non-reference image stays unchanged, Zoom receives the webcam with the live secondary screen inset. The behavior, direction, delay, and Mini/Medium/Large inset size are configurable.
 - The output selector can also force that picture-in-picture layout immediately.
 - When automatic switching is stopped, Zoom receives a fixed StageSwap off screen.
 

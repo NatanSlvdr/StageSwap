@@ -1,4 +1,4 @@
-use crate::{Size, StillImagePipLayout};
+use crate::{Size, StillImagePipLayout, StillImagePipSize};
 use image::imageops::FilterType;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -9,14 +9,26 @@ pub const PIPELINE_SIZE: Size = Size::new(1280, 720);
 pub const PIPELINE_FPS: u32 = 30;
 pub const FRAME_STALE_AFTER: Duration = Duration::from_secs(1);
 pub const CAPTURE_FRAME_POOL_CAPACITY: usize = 4;
-pub const STILL_IMAGE_PIP_SIZE: Size = Size::new(384, 216);
+pub const STILL_IMAGE_PIP_MINI_SIZE: Size = Size::new(320, 180);
+pub const STILL_IMAGE_PIP_MEDIUM_SIZE: Size = Size::new(384, 216);
+pub const STILL_IMAGE_PIP_LARGE_SIZE: Size = Size::new(448, 252);
+pub const STILL_IMAGE_PIP_SIZE: Size = STILL_IMAGE_PIP_MEDIUM_SIZE;
 pub const STILL_IMAGE_PIP_MARGIN: u32 = 16;
 pub const STILL_IMAGE_PIP_CORNER_RADIUS: f64 = 12.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PipComposition {
     pub layout: StillImagePipLayout,
+    pub size: StillImagePipSize,
     pub mix: f64,
+}
+
+const fn pip_size(size: StillImagePipSize) -> Size {
+    match size {
+        StillImagePipSize::Mini => STILL_IMAGE_PIP_MINI_SIZE,
+        StillImagePipSize::Medium => STILL_IMAGE_PIP_MEDIUM_SIZE,
+        StillImagePipSize::Large => STILL_IMAGE_PIP_LARGE_SIZE,
+    }
 }
 
 #[derive(Debug)]
@@ -270,6 +282,7 @@ pub struct Frame {
 struct ScalePlan {
     source: Size,
     source_stride: u32,
+    output: Size,
     x_offset: u32,
     y_offset: u32,
     source_x: Vec<usize>,
@@ -298,6 +311,7 @@ impl ScalePlan {
         Self {
             source: source.size,
             source_stride: source.stride,
+            output,
             x_offset: (output.width - width) / 2,
             y_offset: (output.height - height) / 2,
             source_x,
@@ -305,14 +319,15 @@ impl ScalePlan {
         }
     }
 
-    fn matches(&self, source: &Frame) -> bool {
-        self.source == source.size && self.source_stride == source.stride
+    fn matches(&self, source: &Frame, output: Size) -> bool {
+        self.source == source.size && self.source_stride == source.stride && self.output == output
     }
 }
 
 #[derive(Clone, Debug, Default)]
 struct FittedCache {
     source: Option<Arc<Frame>>,
+    output: Option<Size>,
     pixels: Option<Arc<[u8]>>,
     plan: Option<ScalePlan>,
 }
@@ -326,11 +341,16 @@ impl FittedCache {
             .source
             .as_ref()
             .is_some_and(|cached| Arc::ptr_eq(cached, source))
+            && self.output == Some(output)
             && let Some(pixels) = &self.pixels
         {
             return Arc::clone(pixels);
         }
-        if self.plan.as_ref().is_none_or(|plan| !plan.matches(source)) {
+        if self
+            .plan
+            .as_ref()
+            .is_none_or(|plan| !plan.matches(source, output))
+        {
             self.plan = Some(ScalePlan::new(source, output));
         }
         let plan = self.plan.as_ref().expect("scale plan was initialized");
@@ -349,6 +369,7 @@ impl FittedCache {
         }
         let pixels: Arc<[u8]> = pixels.into();
         self.source = Some(Arc::clone(source));
+        self.output = Some(output);
         self.pixels = Some(Arc::clone(&pixels));
         pixels
     }
@@ -479,27 +500,26 @@ impl FrameCompositor {
         };
         let pixels = if let Some(pip) = pip.filter(|pip| pip.mix > 0.0) {
             let pip_mix = pip.mix.clamp(0.0, 1.0);
+            let inset_size = pip_size(pip.size);
             assert!(
-                self.output.width >= STILL_IMAGE_PIP_SIZE.width + STILL_IMAGE_PIP_MARGIN * 2
-                    && self.output.height
-                        >= STILL_IMAGE_PIP_SIZE.height + STILL_IMAGE_PIP_MARGIN * 2,
-                "PIP output must contain the fixed inset and margins"
+                self.output.width >= inset_size.width + STILL_IMAGE_PIP_MARGIN * 2
+                    && self.output.height >= inset_size.height + STILL_IMAGE_PIP_MARGIN * 2,
+                "PIP output must contain the selected inset and margins"
             );
             let inset = match pip.layout {
                 StillImagePipLayout::WebcamMain => screen
-                    .map(|frame| self.pip_screen.fit(frame, STILL_IMAGE_PIP_SIZE))
+                    .map(|frame| self.pip_screen.fit(frame, inset_size))
                     .unwrap_or_else(|| self.placeholder(color_bgra)),
                 StillImagePipLayout::ScreenMain => camera
-                    .map(|frame| self.pip_camera.fit(frame, STILL_IMAGE_PIP_SIZE))
+                    .map(|frame| self.pip_camera.fit(frame, inset_size))
                     .unwrap_or_else(|| self.placeholder(color_bgra)),
             };
             let output_width = self.output.width as usize;
-            let inset_width = STILL_IMAGE_PIP_SIZE.width as usize;
-            let inset_height = STILL_IMAGE_PIP_SIZE.height as usize;
+            let inset_width = inset_size.width as usize;
+            let inset_height = inset_size.height as usize;
             let origin_x = STILL_IMAGE_PIP_MARGIN as usize;
-            let origin_y = (self.output.height
-                - STILL_IMAGE_PIP_MARGIN
-                - STILL_IMAGE_PIP_SIZE.height) as usize;
+            let origin_y =
+                (self.output.height - STILL_IMAGE_PIP_MARGIN - inset_size.height) as usize;
             self.pip_pool
                 .write_with_fallback(|pixels| {
                     pixels.copy_from_slice(&background);
@@ -854,6 +874,7 @@ mod tests {
             0.0,
             Some(PipComposition {
                 layout: StillImagePipLayout::WebcamMain,
+                size: StillImagePipSize::Medium,
                 mix: 1.0,
             }),
             0xff00_0000,
@@ -871,6 +892,7 @@ mod tests {
             1.0,
             Some(PipComposition {
                 layout: StillImagePipLayout::ScreenMain,
+                size: StillImagePipSize::Medium,
                 mix: 1.0,
             }),
             0xff00_0000,
@@ -880,6 +902,66 @@ mod tests {
         assert_eq!(pixel(&screen_main, 208, 596), [0xff, 0, 0, 0xff]);
         assert_eq!(camera.pixels(), camera_before.as_ref());
         assert_eq!(screen.pixels(), screen_before.as_ref());
+    }
+
+    #[test]
+    fn contract_compositor_applies_each_pip_size_at_exact_bottom_left_bounds() {
+        let now = Instant::now();
+        let camera = Arc::new(Frame::placeholder(PIPELINE_SIZE, 0xff00_00ff, 1, 0, now));
+        let screen = Arc::new(Frame::placeholder(PIPELINE_SIZE, 0xff00_ff00, 2, 0, now));
+        let metadata = FrameMetadata {
+            sequence: 3,
+            timestamp_100ns: 4,
+            received_at: now,
+        };
+        let pixel = |frame: &Frame, x: usize, y: usize| {
+            let offset = (y * PIPELINE_SIZE.width as usize + x) * 4;
+            <[u8; 4]>::try_from(&frame.pixels()[offset..offset + 4]).unwrap()
+        };
+        let mut compositor = FrameCompositor::default();
+
+        for (setting, size) in [
+            (StillImagePipSize::Mini, STILL_IMAGE_PIP_MINI_SIZE),
+            (StillImagePipSize::Medium, STILL_IMAGE_PIP_MEDIUM_SIZE),
+            (StillImagePipSize::Large, STILL_IMAGE_PIP_LARGE_SIZE),
+        ] {
+            let output = compositor.compose_with_pip(
+                Some(&camera),
+                Some(&screen),
+                0.0,
+                Some(PipComposition {
+                    layout: StillImagePipLayout::WebcamMain,
+                    size: setting,
+                    mix: 1.0,
+                }),
+                0xff00_0000,
+                metadata,
+            );
+            let origin_x = STILL_IMAGE_PIP_MARGIN as usize;
+            let origin_y = (PIPELINE_SIZE.height - STILL_IMAGE_PIP_MARGIN - size.height) as usize;
+            let center_y = origin_y + size.height as usize / 2;
+            assert_eq!(pixel(&output, origin_x, center_y), [0, 0xff, 0, 0xff]);
+            assert_eq!(
+                pixel(&output, origin_x + size.width as usize - 1, center_y),
+                [0, 0xff, 0, 0xff]
+            );
+            assert_eq!(
+                pixel(&output, origin_x + size.width as usize, center_y),
+                [0xff, 0, 0, 0xff]
+            );
+            assert_eq!(
+                pixel(&output, origin_x + size.width as usize / 2, origin_y - 1),
+                [0xff, 0, 0, 0xff]
+            );
+            assert_eq!(
+                pixel(
+                    &output,
+                    origin_x + size.width as usize / 2,
+                    origin_y + size.height as usize
+                ),
+                [0xff, 0, 0, 0xff]
+            );
+        }
     }
 
     #[test]
@@ -901,6 +983,7 @@ mod tests {
                 0.0,
                 Some(PipComposition {
                     layout: StillImagePipLayout::WebcamMain,
+                    size: StillImagePipSize::Medium,
                     mix,
                 }),
                 0xff00_0000,

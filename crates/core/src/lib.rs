@@ -16,14 +16,15 @@ pub mod types;
 
 pub use config::{
     AdminProfileStatus, AdminProfileStore, AdminRestoreOutcome, AppConfig, ConfigLoad, ConfigStore,
-    StillImagePipLayout, UpdateChannel,
+    StillImagePipLayout, StillImagePipSize, UpdateChannel,
 };
 pub use decision::{Decision, decide};
 pub use detector::{DebouncedDetector, DetectorSettings};
 pub use frame::{
     CAPTURE_FRAME_POOL_CAPACITY, FRAME_STALE_AFTER, Frame, FrameBufferPool, FrameCompositor,
     FrameError, FrameMetadata, PIPELINE_FPS, PIPELINE_SIZE, PipComposition,
-    STILL_IMAGE_PIP_CORNER_RADIUS, STILL_IMAGE_PIP_MARGIN, STILL_IMAGE_PIP_SIZE,
+    STILL_IMAGE_PIP_CORNER_RADIUS, STILL_IMAGE_PIP_LARGE_SIZE, STILL_IMAGE_PIP_MARGIN,
+    STILL_IMAGE_PIP_MEDIUM_SIZE, STILL_IMAGE_PIP_MINI_SIZE, STILL_IMAGE_PIP_SIZE,
     aspect_fit_bgra_into, off_frame, off_frame_pixels,
 };
 pub use image::{

@@ -5,8 +5,8 @@ use stageswap_core::{
     DetectorSettings, DeviceState, Frame, FrameBufferPool, FrameCompositor, FrameMetadata,
     FramePacer, GrayImage, OutputLayout, OutputMode, PIPELINE_FPS, PIPELINE_SIZE, PipComposition,
     RunState, Size, Source, SourceAvailability, StillImageDetector, StillImagePipLayout,
-    TransitionController, bgra_to_gray, decide, image_similarity, off_frame, resize_bgra_to_gray,
-    resize_bilinear,
+    StillImagePipSize, TransitionController, bgra_to_gray, decide, image_similarity, off_frame,
+    resize_bgra_to_gray, resize_bilinear,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool as StdAtomicBool, Ordering as StdOrdering};
@@ -782,6 +782,7 @@ struct RuntimeState {
     still_image_detector: StillImageDetector,
     pip_transition: ReversibleMix,
     pip_render_layout: StillImagePipLayout,
+    pip_render_size: StillImagePipSize,
     last_detection: Instant,
     #[cfg(windows)]
     pending_reference_capture: Option<Arc<Frame>>,
@@ -852,6 +853,7 @@ impl RuntimeState {
     fn new_at(config: AppConfig, now: Instant) -> Self {
         let mode = config.output_mode;
         let pip_render_layout = config.still_image_pip_layout;
+        let pip_render_size = config.still_image_pip_size;
         let reference = None;
         let reference_preview = None;
         let detector = DebouncedDetector::new(DetectorSettings {
@@ -894,6 +896,7 @@ impl RuntimeState {
             still_image_detector: StillImageDetector::default(),
             pip_transition: ReversibleMix::new(Duration::from_millis(500)),
             pip_render_layout,
+            pip_render_size,
             last_detection: now - Duration::from_millis(250),
             #[cfg(windows)]
             pending_reference_capture: None,
@@ -1086,7 +1089,8 @@ impl RuntimeState {
                     != config.still_image_pip_enabled
                     || self.config.still_image_pip_delay_seconds
                         != config.still_image_pip_delay_seconds
-                    || self.config.still_image_pip_layout != config.still_image_pip_layout;
+                    || self.config.still_image_pip_layout != config.still_image_pip_layout
+                    || self.config.still_image_pip_size != config.still_image_pip_size;
                 self.config = *config;
                 self.snapshot.mode = self.config.output_mode;
                 self.snapshot.selected_video_device_id =
@@ -1194,13 +1198,16 @@ impl RuntimeState {
         if pip_target
             && (self.pip_transition.target == 0.0
                 || (self.snapshot.mode == OutputMode::ForcePip
-                    && self.pip_render_layout != self.config.still_image_pip_layout))
+                    && (self.pip_render_layout != self.config.still_image_pip_layout
+                        || self.pip_render_size != self.config.still_image_pip_size)))
         {
             self.pip_render_layout = self.config.still_image_pip_layout;
+            self.pip_render_size = self.config.still_image_pip_size;
         }
         let pip_mix = self.pip_transition.request(pip_target, now);
         if !pip_target && pip_mix <= f64::EPSILON {
             self.pip_render_layout = self.config.still_image_pip_layout;
+            self.pip_render_size = self.config.still_image_pip_size;
         }
         let desired_output = if pip_target {
             match self.pip_render_layout {
@@ -1238,6 +1245,7 @@ impl RuntimeState {
             self.snapshot.transition.screen_mix,
             Some(PipComposition {
                 layout: self.pip_render_layout,
+                size: self.pip_render_size,
                 mix: pip_mix,
             }),
             self.config.placeholder_color_bgra,
@@ -4457,6 +4465,7 @@ mod tests {
         let config = AppConfig {
             still_image_pip_enabled: false,
             still_image_pip_layout: StillImagePipLayout::WebcamMain,
+            still_image_pip_size: StillImagePipSize::Large,
             output_mode: OutputMode::ForcePip,
             ..AppConfig::default()
         };
@@ -4480,6 +4489,12 @@ mod tests {
         assert_eq!(
             engine.state.snapshot.output_layout,
             OutputLayout::WebcamMainScreenPip
+        );
+        let output = latest_published(&engine.platform);
+        let large_only_point = (578 * PIPELINE_SIZE.width as usize + 430) * 4;
+        assert_eq!(
+            &output.pixels()[large_only_point..large_only_point + 4],
+            &[0, 255, 0, 255]
         );
 
         engine.platform.screen = None;
