@@ -86,4 +86,28 @@ mod tests {
         }
         assert_eq!(detector.update(0.1, true), DetectionState::NotMatching);
     }
+
+    #[test]
+    fn contract_invalid_samples_clear_debounce_and_report_reference_missing() {
+        let mut detector = DebouncedDetector::new(DetectorSettings::default());
+        assert_eq!(detector.update(0.99, true), DetectionState::Unknown);
+        assert_eq!(detector.counters(), (1, 0));
+
+        assert_eq!(
+            detector.update(f64::NAN, true),
+            DetectionState::ReferenceMissing
+        );
+        assert_eq!(detector.counters(), (0, 0));
+        assert!(detector.similarity().is_nan());
+
+        assert_eq!(
+            detector.update(0.99, false),
+            DetectionState::ReferenceMissing
+        );
+        assert_eq!(detector.counters(), (0, 0));
+
+        detector.reset();
+        assert_eq!(detector.state(), DetectionState::Unknown);
+        assert_eq!(detector.counters(), (0, 0));
+    }
 }

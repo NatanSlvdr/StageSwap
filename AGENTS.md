@@ -39,13 +39,13 @@ The workspace uses Rust edition 2024 and is pinned to Rust 1.97.1 in `rust-toolc
 
 ## Development workflow
 
-Before pushing to `main`, run the format, lint, and host test suite:
+Before pushing to `main`, run the host gate, which explicitly covers both debug and release tests:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+sh scripts/check-host.sh
 ```
+
+The gate runs formatting, host Clippy, Windows-target Clippy, the debug workspace suite, and the release workspace suite.
 
 For cross-target linting, run:
 

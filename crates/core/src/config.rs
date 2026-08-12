@@ -295,7 +295,11 @@ impl ConfigStore {
         if self.config_path().exists() {
             fs::copy(self.config_path(), self.backup_path())?;
         }
-        replace(&temporary, &self.config_path())
+        if let Err(error) = replace(&temporary, &self.config_path()) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -692,6 +696,57 @@ mod tests {
         );
         assert!(update_json.contains("\"schema_version\":1"));
         assert!(update_json.contains("\"update_channel\":\"beta\""));
+    }
+
+    #[test]
+    fn contract_config_rejects_unknown_and_invalid_values_without_normalizing_bad_data() {
+        assert!(ConfigStore::parse(r#"{"schema_version":1,"unexpected":true}"#).is_err());
+        for threshold in [-0.01, 1.01] {
+            let json = serde_json::json!({
+                "schema_version": 1,
+                "similarity_threshold": threshold,
+            })
+            .to_string();
+            assert!(ConfigStore::parse(&json).is_err());
+        }
+
+        let config = ConfigStore::parse(
+            &serde_json::json!({
+                "schema_version": 1,
+                "placeholder_color_bgra": 0x0011_2233_u32,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(config.placeholder_color_bgra, 0xff11_2233);
+    }
+
+    #[test]
+    fn contract_failed_config_replace_cleans_temporary_file_and_preserves_previous_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        let original = AppConfig {
+            selected_video_device_id: "original".into(),
+            ..AppConfig::default()
+        };
+        store.save(&original).unwrap();
+
+        let replacement = AppConfig {
+            selected_video_device_id: "replacement".into(),
+            ..original.clone()
+        };
+        let error = store
+            .save_with_replace(&replacement, |_, _| {
+                Err(io::Error::other("simulated config replacement failure"))
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("simulated config replacement failure")
+        );
+        assert!(!directory.path().join("config.tmp.json").exists());
+        assert_eq!(store.load().config, original);
     }
 
     #[test]

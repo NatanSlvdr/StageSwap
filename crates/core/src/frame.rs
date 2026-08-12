@@ -900,4 +900,48 @@ mod tests {
             assert!(fallback.iter().all(|byte| *byte == 3));
         }
     }
+
+    #[test]
+    fn contract_aspect_fit_rejects_bad_layouts_and_freshness_has_inclusive_boundary() {
+        let now = Instant::now();
+        let mut destination = vec![0; 16];
+        assert_eq!(
+            aspect_fit_bgra_into(
+                &[0; 16],
+                Size::new(0, 2),
+                0,
+                &mut destination,
+                Size::new(2, 2),
+            ),
+            Err(FrameError::Empty)
+        );
+        assert_eq!(
+            aspect_fit_bgra_into(
+                &[0; 16],
+                Size::new(2, 2),
+                4,
+                &mut destination,
+                Size::new(2, 2),
+            ),
+            Err(FrameError::InvalidStride)
+        );
+        assert_eq!(
+            aspect_fit_bgra_into(
+                &[0; 8],
+                Size::new(2, 2),
+                8,
+                &mut destination,
+                Size::new(2, 2),
+            ),
+            Err(FrameError::InvalidLength)
+        );
+
+        let frame = Frame::placeholder(Size::new(1, 1), 0xff00_0000, 1, 0, now);
+        assert!(frame.is_fresh_at(now + FRAME_STALE_AFTER, FRAME_STALE_AFTER));
+        assert!(!frame.is_fresh_at(
+            now + FRAME_STALE_AFTER + Duration::from_nanos(1),
+            FRAME_STALE_AFTER
+        ));
+        assert!(!frame.is_fresh_at(now - Duration::from_secs(1), FRAME_STALE_AFTER));
+    }
 }

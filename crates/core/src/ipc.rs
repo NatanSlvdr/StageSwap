@@ -65,11 +65,11 @@ impl SharedFrameCache {
         if header.sequence <= self.last_sequence {
             return Err(CacheError::InvalidSequence);
         }
-        self.last_sequence = header.sequence;
         if header.frame_bytes == 0 {
             if !pixels.is_empty() {
                 return Err(CacheError::InvalidLength);
             }
+            self.last_sequence = header.sequence;
             self.latest = None;
             return Ok(());
         }
@@ -85,6 +85,7 @@ impl SharedFrameCache {
             received_at,
         )
         .map_err(CacheError::InvalidFrame)?;
+        self.last_sequence = header.sequence;
         self.latest = Some(Arc::new(frame));
         Ok(())
     }
@@ -219,6 +220,35 @@ mod tests {
             frame_bytes: 1920 * 1080 * 4,
         };
         assert_eq!(invalid.validate(), Err(HeaderError::InvalidFrameBytes));
+
+        let header = FrameHeader {
+            sequence: 1,
+            size: Size::new(2, 2),
+            stride: 8,
+            timestamp_100ns: 0,
+            frame_bytes: 16,
+        };
+        let bytes = header.encode().unwrap();
+        let mut bad_magic = bytes;
+        bad_magic[0] ^= 0xff;
+        assert_eq!(
+            FrameHeader::decode(&bad_magic, None),
+            Err(HeaderError::InvalidMagic)
+        );
+        let mut bad_version = bytes;
+        bad_version[4] = bad_version[4].wrapping_add(1);
+        assert_eq!(
+            FrameHeader::decode(&bad_version, None),
+            Err(HeaderError::InvalidVersion)
+        );
+        assert_eq!(
+            FrameHeader::decode(&bytes[..HEADER_LEN - 1], None),
+            Err(HeaderError::InvalidLength)
+        );
+        assert_eq!(
+            FrameHeader::invalidation(0),
+            Err(HeaderError::InvalidSequence)
+        );
     }
 
     #[test]
@@ -256,5 +286,26 @@ mod tests {
             )
             .unwrap();
         assert!(cache.latest(now).is_none());
+    }
+
+    #[test]
+    fn contract_invalid_payload_does_not_consume_sequence_for_retry() {
+        let now = Instant::now();
+        let header = FrameHeader {
+            sequence: 7,
+            size: Size::new(2, 2),
+            stride: 8,
+            timestamp_100ns: 10,
+            frame_bytes: 16,
+        };
+        let mut cache = SharedFrameCache::default();
+        assert_eq!(
+            cache.ingest(header, vec![0; 15].into(), now),
+            Err(CacheError::InvalidLength)
+        );
+        assert_eq!(cache.last_sequence(), 0);
+        cache.ingest(header, vec![0; 16].into(), now).unwrap();
+        assert_eq!(cache.last_sequence(), 7);
+        assert!(cache.latest(now).is_some());
     }
 }

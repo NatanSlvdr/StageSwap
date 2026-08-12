@@ -20,13 +20,13 @@ The default workspace members are `stageswap-core` and `xtask`, allowing useful 
 
 ## Local checks
 
-Before pushing to `main`, run:
+Before pushing to `main`, run the host gate:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+sh scripts/check-host.sh
 ```
+
+This runs formatting, host Clippy, Windows-target Clippy, the debug workspace suite, and the release workspace suite. Run an individual command directly when iterating on one class of failure.
 
 Cross-target linting catches Windows-only compilation issues available to the host toolchain:
 

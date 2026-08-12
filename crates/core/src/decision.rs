@@ -86,4 +86,68 @@ mod tests {
             Source::Placeholder
         );
     }
+
+    #[test]
+    fn contract_exhaustive_modes_detections_and_availability_have_safe_outputs() {
+        let modes = [
+            OutputMode::Automatic,
+            OutputMode::ForceCamera,
+            OutputMode::ForceScreen,
+        ];
+        let detections = [
+            DetectionState::Unknown,
+            DetectionState::Matching,
+            DetectionState::NotMatching,
+            DetectionState::ReferenceMissing,
+        ];
+        let availability = [
+            SourceAvailability {
+                camera_ready: false,
+                screen_ready: false,
+            },
+            SourceAvailability {
+                camera_ready: true,
+                screen_ready: false,
+            },
+            SourceAvailability {
+                camera_ready: false,
+                screen_ready: true,
+            },
+            SourceAvailability {
+                camera_ready: true,
+                screen_ready: true,
+            },
+        ];
+
+        for mode in modes {
+            for detection in detections {
+                for sources in availability {
+                    let decision = decide(mode, detection, sources);
+                    let expected_automatic = if detection == DetectionState::NotMatching {
+                        Source::Screen
+                    } else {
+                        Source::Camera
+                    };
+                    assert_eq!(decision.automatic_target, expected_automatic);
+                    assert_eq!(
+                        decision.manual_override,
+                        !matches!(mode, OutputMode::Automatic)
+                    );
+                    let requested = match mode {
+                        OutputMode::Automatic => expected_automatic,
+                        OutputMode::ForceCamera => Source::Camera,
+                        OutputMode::ForceScreen => Source::Screen,
+                    };
+                    let expected_output = match requested {
+                        Source::Camera if sources.camera_ready => Source::Camera,
+                        Source::Screen if sources.screen_ready => Source::Screen,
+                        Source::Screen if sources.camera_ready => Source::Camera,
+                        _ => Source::Placeholder,
+                    };
+                    assert_eq!(decision.desired_output, expected_output);
+                    assert!(!decision.reason.is_empty());
+                }
+            }
+        }
+    }
 }

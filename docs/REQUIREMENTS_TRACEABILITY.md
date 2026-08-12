@@ -51,6 +51,8 @@ This index connects product contracts to their primary implementation areas and 
 | Cleanup removes deployment resources; uninstall also removes managed app/shortcuts while preserving user data | Deployment cleanup/uninstall paths | Ownership-boundary, argument, filesystem, registry, and native removal checks |
 | Stable/Beta GitHub updates are manual, verified, replaceable, and rollback-safe | Update worker; WinHTTP adapter; replacement bootstrap | Release selection, configuration, checksum/digest, staged replacement, readiness, and rollback tests |
 
-## Release evidence boundaries
+## Host-executed evidence and release boundaries
 
-Host tests and cross-target linting cannot prove physical capture, native UI, COM registration, virtual-camera enumeration, or Zoom compatibility. Those contracts require the native Windows evidence described in [Development](DEVELOPMENT.md) and the repository release process.
+The canonical host gate is `sh scripts/check-host.sh`. It runs formatting, host Clippy, Windows-target Clippy, and both debug and release workspace test suites. The deterministic `contract_` and `flow_` evidence for frames, detection, decisions, transitions, composition, pacing, IPC, configuration, reference persistence, and worker coordination is therefore host-executed evidence.
+
+Host tests and cross-target linting cannot prove physical capture, native UI, COM registration, virtual-camera enumeration, Windows Camera, Zoom compatibility, or deployment behavior. Those contracts remain explicitly Windows-native evidence and require the native Windows checks described in [Development](DEVELOPMENT.md) and the repository release process. A passing host gate is not a substitute for that validation.

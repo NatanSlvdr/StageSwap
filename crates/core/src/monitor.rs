@@ -125,4 +125,44 @@ mod tests {
         assert!(confirmed.changed);
         assert_eq!(confirmed.tracked.unwrap().display_name, "two");
     }
+
+    #[test]
+    fn contract_invalid_or_below_threshold_scans_clear_pending_confirmation() {
+        let mut tracker = MonitorTracker::new(MonitorTrackerSettings::default());
+        tracker.select(monitor("one"));
+        let candidate = monitor("two");
+        let valid = [MonitorScore {
+            monitor: candidate.clone(),
+            similarity: 0.99,
+            capture_valid: true,
+        }];
+        assert!(tracker.apply_scan(&valid).confirmation_pending);
+
+        let invalid = [
+            MonitorScore {
+                monitor: candidate.clone(),
+                similarity: f64::NAN,
+                capture_valid: true,
+            },
+            MonitorScore {
+                monitor: candidate.clone(),
+                similarity: 1.0,
+                capture_valid: false,
+            },
+        ];
+        let result = tracker.apply_scan(&invalid);
+        assert_eq!(result.scan_state, DetectionState::ReferenceMissing);
+        assert!(!result.confirmation_pending);
+        assert!(!result.changed);
+        assert_eq!(tracker.tracked().unwrap().display_name, "one");
+
+        let below_threshold = [MonitorScore {
+            monitor: candidate,
+            similarity: 0.5,
+            capture_valid: true,
+        }];
+        let result = tracker.apply_scan(&below_threshold);
+        assert_eq!(result.scan_state, DetectionState::ReferenceMissing);
+        assert!(!result.confirmation_pending);
+    }
 }

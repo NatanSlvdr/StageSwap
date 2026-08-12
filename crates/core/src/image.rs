@@ -224,4 +224,39 @@ mod tests {
         assert_eq!(direct, resized);
         assert!((image_similarity(&image, &image) - 1.0).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn contract_rejects_invalid_layouts_and_mismatched_comparisons() {
+        assert_eq!(
+            GrayImage::new(Size::new(0, 1), vec![]),
+            Err(ImageError::InvalidDimensions)
+        );
+        assert_eq!(
+            GrayImage::new(Size::new(2, 2), vec![0; 3]),
+            Err(ImageError::InvalidDimensions)
+        );
+        assert_eq!(
+            bgra_to_gray(&[0; 7], Size::new(2, 1), 8),
+            Err(ImageError::InvalidLayout)
+        );
+        assert_eq!(
+            bgra_to_gray(&[0; 8], Size::new(2, 1), 7),
+            Err(ImageError::InvalidLayout)
+        );
+        assert_eq!(
+            resize_bgra_to_gray(&[0; 8], Size::new(2, 1), 8, Size::new(0, 1)),
+            Err(ImageError::InvalidLayout)
+        );
+        assert_eq!(
+            resize_bilinear(
+                &GrayImage::new(Size::new(1, 1), vec![1]).unwrap(),
+                Size::default()
+            ),
+            Err(ImageError::InvalidDimensions)
+        );
+
+        let left = GrayImage::new(Size::new(1, 1), vec![10]).unwrap();
+        let right = GrayImage::new(Size::new(2, 1), vec![10, 10]).unwrap();
+        assert_eq!(image_similarity(&left, &right), 0.0);
+    }
 }

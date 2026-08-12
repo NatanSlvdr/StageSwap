@@ -33,6 +33,7 @@ pub struct TransitionController {
 
 impl TransitionController {
     pub fn new(duration: Duration) -> Self {
+        assert!(!duration.is_zero(), "transition duration must be non-zero");
         Self {
             duration,
             state: TransitionState::default(),
@@ -138,5 +139,33 @@ mod tests {
                 .abs()
                 < 0.001
         );
+    }
+
+    #[test]
+    fn contract_fade_reaches_both_endpoints_and_placeholder_resets_state() {
+        let start = Instant::now();
+        let mut transition = TransitionController::default();
+        transition.tick(start);
+
+        transition.request(Source::Screen, start);
+        let completed = transition.tick(start + Duration::from_millis(500));
+        assert_eq!(completed.logical_source, Source::Screen);
+        assert_eq!(completed.target, Source::Screen);
+        assert!((completed.screen_mix - 1.0).abs() < f64::EPSILON);
+        assert!(!completed.active);
+        assert_eq!(completed.remaining, Duration::ZERO);
+
+        transition.request(Source::Camera, start + Duration::from_millis(500));
+        let reversed = transition.tick(start + Duration::from_secs(1));
+        assert_eq!(reversed.logical_source, Source::Camera);
+        assert_eq!(reversed.target, Source::Camera);
+        assert!(reversed.screen_mix.abs() < f64::EPSILON);
+        assert!(!reversed.active);
+
+        let placeholder = transition.request(Source::Placeholder, start + Duration::from_secs(1));
+        assert_eq!(placeholder.logical_source, Source::Placeholder);
+        assert_eq!(placeholder.target, Source::Placeholder);
+        assert_eq!(placeholder.screen_mix, 0.0);
+        assert!(!placeholder.active);
     }
 }

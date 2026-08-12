@@ -151,6 +151,7 @@ impl ReleaseStage {
                 "Run host Clippy",
                 "Run Windows-target Clippy",
                 "Run workspace tests",
+                "Run release workspace tests",
             ],
             Self::Preparation => &["Prepare release version", "Prepare verification package"],
             Self::Build => &[
@@ -710,6 +711,7 @@ fn short_substep_label(label: &str) -> &str {
         "Run host Clippy" => "Clippy",
         "Run Windows-target Clippy" => "Win Clippy",
         "Run workspace tests" => "Tests",
+        "Run release workspace tests" => "Release tests",
         _ => label,
     }
 }
@@ -1131,7 +1133,15 @@ fn run_checks(workspace: &Path, progress: &ReleaseProgress) -> Result<()> {
         .current_dir(workspace)
         .args(["test", "--workspace", "--all-targets"]);
     let total_tests = discover_test_count(workspace);
-    progress.test_command("Run workspace tests", tests, total_tests)
+    progress.test_command("Run workspace tests", tests, total_tests)?;
+    let mut release_tests = Command::new("cargo");
+    release_tests.current_dir(workspace).args([
+        "test",
+        "--release",
+        "--workspace",
+        "--all-targets",
+    ]);
+    progress.test_command("Run release workspace tests", release_tests, None)
 }
 
 fn validate_release_outputs(artifact: &Path, version: ReleaseVersion) -> Result<()> {

@@ -3922,6 +3922,99 @@ mod tests {
         fn publish(&self, _state: &mut RuntimeState, _now: Instant) {}
     }
 
+    #[derive(Default)]
+    struct ScriptedRuntimePorts {
+        webcam: Option<Arc<Frame>>,
+        screen: Option<Arc<Frame>>,
+        published: Mutex<Vec<Arc<Frame>>>,
+        refresh_count: usize,
+    }
+
+    impl ScriptedRuntimePorts {
+        fn published_frames(&self) -> Vec<Arc<Frame>> {
+            self.published.lock().unwrap().clone()
+        }
+    }
+
+    impl RuntimePorts for ScriptedRuntimePorts {
+        fn command(&mut self, _command: &Command, _state: &mut RuntimeState) {}
+
+        fn refresh_inputs(&mut self, state: &mut RuntimeState, _now: Instant) {
+            self.refresh_count += 1;
+            state.snapshot.previews.webcam = self.webcam.clone();
+            state.snapshot.previews.screen = self.screen.clone();
+            state.snapshot.availability = SourceAvailability {
+                camera_ready: self.webcam.is_some(),
+                screen_ready: self.screen.is_some(),
+            };
+            state.snapshot.webcam_state = if self.webcam.is_some() {
+                DeviceState::Ready
+            } else {
+                DeviceState::Unavailable
+            };
+            state.snapshot.screen_state = if self.screen.is_some() {
+                DeviceState::Ready
+            } else {
+                DeviceState::Unavailable
+            };
+        }
+
+        fn publish(&self, state: &mut RuntimeState, _now: Instant) {
+            if let Some(frame) = state.snapshot.previews.final_output.as_ref() {
+                self.published.lock().unwrap().push(Arc::clone(frame));
+            }
+        }
+    }
+
+    fn scripted_engine(
+        state: RuntimeState,
+        platform: ScriptedRuntimePorts,
+        now: Instant,
+    ) -> RuntimeEngine<ScriptedRuntimePorts> {
+        let interval = Duration::from_nanos(1_000_000_000 / u64::from(PIPELINE_FPS));
+        RuntimeEngine {
+            state,
+            platform,
+            pacer: FramePacer::new(now, interval),
+            reference_worker: None,
+            reference_generation: 0,
+            in_flight_candidate: None,
+            last_deadline_log: now - Duration::from_secs(30),
+        }
+    }
+
+    fn scripted_solid_frame(
+        size: Size,
+        color_bgra: u32,
+        sequence: u64,
+        now: Instant,
+    ) -> Arc<Frame> {
+        Arc::new(Frame::placeholder(size, color_bgra, sequence, 0, now))
+    }
+
+    fn running_scripted_state(now: Instant) -> RuntimeState {
+        let mut state = RuntimeState::new_at(
+            AppConfig {
+                start_automatically: false,
+                ..AppConfig::default()
+            },
+            now,
+        );
+        state.snapshot.run_state = RunState::Running;
+        state
+    }
+
+    fn latest_published(platform: &ScriptedRuntimePorts) -> Arc<Frame> {
+        platform
+            .published_frames()
+            .pop()
+            .expect("scripted runtime should publish an output frame")
+    }
+
+    fn reference_for(frame: &Frame) -> GrayImage {
+        gray_thumbnail(frame).expect("scripted reference frame should be valid")
+    }
+
     fn monitor(display_name: &str, label: &str) -> MonitorDescriptor {
         MonitorDescriptor {
             display_name: display_name.into(),
@@ -3980,6 +4073,262 @@ mod tests {
     }
 
     #[test]
+    fn flow_scripted_pipeline_debounces_detection_and_composes_reversible_transition() {
+        let start = Instant::now();
+        let clock = VirtualRuntimeClock::new(start);
+        let camera = scripted_solid_frame(PIPELINE_SIZE, 0xff20_4080, 1, start);
+        let matching_screen = scripted_solid_frame(Size::new(4, 2), 0xffff_ffff, 2, start);
+        let mismatching_screen = scripted_solid_frame(Size::new(4, 2), 0xff00_ff00, 3, start);
+        let camera_pixels = camera.pixels_arc();
+        let mut engine = scripted_engine(
+            running_scripted_state(start),
+            ScriptedRuntimePorts {
+                webcam: Some(Arc::clone(&camera)),
+                screen: Some(Arc::clone(&matching_screen)),
+                ..ScriptedRuntimePorts::default()
+            },
+            start,
+        );
+        engine.state.reference = Some(reference_for(&matching_screen));
+
+        assert!(engine.step(clock.now()));
+        assert_eq!(engine.state.detector.counters(), (1, 0));
+        let first = latest_published(&engine.platform);
+        assert_eq!(first.pixels(), camera.pixels());
+        assert!(Arc::ptr_eq(&first.pixels_arc(), &camera_pixels));
+
+        clock.advance(Duration::from_millis(249));
+        assert!(engine.step(clock.now()));
+        assert_eq!(
+            engine.state.detector.counters(),
+            (1, 0),
+            "detection must not run before the 250 ms interval"
+        );
+
+        for _ in 0..4 {
+            clock.advance(Duration::from_millis(250));
+            assert!(engine.step(clock.now()));
+        }
+        assert_eq!(
+            engine.state.snapshot.detection,
+            stageswap_core::DetectionState::Matching
+        );
+        assert_eq!(engine.state.detector.counters(), (5, 0));
+        assert_eq!(engine.state.snapshot.actual_output, Source::Camera);
+
+        engine.platform.screen = Some(Arc::clone(&mismatching_screen));
+        for _ in 0..3 {
+            clock.advance(Duration::from_millis(250));
+            assert!(engine.step(clock.now()));
+        }
+        assert_eq!(
+            engine.state.snapshot.detection,
+            stageswap_core::DetectionState::NotMatching
+        );
+        assert_eq!(engine.state.snapshot.actual_output, Source::Screen);
+        assert!(engine.state.snapshot.transition.active);
+        assert!(engine.state.snapshot.transition.screen_mix.abs() < f64::EPSILON);
+
+        clock.advance(Duration::from_millis(250));
+        assert!(engine.step(clock.now()));
+        let halfway = engine.state.snapshot.transition;
+        assert!((halfway.screen_mix - 0.5).abs() < 0.001);
+        let halfway_output = latest_published(&engine.platform);
+        assert_ne!(halfway_output.pixels(), camera.pixels());
+        assert_eq!(halfway_output.sequence, engine.state.sequence);
+        let expected_timestamp = i64::try_from(
+            clock
+                .now()
+                .duration_since(engine.state.started_at)
+                .as_nanos()
+                / 100,
+        )
+        .unwrap();
+        assert_eq!(halfway_output.timestamp_100ns, expected_timestamp);
+        assert_eq!(halfway_output.received_at, clock.now());
+
+        clock.advance(Duration::from_millis(250));
+        assert!(engine.step(clock.now()));
+        let completed = engine.state.snapshot.transition;
+        assert_eq!(completed.logical_source, Source::Screen);
+        assert!((completed.screen_mix - 1.0).abs() < f64::EPSILON);
+        assert!(!completed.active);
+        let screen_output = latest_published(&engine.platform);
+        assert_eq!(&screen_output.pixels()[..4], &[0, 0, 0, 255]);
+        let center = ((PIPELINE_SIZE.height as usize / 2) * PIPELINE_SIZE.width as usize
+            + PIPELINE_SIZE.width as usize / 2)
+            * 4;
+        assert_eq!(
+            &screen_output.pixels()[center..center + 4],
+            &[0, 255, 0, 255]
+        );
+        assert_eq!(camera.pixels_arc().as_ref(), camera_pixels.as_ref());
+
+        let reversal_start = clock.now() + Duration::from_secs(1);
+        let mut reversal = scripted_engine(
+            running_scripted_state(reversal_start),
+            ScriptedRuntimePorts {
+                webcam: Some(Arc::clone(&camera)),
+                screen: Some(Arc::clone(&mismatching_screen)),
+                ..ScriptedRuntimePorts::default()
+            },
+            reversal_start,
+        );
+        reversal.state.last_detection = reversal_start;
+        reversal.state.snapshot.detection = stageswap_core::DetectionState::NotMatching;
+        assert!(reversal.step(reversal_start));
+        let halfway_at = reversal_start + Duration::from_millis(250);
+        reversal.state.last_detection = halfway_at;
+        assert!(reversal.step(halfway_at));
+        assert!((reversal.state.snapshot.transition.screen_mix - 0.5).abs() < 0.001);
+
+        reversal.state.snapshot.detection = stageswap_core::DetectionState::Matching;
+        reversal.state.last_detection = halfway_at;
+        let reverse_at = halfway_at + Duration::from_millis(34);
+        assert!(reversal.step(reverse_at));
+        let reversed = reversal.state.snapshot.transition;
+        assert!(reversed.reversed);
+        assert!(reversed.active);
+        assert!(reversed.screen_mix > 0.5 && reversed.screen_mix < 0.6);
+        assert_eq!(reversal.state.snapshot.actual_output, Source::Camera);
+    }
+
+    #[test]
+    fn flow_scripted_runtime_modes_and_missing_sources_use_safe_fallbacks() {
+        let start = Instant::now();
+        let camera = scripted_solid_frame(PIPELINE_SIZE, 0xff20_4080, 1, start);
+        let screen = scripted_solid_frame(PIPELINE_SIZE, 0xffff_ffff, 2, start);
+
+        let mut automatic = scripted_engine(
+            running_scripted_state(start),
+            ScriptedRuntimePorts {
+                webcam: Some(Arc::clone(&camera)),
+                screen: Some(Arc::clone(&screen)),
+                ..ScriptedRuntimePorts::default()
+            },
+            start,
+        );
+        automatic.state.last_detection = start;
+        automatic.state.snapshot.detection = stageswap_core::DetectionState::NotMatching;
+        assert!(automatic.step(start));
+        assert_eq!(automatic.state.snapshot.actual_output, Source::Screen);
+        assert!(automatic.state.snapshot.transition.active);
+        automatic.state.last_detection = start + Duration::from_millis(500);
+        assert!(automatic.step(start + Duration::from_millis(500)));
+        assert_eq!(automatic.state.snapshot.actual_output, Source::Screen);
+
+        let mut forced_camera = scripted_engine(
+            running_scripted_state(start),
+            ScriptedRuntimePorts {
+                webcam: Some(Arc::clone(&camera)),
+                screen: Some(Arc::clone(&screen)),
+                ..ScriptedRuntimePorts::default()
+            },
+            start,
+        );
+        forced_camera.state.last_detection = start;
+        forced_camera.state.snapshot.mode = OutputMode::ForceCamera;
+        forced_camera.state.snapshot.detection = stageswap_core::DetectionState::NotMatching;
+        assert!(forced_camera.step(start));
+        assert_eq!(forced_camera.state.snapshot.actual_output, Source::Camera);
+        assert_eq!(
+            latest_published(&forced_camera.platform).pixels(),
+            camera.pixels()
+        );
+
+        let mut forced_screen_without_camera = scripted_engine(
+            running_scripted_state(start),
+            ScriptedRuntimePorts {
+                webcam: None,
+                screen: Some(Arc::clone(&screen)),
+                ..ScriptedRuntimePorts::default()
+            },
+            start,
+        );
+        forced_screen_without_camera.state.last_detection = start;
+        forced_screen_without_camera.state.snapshot.mode = OutputMode::ForceScreen;
+        assert!(forced_screen_without_camera.step(start));
+        forced_screen_without_camera.state.last_detection = start + Duration::from_millis(500);
+        assert!(forced_screen_without_camera.step(start + Duration::from_millis(500)));
+        assert_eq!(
+            forced_screen_without_camera.state.snapshot.actual_output,
+            Source::Screen
+        );
+        assert_eq!(
+            latest_published(&forced_screen_without_camera.platform).pixels(),
+            screen.pixels()
+        );
+
+        let mut automatic_without_screen = scripted_engine(
+            running_scripted_state(start),
+            ScriptedRuntimePorts {
+                webcam: Some(Arc::clone(&camera)),
+                screen: None,
+                ..ScriptedRuntimePorts::default()
+            },
+            start,
+        );
+        automatic_without_screen.state.last_detection = start;
+        automatic_without_screen.state.snapshot.detection =
+            stageswap_core::DetectionState::NotMatching;
+        assert!(automatic_without_screen.step(start));
+        assert_eq!(
+            automatic_without_screen.state.snapshot.actual_output,
+            Source::Camera
+        );
+        assert_eq!(
+            latest_published(&automatic_without_screen.platform).pixels(),
+            camera.pixels()
+        );
+
+        let mut forced_camera_without_camera = scripted_engine(
+            running_scripted_state(start),
+            ScriptedRuntimePorts {
+                webcam: None,
+                screen: Some(Arc::clone(&screen)),
+                ..ScriptedRuntimePorts::default()
+            },
+            start,
+        );
+        forced_camera_without_camera.state.last_detection = start;
+        forced_camera_without_camera.state.snapshot.mode = OutputMode::ForceCamera;
+        assert!(forced_camera_without_camera.step(start));
+        assert_eq!(
+            forced_camera_without_camera.state.snapshot.actual_output,
+            Source::Placeholder
+        );
+        let placeholder = latest_published(&forced_camera_without_camera.platform);
+        assert!(
+            placeholder
+                .pixels()
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0x19, 0x17, 0x17, 0xff])
+        );
+
+        let mut stopped = running_scripted_state(start);
+        stopped.snapshot.run_state = RunState::Stopped;
+        stopped.snapshot.mode = OutputMode::ForceScreen;
+        let mut stopped_engine = scripted_engine(
+            stopped,
+            ScriptedRuntimePorts {
+                webcam: Some(Arc::clone(&camera)),
+                screen: Some(Arc::clone(&screen)),
+                ..ScriptedRuntimePorts::default()
+            },
+            start,
+        );
+        assert!(stopped_engine.step(start));
+        assert_eq!(
+            stopped_engine.state.snapshot.actual_output,
+            Source::Placeholder
+        );
+        assert_eq!(
+            latest_published(&stopped_engine.platform).pixels(),
+            stageswap_core::off_frame_pixels().as_ref()
+        );
+    }
+
+    #[test]
     fn flow_shutdown_timeout_detaches_worker_and_allows_controlled_release() {
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let worker_barrier = Arc::clone(&barrier);
@@ -3997,6 +4346,122 @@ mod tests {
         assert!(worker.is_none());
         barrier.wait();
         assert!(done_receiver.recv_timeout(Duration::from_secs(1)).is_ok());
+    }
+
+    #[test]
+    fn flow_reference_worker_queue_reports_busy_without_a_consumer() {
+        let (job_sender, _job_receiver) = std_mpsc::sync_channel(REFERENCE_JOB_CAPACITY);
+        let (_result_sender, result_receiver) = std_mpsc::sync_channel(REFERENCE_JOB_CAPACITY);
+        let (_done_sender, done_receiver) = std_mpsc::sync_channel(1);
+        let mut worker = ReferenceWorker {
+            jobs: Some(job_sender),
+            results: result_receiver,
+            stop: Arc::new(StdAtomicBool::new(false)),
+            done: done_receiver,
+            worker: None,
+        };
+        let job = || ReferenceJob {
+            generation: 1,
+            kind: ReferenceJobKind::Load {
+                path: std::path::PathBuf::from("unused-reference.png"),
+            },
+        };
+
+        for _ in 0..REFERENCE_JOB_CAPACITY {
+            assert!(worker.submit(job()).is_ok());
+        }
+        assert_eq!(
+            worker.submit(job()).unwrap_err(),
+            "reference worker is busy"
+        );
+        worker.signal_shutdown();
+        assert!(worker.stop.load(StdOrdering::Acquire));
+        assert!(worker.jobs.is_none());
+    }
+
+    #[test]
+    fn flow_reference_worker_shutdown_closes_jobs_and_joins_without_sleeping() {
+        let (job_sender, job_receiver) = std_mpsc::sync_channel(REFERENCE_JOB_CAPACITY);
+        let (result_sender, result_receiver) = std_mpsc::sync_channel(REFERENCE_JOB_CAPACITY);
+        let (done_sender, done_receiver) = std_mpsc::sync_channel(1);
+        let worker_thread = thread::spawn(move || {
+            drop(result_sender);
+            drop(job_receiver);
+            done_sender.send(()).unwrap();
+        });
+        let mut worker = ReferenceWorker {
+            jobs: Some(job_sender),
+            results: result_receiver,
+            stop: Arc::new(StdAtomicBool::new(false)),
+            done: done_receiver,
+            worker: Some(worker_thread),
+        };
+
+        worker.signal_shutdown();
+        assert!(worker.finish_shutdown(Duration::from_secs(1)));
+        assert!(worker.worker.is_none());
+    }
+
+    #[test]
+    fn flow_obsolete_reference_results_are_ignored_but_current_results_install() {
+        let start = Instant::now();
+        let frame = scripted_solid_frame(Size::new(160, 90), 0xff40_4040, 1, start);
+        let data = reference_data_from_frame(&frame).unwrap();
+        let (result_sender, result_receiver) = std_mpsc::sync_channel(REFERENCE_JOB_CAPACITY);
+        let (_done_sender, done_receiver) = std_mpsc::sync_channel(1);
+        let worker = ReferenceWorker {
+            jobs: None,
+            results: result_receiver,
+            stop: Arc::new(StdAtomicBool::new(false)),
+            done: done_receiver,
+            worker: None,
+        };
+        let mut engine = scripted_engine(
+            running_scripted_state(start),
+            ScriptedRuntimePorts::default(),
+            start,
+        );
+        engine.reference_worker = Some(worker);
+        engine.reference_generation = 2;
+
+        result_sender
+            .send(ReferenceResult {
+                generation: 1,
+                action: ReferenceAction::Load,
+                result: Ok(data),
+            })
+            .unwrap();
+        engine.poll_reference_results(start);
+        assert!(engine.state.reference.is_none());
+        assert!(
+            engine
+                .state
+                .snapshot
+                .recent_activity
+                .iter()
+                .any(|message| message.contains("Ignored obsolete reference result 1"))
+        );
+
+        let current_data = reference_data_from_frame(&frame).unwrap();
+        result_sender
+            .send(ReferenceResult {
+                generation: 2,
+                action: ReferenceAction::Load,
+                result: Ok(current_data),
+            })
+            .unwrap();
+        engine.poll_reference_results(start + Duration::from_millis(1));
+        assert!(engine.state.reference.is_some());
+        assert!(engine.state.snapshot.previews.reference.is_some());
+        assert_eq!(
+            engine
+                .state
+                .snapshot
+                .recent_activity
+                .last()
+                .map(String::as_str),
+            Some("Reference loaded")
+        );
     }
 
     #[test]
