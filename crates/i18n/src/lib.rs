@@ -131,7 +131,7 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "General" => ("Général", "General"),
         "Diagnostics" => ("Diagnostic", "Diagnóstico"),
         "Choose how StageSwap starts, stays open, and alerts you." => ("Choisissez comment StageSwap démarre, reste actif et vous avertit.", "Elige cómo se inicia StageSwap, cómo permanece activo y cómo te avisa."),
-        "Choose the webcam Zoom sees when JW Library is not playing media. Output is always 16:9." => ("Choisissez la webcam que Zoom affiche lorsqu’aucun média n’est affiché dans JW Library. La sortie est toujours au format 16:9.", "Elige la cámara web que muestra Zoom cuando JW Library no reproduce contenido multimedia. La salida siempre es 16:9."),
+        "Choose the webcam Zoom sees when JW Library is not playing media. Output is always 16:9." => ("Choisissez la webcam que Zoom voit lorsqu’aucun média n’est affiché dans JW Library. La sortie est toujours au format 16:9.", "Elige la cámara web que ve Zoom cuando JW Library no reproduce contenido multimedia. La salida siempre es 16:9."),
         "Choose the secondary screen JW Library uses for presentations. StageSwap watches it for media." => ("Choisissez l’écran secondaire utilisé par JW Library pour les présentations. StageSwap le surveille pour détecter les médias.", "Elige la pantalla secundaria que JW Library usa para las presentaciones. StageSwap la vigila para detectar contenido multimedia."),
         "Capture the screen JW Library shows when no media is playing. StageSwap compares the live screen with it to detect media." => ("Capturez l’écran affiché par JW Library lorsqu’aucun média n’est en cours de lecture. StageSwap le compare à l’écran en direct pour détecter les médias.", "Captura la pantalla que muestra JW Library cuando no se reproduce contenido multimedia. StageSwap la compara con la pantalla en directo para detectar contenido multimedia."),
         "Check video connections, troubleshoot problems, and view logs." => ("Vérifiez les connexions vidéo, résolvez les problèmes et consultez les journaux.", "Comprueba las conexiones de vídeo, soluciona problemas y consulta los registros."),
@@ -140,7 +140,7 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Could not save settings" => ("Impossible d’enregistrer les paramètres", "No se pudieron guardar los ajustes"),
 
         // General settings.
-        "StageSwap automatically switches what Zoom sees between the webcam and JW Library presentations. When the secondary screen matches the reference image, Zoom sees the webcam. When media is detected, Zoom sees the secondary screen. When no media is detected again, Zoom returns to the webcam." => ("StageSwap alterne automatiquement ce que Zoom affiche entre la webcam et les présentations JW Library. Lorsque l’écran secondaire correspond à l’image de référence, Zoom affiche la webcam. Lorsqu’un média est détecté, Zoom affiche l’écran secondaire. Dès qu’aucun média n’est détecté, Zoom revient à la webcam.", "StageSwap cambia automáticamente lo que muestra Zoom entre la cámara web y las presentaciones de JW Library. Cuando la pantalla secundaria coincide con la imagen de referencia, Zoom muestra la cámara web. Cuando se detecta contenido multimedia, Zoom muestra la pantalla secundaria. Cuando deja de detectarse contenido multimedia, Zoom vuelve a la cámara web."),
+        "StageSwap automatically switches what Zoom sees between the webcam and JW Library presentations. When the secondary screen matches the reference image, Zoom sees the webcam. When media is detected, Zoom sees the secondary screen. When no media is detected again, Zoom returns to the webcam." => ("StageSwap alterne automatiquement ce que Zoom voit entre la webcam et les présentations JW Library. Lorsque l’écran secondaire correspond à l’image de référence, Zoom voit la webcam. Lorsqu’un média est détecté, Zoom voit l’écran secondaire. Dès qu’aucun média n’est détecté, Zoom revient à la webcam.", "StageSwap cambia automáticamente lo que ve Zoom entre la cámara web y las presentaciones de JW Library. Cuando la pantalla secundaria coincide con la imagen de referencia, Zoom ve la cámara web. Cuando se detecta contenido multimedia, Zoom ve la pantalla secundaria. Cuando deja de detectarse contenido multimedia, Zoom vuelve a la cámara web."),
         "StageSwap is an independent, unofficial project and is not affiliated with or endorsed by the publisher of JW Library. The name JW Library is used only to describe compatibility." => ("StageSwap est un projet indépendant et non officiel. Il n’est ni affilié à l’éditeur de JW Library ni approuvé par celui-ci. Le nom JW Library est utilisé uniquement pour décrire la compatibilité.", "StageSwap es un proyecto independiente y no oficial. No está afiliado ni respaldado por el editor de JW Library. El nombre JW Library se usa únicamente para describir la compatibilidad."),
         "Startup" => ("Démarrage", "Inicio"),
         "System tray" => ("Zone de notification", "Área de notificación"),
@@ -315,12 +315,12 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Set up later" => ("Configurer plus tard", "Configurar más tarde"),
         "Start StageSwap" => ("Démarrer StageSwap", "Iniciar StageSwap"),
         "JW Library to Zoom" => ("JW Library vers Zoom", "De JW Library a Zoom"),
-        "Automatically switch what Zoom sees between the webcam and JW Library presentations." => ("Alternez automatiquement ce que Zoom affiche entre la webcam et les présentations JW Library.", "Cambia automáticamente lo que muestra Zoom entre la cámara web y las presentaciones de JW Library."),
-        "No media in JW Library → Zoom sees the webcam" => ("Aucun média affiché dans JW Library → Zoom affiche la webcam", "Sin contenido multimedia en JW Library → Zoom muestra la cámara web"),
-        "Media detected in JW Library → Zoom sees the secondary screen" => ("Média détecté dans JW Library → Zoom affiche l’écran secondaire", "Contenido multimedia detectado en JW Library → Zoom muestra la pantalla secundaria"),
+        "Automatically switch what Zoom sees between the webcam and JW Library presentations." => ("Alternez automatiquement ce que Zoom voit entre la webcam et les présentations JW Library.", "Cambia automáticamente lo que ve Zoom entre la cámara web y las presentaciones de JW Library."),
+        "No media in JW Library → Zoom sees the webcam" => ("Aucun média affiché dans JW Library → Zoom voit la webcam", "Sin contenido multimedia en JW Library → Zoom ve la cámara web"),
+        "Media detected in JW Library → Zoom sees the secondary screen" => ("Média détecté dans JW Library → Zoom voit l’écran secondaire", "Contenido multimedia detectado en JW Library → Zoom ve la pantalla secundaria"),
         "StageSwap sends the webcam or JW Library screen to Zoom through one virtual camera." => ("StageSwap transmet la webcam ou l’écran JW Library à Zoom via une seule caméra virtuelle.", "StageSwap envía la cámara web o la pantalla de JW Library a Zoom mediante una única cámara virtual."),
         "Choose your webcam" => ("Choisissez votre webcam", "Elige tu cámara web"),
-        "Choose the webcam Zoom should see when JW Library is not playing media." => ("Choisissez la webcam que Zoom doit afficher lorsqu’aucun média n’est affiché dans JW Library.", "Elige la cámara web que Zoom debe mostrar cuando JW Library no reproduzca contenido multimedia."),
+        "Choose the webcam Zoom should see when JW Library is not playing media." => ("Choisissez la webcam que Zoom doit voir lorsqu’aucun média n’est affiché dans JW Library.", "Elige la cámara web que Zoom debe ver cuando JW Library no reproduzca contenido multimedia."),
         "Webcam preview" => ("Aperçu de la webcam", "Vista previa de la cámara web"),
         "No webcam found. Connect a webcam, then refresh the list." => ("Aucune webcam détectée. Connectez une webcam, puis actualisez la liste.", "No se encontró ninguna cámara web. Conecta una y actualiza la lista."),
         "This webcam is unavailable. Choose another one or refresh the list." => ("Cette webcam est indisponible. Choisissez-en une autre ou actualisez la liste.", "Esta cámara web no está disponible. Elige otra o actualiza la lista."),
@@ -539,7 +539,14 @@ mod tests {
                 Locale::Spanish,
                 "Media detected in JW Library → Zoom sees the secondary screen"
             ),
-            "Contenido multimedia detectado en JW Library → Zoom muestra la pantalla secundaria"
+            "Contenido multimedia detectado en JW Library → Zoom ve la pantalla secundaria"
+        );
+        assert_eq!(
+            text(
+                Locale::French,
+                "Media detected in JW Library → Zoom sees the secondary screen"
+            ),
+            "Média détecté dans JW Library → Zoom voit l’écran secondaire"
         );
         assert_eq!(
             text(Locale::French, "Open guided setup"),
