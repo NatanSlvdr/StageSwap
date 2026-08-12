@@ -77,7 +77,7 @@ impl SetupStep {
             }
             Self::Screen => "Choose the secondary screen JW Library uses for presentations.",
             Self::Reference => {
-                "Show the screen JW Library shows when no media is playing, then capture the live image below."
+                "Set the reference image StageSwap uses to know when to show the JW Library screen in Zoom."
             }
             Self::Ready => "Review the setup status below, then start automatic switching.",
         }

@@ -48,10 +48,8 @@ const SETUP_SIGNAL_WHITE: Color32 = Color32::from_rgb(245, 247, 250);
 const REFERENCE_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
 const COMMAND_BUSY_BANNER_DURATION: Duration = Duration::from_secs(5);
 const SETUP_REFERENCE_FLASH_DURATION: Duration = Duration::from_millis(120);
-const SETUP_REFERENCE_RAIL_WIDTH: f32 = 280.0;
 const SETUP_REFERENCE_CARD_HEIGHT: f32 = 262.0;
 const SETUP_REFERENCE_COLUMN_GAP: f32 = 16.0;
-const SETUP_REFERENCE_STACK_BREAKPOINT: f32 = 760.0;
 const REFERENCE_DIALOG_WIDTH: f32 = 720.0;
 const REFERENCE_DIALOG_STACK_BREAKPOINT: f32 = 600.0;
 const DISCO_GESTURE_WINDOW: Duration = Duration::from_secs(3);
@@ -1699,13 +1697,20 @@ impl SwitcherApp {
         };
         let reference_requires_decision = session.step == SetupStep::Reference
             && setup_reference_requires_decision(self.setup_reference_capture);
+        let reference_available = self.snapshot().previews.reference.is_some()
+            || matches!(
+                self.setup_reference_capture,
+                SetupReferenceCaptureState::Confirmed
+            );
+        let reference_capture_required =
+            session.step == SetupStep::Reference && !reference_available;
         let moves_forward = matches!(action, SetupAction::Next)
             || matches!(
                 action,
                 SetupAction::GoTo(destination)
                     if destination.number() > SetupStep::Reference.number()
             );
-        if reference_requires_decision && moves_forward {
+        if (reference_requires_decision || reference_capture_required) && moves_forward {
             return;
         }
         let leaves_reference = session.step == SetupStep::Reference
@@ -2177,8 +2182,14 @@ impl SwitcherApp {
         let snapshot = self.snapshot();
         self.update_setup_reference_capture(&snapshot);
         let textures = self.setup_example_textures(context);
+        let reference_available = snapshot.previews.reference.is_some()
+            || matches!(
+                self.setup_reference_capture,
+                SetupReferenceCaptureState::Confirmed
+            );
         let next_enabled = step != SetupStep::Reference
-            || !setup_reference_requires_decision(self.setup_reference_capture);
+            || (reference_available
+                && !setup_reference_requires_decision(self.setup_reference_capture));
         let mut action = if transition_active {
             None
         } else {
@@ -2596,247 +2607,86 @@ impl SwitcherApp {
         snapshot: &AppSnapshot,
         textures: &SetupExampleTextures,
     ) -> Option<SetupAction> {
-        let group_width = ui.available_width().min(920.0);
-        let stacked = group_width < SETUP_REFERENCE_STACK_BREAKPOINT;
-        let live_width = if stacked {
-            group_width
-        } else {
-            group_width - SETUP_REFERENCE_COLUMN_GAP - SETUP_REFERENCE_RAIL_WIDTH
-        };
-        let rail_width = if stacked {
-            group_width
-        } else {
-            SETUP_REFERENCE_RAIL_WIDTH
-        };
-        let confirmed = matches!(
-            self.setup_reference_capture,
-            SetupReferenceCaptureState::Confirmed
-        ) || matches!(
-            self.setup_reference_capture,
-            SetupReferenceCaptureState::Idle
-        ) && snapshot.previews.reference.is_some();
-        let comparison_visible = confirmed;
         let mut action = None;
+        let reference_available = snapshot.previews.reference.is_some();
+        let screen_selected = snapshot.selected_monitor.is_some();
+        let screen_ready = screen_selected && snapshot.previews.screen.is_some();
+        let screen_link_label = if screen_selected {
+            "Change display"
+        } else {
+            "Choose a display"
+        };
 
         ui.allocate_ui_with_layout(
             egui::vec2(ui.available_width(), 1.0),
             egui::Layout::top_down(egui::Align::Center),
             |ui| {
-                ui.set_width(group_width);
-                if stacked {
-                    action = if comparison_visible {
-                        self.setup_reference_review_surface(ui, snapshot, live_width)
-                    } else {
-                        self.setup_reference_capture_surface(ui, snapshot, live_width)
-                    };
-                    ui.add_space(SETUP_REFERENCE_COLUMN_GAP);
-                    self.setup_reference_example_rail(ui, textures, rail_width);
-                } else {
-                    ui.spacing_mut().item_spacing.x = SETUP_REFERENCE_COLUMN_GAP;
-                    ui.horizontal_top(|ui| {
-                        let live = ui.allocate_ui_with_layout(
-                            egui::vec2(live_width, 1.0),
-                            egui::Layout::top_down(egui::Align::LEFT),
+                ui.set_width(SETUP_HARDWARE_PREVIEW_WIDTH);
+                setup_reference_example_thumbnail(
+                    ui,
+                    textures.reference.id(),
+                    egui::vec2(
+                        SETUP_HARDWARE_PREVIEW_WIDTH,
+                        SETUP_HARDWARE_PREVIEW_WIDTH / WINDOW_ASPECT_RATIO,
+                    ),
+                );
+                ui.add_space(7.0);
+                icon_text(
+                    ui,
+                    UiIcon::Image,
+                    "Example reference image",
+                    Color32::from_rgb(181, 188, 200),
+                    false,
+                );
+                ui.add_space(13.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 18.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        setup_control_label(ui, UiIcon::Capture, "Reference image", SETTINGS_BLUE);
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
-                                ui.set_width(live_width);
-                                action = if comparison_visible {
-                                    self.setup_reference_review_surface(ui, snapshot, live_width)
-                                } else {
-                                    self.setup_reference_capture_surface(ui, snapshot, live_width)
-                                };
+                                if setup_link(ui, screen_link_label) {
+                                    action = Some(SetupAction::GoTo(SetupStep::Screen));
+                                }
                             },
                         );
-                        let rail_height = live.response.rect.height();
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(rail_width, rail_height),
-                            egui::Layout::top_down(egui::Align::LEFT),
-                            |ui| {
-                                ui.set_width(rail_width);
-                                ui.add_space(setup_reference_card_top_offset(rail_height));
-                                self.setup_reference_example_rail(ui, textures, rail_width);
-                            },
-                        );
-                    });
+                    },
+                );
+                ui.add_space(6.0);
+                let capture_label = setup_reference_capture_label(reference_available);
+                let capture_enabled = screen_ready
+                    && !setup_reference_requires_decision(self.setup_reference_capture);
+                let response = ui
+                    .add_enabled_ui(capture_enabled, |ui| {
+                        accent_icon_button(
+                            ui,
+                            UiIcon::Capture,
+                            capture_label,
+                            egui::vec2(ui.available_width(), 32.0),
+                            SETTINGS_BLUE,
+                        )
+                    })
+                    .inner;
+                if response.clicked() {
+                    self.begin_reference_capture();
+                }
+                if matches!(
+                    self.setup_reference_capture,
+                    SetupReferenceCaptureState::CaptureFailed
+                ) {
+                    ui.add_space(10.0);
+                    setup_message(
+                        ui,
+                        "StageSwap couldn’t capture the screen. Check the screen preview and try again.",
+                        LIVE_RED,
+                    );
                 }
             },
         );
 
         action
-    }
-
-    fn setup_reference_capture_surface(
-        &mut self,
-        ui: &mut egui::Ui,
-        snapshot: &AppSnapshot,
-        width: f32,
-    ) -> Option<SetupAction> {
-        let screen_selected = snapshot.selected_monitor.is_some();
-        let screen_frame = snapshot.previews.screen.as_ref();
-        let reference_frame = snapshot.previews.reference.as_ref();
-        let pending = matches!(
-            self.setup_reference_capture,
-            SetupReferenceCaptureState::CapturingCandidate { .. }
-        );
-        let failed = matches!(
-            self.setup_reference_capture,
-            SetupReferenceCaptureState::CaptureFailed
-        );
-        let display_name = snapshot
-            .selected_monitor
-            .as_ref()
-            .map(|monitor| monitor.label.clone())
-            .unwrap_or_else(|| tr(ui, "No display selected").into_owned());
-        let mut go_to_screen = false;
-
-        ui.set_width(width);
-        ui.horizontal(|ui| {
-            setup_control_label(ui, UiIcon::Monitor, "Secondary screen", SETTINGS_BLUE);
-            if screen_selected {
-                setup_live_badge(ui);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    if icon_button(
-                        ui,
-                        UiIcon::Monitor,
-                        "Change display",
-                        egui::vec2(132.0, 28.0),
-                        false,
-                        false,
-                    )
-                    .clicked()
-                    {
-                        go_to_screen = true;
-                    }
-                });
-            }
-        });
-        ui.add(
-            egui::Label::new(RichText::new(display_name).size(11.0).color(mix_color(
-                ui.visuals().panel_fill,
-                SETUP_SIGNAL_WHITE,
-                0.58,
-            )))
-            .truncate(),
-        );
-        ui.add_space(6.0);
-
-        let preview_height = width / WINDOW_ASPECT_RATIO;
-        let preview_rect = self.preview(
-            ui,
-            PreviewKind::Screen,
-            screen_frame,
-            [width, preview_height],
-            snapshot.actual_output,
-            PreviewOptions::settings("No secondary screen frame"),
-        );
-        if pending {
-            ui.painter().rect_stroke(
-                preview_rect,
-                8,
-                Stroke::new(3.0, SETTINGS_BLUE),
-                StrokeKind::Inside,
-            );
-        }
-
-        ui.add_space(10.0);
-        if !screen_selected {
-            if accent_icon_button(
-                ui,
-                UiIcon::Monitor,
-                "Choose a display",
-                egui::vec2(width, 40.0),
-                SETTINGS_BLUE,
-            )
-            .clicked()
-            {
-                go_to_screen = true;
-            }
-            ui.add_space(4.0);
-            setup_compact_state(
-                ui,
-                UiIcon::Unavailable,
-                "Choose the secondary screen before capturing a reference image.",
-                TRANSITION_AMBER,
-            );
-        } else if pending {
-            setup_pending_capture_button(ui, "Capturing…", egui::vec2(width, 40.0));
-        } else {
-            let label = setup_reference_capture_label(reference_frame.is_some());
-            let response = ui
-                .add_enabled_ui(screen_frame.is_some(), |ui| {
-                    accent_icon_button(
-                        ui,
-                        UiIcon::Capture,
-                        label,
-                        egui::vec2(width, 40.0),
-                        SETTINGS_BLUE,
-                    )
-                })
-                .inner;
-            if response.clicked() {
-                self.begin_reference_capture();
-            }
-            if screen_frame.is_none() {
-                ui.add_space(4.0);
-                setup_compact_state(
-                    ui,
-                    UiIcon::Unavailable,
-                    "No live display frame yet. Check the connection or choose another display.",
-                    TRANSITION_AMBER,
-                );
-            } else if failed {
-                ui.add_space(4.0);
-                setup_compact_state(
-                    ui,
-                    UiIcon::Error,
-                    "StageSwap couldn’t capture the screen. Check the screen preview and try again.",
-                    LIVE_RED,
-                );
-            }
-        }
-
-        go_to_screen.then_some(SetupAction::GoTo(SetupStep::Screen))
-    }
-
-    fn setup_reference_review_surface(
-        &mut self,
-        ui: &mut egui::Ui,
-        snapshot: &AppSnapshot,
-        width: f32,
-    ) -> Option<SetupAction> {
-        let frame = snapshot.previews.reference.as_ref();
-        let tone = ACTIVE_GREEN;
-        ui.set_width(width);
-        ui.horizontal(|ui| {
-            setup_control_label(ui, UiIcon::CheckCircle, "Saved reference image", tone);
-            setup_reference_state_badge(ui, "CONFIRMED", tone);
-        });
-        ui.add_space(6.0);
-        let preview_height = width / WINDOW_ASPECT_RATIO;
-        let preview_rect = self.preview(
-            ui,
-            PreviewKind::Reference,
-            frame,
-            [width, preview_height],
-            snapshot.actual_output,
-            PreviewOptions::settings("No captured image available for review."),
-        );
-        ui.painter()
-            .rect_stroke(preview_rect, 8, Stroke::new(3.0, tone), StrokeKind::Inside);
-
-        ui.add_space(10.0);
-        if icon_button(
-            ui,
-            UiIcon::Refresh,
-            "Capture again",
-            egui::vec2(width, 40.0),
-            false,
-            false,
-        )
-        .clicked()
-        {
-            self.begin_reference_capture();
-        }
-        None
     }
 
     fn setup_reference_example_rail(
@@ -4461,7 +4311,13 @@ impl SwitcherApp {
                 self.setup_reference_capture,
                 SetupReferenceCaptureState::Confirmed
             ) {
+                let advance_setup = self
+                    .setup_session
+                    .is_some_and(|session| session.step == SetupStep::Reference);
                 self.dismiss_dialog();
+                if advance_setup {
+                    self.apply_setup_action(SetupAction::Next);
+                }
                 return;
             }
             Some(snapshot)
@@ -5822,10 +5678,6 @@ fn setup_reference_flash_alpha(elapsed: Duration, animations_enabled: bool) -> f
     .clamp(0.0, 1.0)
 }
 
-fn setup_reference_card_top_offset(column_height: f32) -> f32 {
-    ((column_height - SETUP_REFERENCE_CARD_HEIGHT) / 2.0).max(0.0)
-}
-
 const fn setup_reference_requires_decision(state: SetupReferenceCaptureState) -> bool {
     matches!(
         state,
@@ -6656,33 +6508,6 @@ fn setup_capture_help(ui: &mut egui::Ui, text: &str) {
     );
 }
 
-fn setup_live_badge(ui: &mut egui::Ui) {
-    let text = tr(ui, "LIVE");
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.into_owned(), FontId::monospace(9.5), LIVE_RED);
-    let size = galley.size() + egui::vec2(17.0, 6.0);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter()
-        .rect_filled(rect, 4, LIVE_RED.gamma_multiply(0.12));
-    ui.painter().rect_stroke(
-        rect,
-        4,
-        Stroke::new(1.0, LIVE_RED.gamma_multiply(0.34)),
-        StrokeKind::Inside,
-    );
-    ui.painter().circle_filled(
-        Pos2::new(rect.left() + 7.0, rect.center().y),
-        2.25,
-        LIVE_RED,
-    );
-    ui.painter().galley(
-        Pos2::new(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0),
-        galley,
-        LIVE_RED,
-    );
-}
-
 fn setup_compact_state(ui: &mut egui::Ui, icon: UiIcon, text: &str, color: Color32) {
     let available = ui.available_width().max(1.0);
     let text = tr(ui, text);
@@ -6794,6 +6619,21 @@ fn setup_message(ui: &mut egui::Ui, text: &str, color: Color32) {
         ),
     );
     ui.painter().rect_filled(stripe, 2, color);
+}
+
+fn setup_link(ui: &mut egui::Ui, text: &str) -> bool {
+    let text = tr(ui, text);
+    ui.add(
+        egui::Label::new(
+            RichText::new(text.as_ref())
+                .size(11.0)
+                .underline()
+                .color(SETTINGS_BLUE),
+        )
+        .sense(Sense::click()),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
+    .clicked()
 }
 
 fn setup_warning_callout(ui: &mut egui::Ui, width: f32, title: &str, text: &str) {
@@ -9830,6 +9670,7 @@ mod tests {
             confirmed.previews.reference.as_ref().unwrap(),
             &candidate
         ));
+        app.setup_animations_enabled = false;
         let context = egui::Context::default();
         let _ = context.run_ui(egui::RawInput::default(), |_ui| app.dialog(&context));
         assert!(app.active_dialog.is_none());
@@ -9837,14 +9678,34 @@ mod tests {
             app.setup_reference_capture,
             SetupReferenceCaptureState::Confirmed
         ));
-
-        app.setup_animations_enabled = false;
-        app.setup_session = Some(SetupSession::preview(SetupStep::Reference));
-        app.apply_setup_action(SetupAction::Next);
         assert_eq!(
             app.setup_session.map(|session| session.step),
             Some(SetupStep::Ready)
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn flow_reference_confirmation_does_not_advance_from_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            ui_preview_config(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        )
+        .with_ui_preview(UiPreviewRequest {
+            target: UiPreviewTarget::Settings(SettingsTab::Matching),
+        });
+        app.setup_reference_capture = SetupReferenceCaptureState::Confirmed;
+        app.open_dialog(AppDialogKind::ReferenceCapture);
+
+        let context = egui::Context::default();
+        let _ = context.run_ui(egui::RawInput::default(), |_ui| app.dialog(&context));
+
+        assert!(app.active_dialog.is_none());
+        assert!(app.setup_session.is_none());
+        assert!(matches!(app.view, AppView::Settings));
+        assert_eq!(app.settings_tab, SettingsTab::Matching);
     }
 
     #[test]
@@ -10311,6 +10172,26 @@ mod tests {
             !SetupStateStore::new(directory.path())
                 .initialize(false)
                 .show_setup_guide
+        );
+    }
+
+    #[test]
+    fn flow_setup_reference_step_requires_reference_before_continue() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            AppConfig::default(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        );
+        app.setup_animations_enabled = false;
+        app.setup_session = Some(SetupSession::preview(SetupStep::Reference));
+        app.setup_reference_capture = SetupReferenceCaptureState::Idle;
+
+        app.apply_setup_action(SetupAction::Next);
+
+        assert_eq!(
+            app.setup_session.map(|session| session.step),
+            Some(SetupStep::Reference)
         );
     }
 
