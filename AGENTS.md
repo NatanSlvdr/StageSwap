@@ -12,7 +12,8 @@ StageSwap is a local-only, native Windows 11 x64 virtual camera for automatic Zo
 - Reference detection runs every 250 ms with five-match/three-mismatch debounce.
 - Monitor selection is restored by friendly label with secondary-display fallback. Reference discovery requires the same winning display twice, does not pause output, runs at startup, when Settings opens, after reference changes, and every 30 seconds by default, and can be limited to explicit rescans.
 - Independent black-or-unavailable recovery samples only the selected capture every 30 seconds. Two consecutive near-black or missing-frame checks restart screen capture; the setting can be disabled without changing reference discovery.
-- Composition uses CPU aspect-fit, black letterboxing, configurable missing-source fallback, and a reversible 500 ms blend.
+- Optional still-image PIP compares exact 160×90 grayscale samples every 250 ms while Auto is showing non-reference content. It is disabled by default, supports 30/45/60/120/300-second delays, requires both sources, treats paused video as still content, and never overrides forced modes.
+- Composition uses CPU aspect-fit, black letterboxing, configurable missing-source fallback, a reversible 500 ms blend, and a reversible 320×180 bottom-left PIP with 16 px margins and 12 px rounded corners.
 - The virtual camera prefers RGB32 1280×720 at 30 fps. Selectable NV12 720p is retained for Windows Camera and Zoom compatibility; 1080p is intentionally excluded.
 - Output uses deadline-based 30 fps pacing. Visible dashboard previews use latest-only conversion workers and display-sized textures. FPS is runtime-owned and remains meaningful while the dashboard is hidden.
 - While automation is stopped, a fixed black screen with the centered StageSwap icon is published at 30 fps. The virtual camera generates the same frame whenever the app publisher is absent.

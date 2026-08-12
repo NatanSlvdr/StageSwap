@@ -34,8 +34,8 @@ The internal and published contract is immutable CPU BGRA at 1280×720 and 30 fp
 1. Windows Graphics Capture copies each transient D3D texture into a staging texture and then into a CPU `Frame`.
 2. Media Foundation ranks progressive RGB32, NV12, YUY2, and MJPEG webcam modes. It prefers RGB32 1280×720 at 30 fps, honors actual row pitch, and normalizes compatible input into the fixed frame contract.
 3. Optional webcam cropping uses the native aspect ratio to create a centered 16:9 crop. Native 16:9 and unknown-aspect input stays unchanged. The crop feeds both preview and output.
-4. Detection derives a 160×90 grayscale image from the screen every 250 ms. Five matches select the webcam; three mismatches select the screen.
-5. Composition uses aspect-fit scaling, black letterboxing, configurable missing-source fallback, and a reversible 500 ms blend.
+4. Detection derives a 160×90 grayscale image from the screen every 250 ms. Five matches select the webcam; three mismatches select the screen. When enabled, a second detector times exact, consecutive non-reference thumbnails; motion, reference return, near-black input, source loss, or manual mode resets it.
+5. Composition uses aspect-fit scaling, black letterboxing, configurable missing-source fallback, and reversible 500 ms source and PIP blends. Still-image PIP uses a rounded 320×180 bottom-left inset with a 16 px margin and supports either source as the main view.
 6. A monotonic deadline pacer publishes at 30 fps without catch-up bursts or accumulated drift.
 
 ## Runtime ownership and backpressure
@@ -87,6 +87,8 @@ The Updates page checks the public GitHub Releases API once at startup and on de
 ## Persistence, diagnostics, and administration
 
 Configuration schema 1, `reference.png`, update-notification state, and JSONL logs live below `%LocalAppData%\StageSwap`. Configuration and reference replacement use validation, backup, writable flushes, and atomic replacement. Logs retain errors, warnings, recovery outcomes, and infrequent lifecycle states for 14 days by default. Verbose logging adds recurring telemetry only for new activity.
+
+Schema 1 stores the optional still-image PIP enablement, one of five validated delays, and the selected main view. Missing fields retain the disabled, 45-second, webcam-main defaults.
 
 A concealed per-user admin profile can store a validated configuration, optional immutable reference snapshot, and an independently controlled auto-restore policy. Startup validates the complete baseline before replacement and rolls back the reference if configuration replacement fails. Invalid admin data fails open with a warning and leaves the working configuration unchanged.
 

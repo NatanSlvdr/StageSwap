@@ -1,6 +1,6 @@
 use crate::{
-    AppConfig, DetectionState, DeviceState, Frame, MonitorDescriptor, OutputMode, Source,
-    SourceAvailability, TransitionState, VideoDeviceChoice,
+    AppConfig, DetectionState, DeviceState, Frame, MonitorDescriptor, OutputLayout, OutputMode,
+    Source, SourceAvailability, TransitionState, VideoDeviceChoice,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -156,6 +156,9 @@ pub struct AppSnapshot {
     pub detection: DetectionState,
     pub automatic_target: Source,
     pub actual_output: Source,
+    pub output_layout: OutputLayout,
+    pub still_image_pip_active: bool,
+    pub still_image_pip_mix: f64,
     pub transition: TransitionState,
     pub availability: SourceAvailability,
     pub webcam_state: DeviceState,

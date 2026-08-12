@@ -3,7 +3,8 @@ use crate::{CommandDispatch, RuntimeClock, SystemRuntimeClock};
 use stageswap_core::{
     AppConfig, AppSnapshot, CAPTURE_FRAME_POOL_CAPACITY, Command, DebouncedDetector,
     DetectorSettings, DeviceState, Frame, FrameBufferPool, FrameCompositor, FrameMetadata,
-    FramePacer, GrayImage, PIPELINE_FPS, PIPELINE_SIZE, RunState, Size, Source, SourceAvailability,
+    FramePacer, GrayImage, OutputLayout, OutputMode, PIPELINE_FPS, PIPELINE_SIZE, PipComposition,
+    RunState, Size, Source, SourceAvailability, StillImageDetector, StillImagePipLayout,
     TransitionController, bgra_to_gray, decide, image_similarity, off_frame, resize_bgra_to_gray,
     resize_bilinear,
 };
@@ -125,9 +126,7 @@ const WEBCAM_RECOVERY_DELAYS: [Duration; 3] = [
 const TARGET_WEBCAM_ASPECT_RATIO: f64 = 16.0 / 9.0;
 #[cfg(any(windows, test))]
 const WEBCAM_ASPECT_RATIO_TOLERANCE: f64 = 0.01;
-#[cfg(any(windows, test))]
 const BLACK_LUMA_THRESHOLD: u8 = 16;
-#[cfg(any(windows, test))]
 const BLACK_PIXEL_PERCENT: usize = 99;
 #[cfg(any(windows, test))]
 const SCREEN_CAPTURE_FAILURE_CONFIRMATIONS: u8 = 2;
@@ -341,6 +340,7 @@ impl RuntimeHandle {
         };
         initial_snapshot.actual_output = Source::Placeholder;
         initial_snapshot.automatic_target = Source::Placeholder;
+        initial_snapshot.output_layout = OutputLayout::Placeholder;
         initial_snapshot.transition = transition.request(Source::Placeholder, now);
         initial_snapshot.previews.final_output = Some(Arc::new(off_frame(FrameMetadata {
             sequence: 1,
@@ -541,6 +541,10 @@ fn is_nearly_black(frame: &Frame) -> bool {
     let Some(thumbnail) = gray_thumbnail(frame) else {
         return false;
     };
+    gray_image_is_nearly_black(&thumbnail)
+}
+
+fn gray_image_is_nearly_black(thumbnail: &GrayImage) -> bool {
     let pixels = &thumbnail.pixels;
     let black_pixels = pixels
         .iter()
@@ -715,6 +719,50 @@ impl WarningRegistry {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ReversibleMix {
+    duration: Duration,
+    mix: f64,
+    target: f64,
+    last_update: Option<Instant>,
+}
+
+impl ReversibleMix {
+    fn new(duration: Duration) -> Self {
+        Self {
+            duration,
+            mix: 0.0,
+            target: 0.0,
+            last_update: None,
+        }
+    }
+
+    fn advance(&mut self, now: Instant) {
+        let Some(previous) = self.last_update.replace(now) else {
+            return;
+        };
+        let delta =
+            now.saturating_duration_since(previous).as_secs_f64() / self.duration.as_secs_f64();
+        if self.target > self.mix {
+            self.mix = (self.mix + delta).min(self.target);
+        } else {
+            self.mix = (self.mix - delta).max(self.target);
+        }
+    }
+
+    fn request(&mut self, active: bool, now: Instant) -> f64 {
+        self.advance(now);
+        self.target = if active { 1.0 } else { 0.0 };
+        self.mix
+    }
+
+    fn reset(&mut self, now: Instant) {
+        self.mix = 0.0;
+        self.target = 0.0;
+        self.last_update = Some(now);
+    }
+}
+
 struct RuntimeState {
     config: AppConfig,
     snapshot: AppSnapshot,
@@ -731,6 +779,9 @@ struct RuntimeState {
     started_at: Instant,
     reference: Option<GrayImage>,
     detector: DebouncedDetector,
+    still_image_detector: StillImageDetector,
+    pip_transition: ReversibleMix,
+    pip_render_layout: StillImagePipLayout,
     last_detection: Instant,
     #[cfg(windows)]
     pending_reference_capture: Option<Arc<Frame>>,
@@ -800,6 +851,7 @@ impl RuntimeState {
 
     fn new_at(config: AppConfig, now: Instant) -> Self {
         let mode = config.output_mode;
+        let pip_render_layout = config.still_image_pip_layout;
         let reference = None;
         let reference_preview = None;
         let detector = DebouncedDetector::new(DetectorSettings {
@@ -815,6 +867,7 @@ impl RuntimeState {
         };
         snapshot.actual_output = Source::Placeholder;
         snapshot.automatic_target = Source::Placeholder;
+        snapshot.output_layout = OutputLayout::Placeholder;
         snapshot.transition = transition.request(Source::Placeholder, now);
         snapshot.previews.final_output = Some(Arc::new(off_frame(FrameMetadata {
             sequence,
@@ -838,6 +891,9 @@ impl RuntimeState {
             started_at: now,
             reference,
             detector,
+            still_image_detector: StillImageDetector::default(),
+            pip_transition: ReversibleMix::new(Duration::from_millis(500)),
+            pip_render_layout,
             last_detection: now - Duration::from_millis(250),
             #[cfg(windows)]
             pending_reference_capture: None,
@@ -850,6 +906,14 @@ impl RuntimeState {
 
     fn record(&mut self, message: impl Into<String>) {
         self.record_with_verbosity(ActivityVerbosity::Normal, message);
+    }
+
+    fn reset_still_image_detection(&mut self) {
+        let was_active = self.still_image_detector.active();
+        self.still_image_detector.reset();
+        if was_active {
+            self.record("Still-image picture-in-picture deactivated");
+        }
     }
 
     #[cfg(any(windows, test))]
@@ -986,6 +1050,7 @@ impl RuntimeState {
         match command {
             Command::Start => {
                 self.snapshot.run_state = RunState::Running;
+                self.reset_still_image_detection();
                 self.record_command(record_activity, "Automation started");
             }
             Command::Stop => {
@@ -1005,6 +1070,9 @@ impl RuntimeState {
                 }
             }
             Command::SetMode(mode) => {
+                if self.snapshot.mode != mode {
+                    self.reset_still_image_detection();
+                }
                 self.snapshot.mode = mode;
                 self.config.output_mode = mode;
                 self.record_command(record_activity, format!("Output mode changed to {mode:?}"));
@@ -1014,12 +1082,21 @@ impl RuntimeState {
                     self.config.similarity_threshold != config.similarity_threshold;
                 let reference_path_changed =
                     self.config.reference_image_path != config.reference_image_path;
+                let pip_settings_changed = self.config.still_image_pip_enabled
+                    != config.still_image_pip_enabled
+                    || self.config.still_image_pip_delay_seconds
+                        != config.still_image_pip_delay_seconds
+                    || self.config.still_image_pip_layout != config.still_image_pip_layout;
                 self.config = *config;
                 self.snapshot.mode = self.config.output_mode;
                 self.snapshot.selected_video_device_id =
                     self.config.selected_video_device_id.clone();
                 if reference_path_changed {
                     self.discard_reference_candidate();
+                    self.reset_still_image_detection();
+                }
+                if pip_settings_changed {
+                    self.reset_still_image_detection();
                 }
                 if threshold_changed {
                     self.detector = DebouncedDetector::new(DetectorSettings {
@@ -1084,6 +1161,11 @@ impl RuntimeState {
         let timestamp = now.saturating_duration_since(self.started_at).as_nanos() / 100;
         self.snapshot.actual_output = Source::Placeholder;
         self.snapshot.automatic_target = Source::Placeholder;
+        self.snapshot.output_layout = OutputLayout::Placeholder;
+        self.snapshot.still_image_pip_active = false;
+        self.snapshot.still_image_pip_mix = 0.0;
+        self.reset_still_image_detection();
+        self.pip_transition.reset(now);
         self.snapshot.transition = self.transition.request(Source::Placeholder, now);
         self.snapshot.previews.final_output = Some(Arc::new(off_frame(FrameMetadata {
             sequence: self.sequence,
@@ -1103,18 +1185,56 @@ impl RuntimeState {
             self.snapshot.availability,
         );
         self.snapshot.automatic_target = decision.automatic_target;
-        if self.snapshot.actual_output != decision.desired_output {
-            self.snapshot.transition = self.transition.request(decision.desired_output, now);
-            self.snapshot.actual_output = decision.desired_output;
+        let pip_target = self.still_image_detector.active()
+            && self.snapshot.mode == OutputMode::Automatic
+            && self.config.still_image_pip_enabled
+            && self.snapshot.availability.camera_ready
+            && self.snapshot.availability.screen_ready;
+        if pip_target && self.pip_transition.target == 0.0 {
+            self.pip_render_layout = self.config.still_image_pip_layout;
+        }
+        let pip_mix = self.pip_transition.request(pip_target, now);
+        if !pip_target && pip_mix <= f64::EPSILON {
+            self.pip_render_layout = self.config.still_image_pip_layout;
+        }
+        let desired_output = if pip_target {
+            match self.pip_render_layout {
+                StillImagePipLayout::WebcamMain => Source::Camera,
+                StillImagePipLayout::ScreenMain => Source::Screen,
+            }
+        } else {
+            decision.desired_output
+        };
+        if self.snapshot.actual_output != desired_output {
+            self.snapshot.transition = self.transition.request(desired_output, now);
+            self.snapshot.actual_output = desired_output;
         } else {
             self.snapshot.transition = self.transition.tick(now);
         }
+        self.snapshot.still_image_pip_mix = pip_mix;
+        self.snapshot.still_image_pip_active = pip_mix > f64::EPSILON;
+        self.snapshot.output_layout = if pip_mix > f64::EPSILON {
+            match self.pip_render_layout {
+                StillImagePipLayout::WebcamMain => OutputLayout::WebcamMainScreenPip,
+                StillImagePipLayout::ScreenMain => OutputLayout::ScreenMainWebcamPip,
+            }
+        } else {
+            match desired_output {
+                Source::Camera => OutputLayout::Camera,
+                Source::Screen => OutputLayout::Screen,
+                Source::Placeholder => OutputLayout::Placeholder,
+            }
+        };
         self.sequence = self.sequence.wrapping_add(1).max(1);
         let timestamp = now.saturating_duration_since(self.started_at).as_nanos() / 100;
-        let output = self.compositor.compose(
+        let output = self.compositor.compose_with_pip(
             self.snapshot.previews.webcam.as_ref(),
             self.snapshot.previews.screen.as_ref(),
             self.snapshot.transition.screen_mix,
+            Some(PipComposition {
+                layout: self.pip_render_layout,
+                mix: pip_mix,
+            }),
             self.config.placeholder_color_bgra,
             FrameMetadata {
                 sequence: self.sequence,
@@ -1144,6 +1264,7 @@ impl RuntimeState {
         .ok()
         .map(Arc::new);
         self.detector.reset();
+        self.reset_still_image_detection();
         self.snapshot.detection = stageswap_core::DetectionState::Unknown;
         self.last_detection = now - Duration::from_millis(250);
     }
@@ -1160,11 +1281,34 @@ impl RuntimeState {
             .then_some(self.snapshot.previews.screen.as_deref())
             .flatten()
             .and_then(gray_thumbnail);
-        let (similarity, valid) = match (&self.reference, candidate) {
-            (Some(reference), Some(candidate)) => (image_similarity(reference, &candidate), true),
+        let (similarity, valid) = match (&self.reference, candidate.as_ref()) {
+            (Some(reference), Some(candidate)) => (image_similarity(reference, candidate), true),
             _ => (0.0, false),
         };
         self.snapshot.detection = self.detector.update(similarity, valid);
+        let eligible = self.config.still_image_pip_enabled
+            && self.snapshot.mode == OutputMode::Automatic
+            && self.snapshot.availability.camera_ready
+            && self.snapshot.availability.screen_ready
+            && valid
+            && similarity < self.config.similarity_threshold
+            && candidate
+                .as_ref()
+                .is_some_and(|image| !gray_image_is_nearly_black(image));
+        let was_active = self.still_image_detector.active();
+        let active = self.still_image_detector.update(
+            candidate.as_ref(),
+            eligible,
+            Duration::from_secs(u64::from(self.config.still_image_pip_delay_seconds)),
+            now,
+        );
+        if active != was_active {
+            self.record(if active {
+                "Still-image picture-in-picture activated"
+            } else {
+                "Still-image picture-in-picture deactivated"
+            });
+        }
     }
 
     fn refresh_input_fps(&mut self, now: Instant) {
@@ -4191,6 +4335,113 @@ mod tests {
         assert!(reversed.active);
         assert!(reversed.screen_mix > 0.5 && reversed.screen_mix < 0.6);
         assert_eq!(reversal.state.snapshot.actual_output, Source::Camera);
+    }
+
+    #[test]
+    fn flow_still_non_reference_screen_activates_and_reverses_pip_in_auto_only() {
+        let start = Instant::now();
+        let camera = scripted_solid_frame(PIPELINE_SIZE, 0xff20_4080, 1, start);
+        let still_screen = scripted_solid_frame(PIPELINE_SIZE, 0xff00_ff00, 2, start);
+        let moved_screen = scripted_solid_frame(PIPELINE_SIZE, 0xffff_0000, 3, start);
+        let reference = scripted_solid_frame(PIPELINE_SIZE, 0xffff_ffff, 4, start);
+        let config = AppConfig {
+            still_image_pip_enabled: true,
+            still_image_pip_delay_seconds: 30,
+            ..AppConfig::default()
+        };
+        let mut state = RuntimeState::new_at(config, start);
+        state.snapshot.run_state = RunState::Running;
+        state.reference = Some(reference_for(&reference));
+        let mut engine = scripted_engine(
+            state,
+            ScriptedRuntimePorts {
+                webcam: Some(Arc::clone(&camera)),
+                screen: Some(Arc::clone(&still_screen)),
+                ..ScriptedRuntimePorts::default()
+            },
+            start,
+        );
+
+        assert!(engine.step(start));
+        assert!(!engine.state.still_image_detector.active());
+        assert!(engine.step(start + Duration::from_secs(29)));
+        assert!(!engine.state.still_image_detector.active());
+        assert!(engine.step(start + Duration::from_secs(30)));
+        assert!(engine.state.still_image_detector.active());
+        assert_eq!(engine.state.snapshot.actual_output, Source::Camera);
+        assert_eq!(engine.state.snapshot.still_image_pip_mix, 0.0);
+
+        assert!(engine.step(start + Duration::from_millis(30_500)));
+        assert_eq!(engine.state.snapshot.still_image_pip_mix, 1.0);
+        assert!(engine.state.snapshot.still_image_pip_active);
+        assert_eq!(
+            engine.state.snapshot.output_layout,
+            OutputLayout::WebcamMainScreenPip
+        );
+        let output = latest_published(&engine.platform);
+        let inset_center = (614 * PIPELINE_SIZE.width as usize + 176) * 4;
+        assert_eq!(
+            &output.pixels()[inset_center..inset_center + 4],
+            &[0, 255, 0, 255]
+        );
+
+        engine.platform.screen = Some(Arc::clone(&moved_screen));
+        assert!(engine.step(start + Duration::from_millis(30_750)));
+        assert!(!engine.state.still_image_detector.active());
+        assert_eq!(engine.state.snapshot.actual_output, Source::Screen);
+        assert!(engine.step(start + Duration::from_millis(31_250)));
+        assert_eq!(engine.state.snapshot.still_image_pip_mix, 0.0);
+        assert_eq!(engine.state.snapshot.output_layout, OutputLayout::Screen);
+
+        engine
+            .state
+            .apply_command(Command::SetMode(OutputMode::ForceScreen), false);
+        engine.platform.screen = Some(still_screen);
+        assert!(engine.step(start + Duration::from_secs(62)));
+        assert!(engine.step(start + Duration::from_secs(93)));
+        assert!(!engine.state.still_image_detector.active());
+        assert_eq!(engine.state.snapshot.output_layout, OutputLayout::Screen);
+    }
+
+    #[test]
+    fn flow_still_image_pip_supports_screen_main_and_requires_both_live_sources() {
+        let start = Instant::now();
+        let camera = scripted_solid_frame(PIPELINE_SIZE, 0xff20_4080, 1, start);
+        let screen = scripted_solid_frame(PIPELINE_SIZE, 0xff00_ff00, 2, start);
+        let reference = scripted_solid_frame(PIPELINE_SIZE, 0xffff_ffff, 3, start);
+        let config = AppConfig {
+            still_image_pip_enabled: true,
+            still_image_pip_delay_seconds: 30,
+            still_image_pip_layout: StillImagePipLayout::ScreenMain,
+            ..AppConfig::default()
+        };
+        let mut state = RuntimeState::new_at(config, start);
+        state.snapshot.run_state = RunState::Running;
+        state.reference = Some(reference_for(&reference));
+        let mut engine = scripted_engine(
+            state,
+            ScriptedRuntimePorts {
+                webcam: Some(Arc::clone(&camera)),
+                screen: Some(Arc::clone(&screen)),
+                ..ScriptedRuntimePorts::default()
+            },
+            start,
+        );
+        assert!(engine.step(start));
+        assert!(engine.step(start + Duration::from_secs(30)));
+        assert!(engine.step(start + Duration::from_millis(30_500)));
+        assert_eq!(
+            engine.state.snapshot.output_layout,
+            OutputLayout::ScreenMainWebcamPip
+        );
+        assert_eq!(engine.state.snapshot.actual_output, Source::Screen);
+
+        engine.platform.webcam = None;
+        assert!(engine.step(start + Duration::from_secs(31)));
+        assert!(!engine.state.still_image_detector.active());
+        assert!(engine.step(start + Duration::from_millis(31_500)));
+        assert_eq!(engine.state.snapshot.still_image_pip_mix, 0.0);
+        assert_eq!(engine.state.snapshot.output_layout, OutputLayout::Screen);
     }
 
     #[test]

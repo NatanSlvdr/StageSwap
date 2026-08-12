@@ -1,4 +1,4 @@
-use crate::Size;
+use crate::{Size, StillImagePipLayout};
 use image::imageops::FilterType;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -9,6 +9,15 @@ pub const PIPELINE_SIZE: Size = Size::new(1280, 720);
 pub const PIPELINE_FPS: u32 = 30;
 pub const FRAME_STALE_AFTER: Duration = Duration::from_secs(1);
 pub const CAPTURE_FRAME_POOL_CAPACITY: usize = 4;
+pub const STILL_IMAGE_PIP_SIZE: Size = Size::new(320, 180);
+pub const STILL_IMAGE_PIP_MARGIN: u32 = 16;
+pub const STILL_IMAGE_PIP_CORNER_RADIUS: f64 = 12.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PipComposition {
+    pub layout: StillImagePipLayout,
+    pub mix: f64,
+}
 
 #[derive(Debug)]
 pub struct FrameBufferPool {
@@ -350,9 +359,12 @@ pub struct FrameCompositor {
     output: Size,
     camera: FittedCache,
     screen: FittedCache,
+    pip_camera: FittedCache,
+    pip_screen: FittedCache,
     placeholder_color: Option<u32>,
     placeholder_pixels: Arc<[u8]>,
     blend_pool: FrameBufferPool,
+    pip_pool: FrameBufferPool,
 }
 
 impl Clone for FrameCompositor {
@@ -361,9 +373,15 @@ impl Clone for FrameCompositor {
             output: self.output,
             camera: self.camera.clone(),
             screen: self.screen.clone(),
+            pip_camera: self.pip_camera.clone(),
+            pip_screen: self.pip_screen.clone(),
             placeholder_color: self.placeholder_color,
             placeholder_pixels: Arc::clone(&self.placeholder_pixels),
             blend_pool: FrameBufferPool::new(
+                self.output.width as usize * self.output.height as usize * 4,
+                CAPTURE_FRAME_POOL_CAPACITY,
+            ),
+            pip_pool: FrameBufferPool::new(
                 self.output.width as usize * self.output.height as usize * 4,
                 CAPTURE_FRAME_POOL_CAPACITY,
             ),
@@ -381,9 +399,15 @@ impl FrameCompositor {
             output,
             camera: FittedCache::default(),
             screen: FittedCache::default(),
+            pip_camera: FittedCache::default(),
+            pip_screen: FittedCache::default(),
             placeholder_color: None,
             placeholder_pixels: Arc::from([]),
             blend_pool: FrameBufferPool::new(
+                output.width as usize * output.height as usize * 4,
+                CAPTURE_FRAME_POOL_CAPACITY,
+            ),
+            pip_pool: FrameBufferPool::new(
                 output.width as usize * output.height as usize * 4,
                 CAPTURE_FRAME_POOL_CAPACITY,
             ),
@@ -411,8 +435,20 @@ impl FrameCompositor {
         color_bgra: u32,
         metadata: FrameMetadata,
     ) -> Frame {
+        self.compose_with_pip(camera, screen, screen_mix, None, color_bgra, metadata)
+    }
+
+    pub fn compose_with_pip(
+        &mut self,
+        camera: Option<&Arc<Frame>>,
+        screen: Option<&Arc<Frame>>,
+        screen_mix: f64,
+        pip: Option<PipComposition>,
+        color_bgra: u32,
+        metadata: FrameMetadata,
+    ) -> Frame {
         let mix = screen_mix.clamp(0.0, 1.0);
-        let pixels = if mix <= 0.0 {
+        let background = if mix <= 0.0 {
             camera
                 .map(|frame| self.camera.fit(frame, self.output))
                 .unwrap_or_else(|| self.placeholder(color_bgra))
@@ -441,6 +477,63 @@ impl FrameCompositor {
                 })
                 .expect("an infallible blend cannot fail")
         };
+        let pixels = if let Some(pip) = pip.filter(|pip| pip.mix > 0.0) {
+            let pip_mix = pip.mix.clamp(0.0, 1.0);
+            assert!(
+                self.output.width >= STILL_IMAGE_PIP_SIZE.width + STILL_IMAGE_PIP_MARGIN * 2
+                    && self.output.height
+                        >= STILL_IMAGE_PIP_SIZE.height + STILL_IMAGE_PIP_MARGIN * 2,
+                "PIP output must contain the fixed inset and margins"
+            );
+            let inset = match pip.layout {
+                StillImagePipLayout::WebcamMain => screen
+                    .map(|frame| self.pip_screen.fit(frame, STILL_IMAGE_PIP_SIZE))
+                    .unwrap_or_else(|| self.placeholder(color_bgra)),
+                StillImagePipLayout::ScreenMain => camera
+                    .map(|frame| self.pip_camera.fit(frame, STILL_IMAGE_PIP_SIZE))
+                    .unwrap_or_else(|| self.placeholder(color_bgra)),
+            };
+            let output_width = self.output.width as usize;
+            let inset_width = STILL_IMAGE_PIP_SIZE.width as usize;
+            let inset_height = STILL_IMAGE_PIP_SIZE.height as usize;
+            let origin_x = STILL_IMAGE_PIP_MARGIN as usize;
+            let origin_y = (self.output.height
+                - STILL_IMAGE_PIP_MARGIN
+                - STILL_IMAGE_PIP_SIZE.height) as usize;
+            self.pip_pool
+                .write_with_fallback(|pixels| {
+                    pixels.copy_from_slice(&background);
+                    for y in 0..inset_height {
+                        for x in 0..inset_width {
+                            let coverage = rounded_corner_coverage(
+                                x,
+                                y,
+                                inset_width,
+                                inset_height,
+                                STILL_IMAGE_PIP_CORNER_RADIUS,
+                            );
+                            let weight = (pip_mix * coverage * 256.0).round() as u16;
+                            if weight == 0 {
+                                continue;
+                            }
+                            let inverse = 256 - weight;
+                            let destination = ((origin_y + y) * output_width + origin_x + x) * 4;
+                            let source = (y * inset_width + x) * 4;
+                            for channel in 0..4 {
+                                pixels[destination + channel] =
+                                    ((u16::from(pixels[destination + channel]) * inverse
+                                        + u16::from(inset[source + channel]) * weight
+                                        + 128)
+                                        >> 8) as u8;
+                            }
+                        }
+                    }
+                    Ok::<(), Infallible>(())
+                })
+                .expect("an infallible PIP composition cannot fail")
+        } else {
+            background
+        };
         Frame::new(
             pixels,
             self.output,
@@ -451,6 +544,28 @@ impl FrameCompositor {
         )
         .expect("compositor output is valid")
     }
+}
+
+fn rounded_corner_coverage(x: usize, y: usize, width: usize, height: usize, radius: f64) -> f64 {
+    let x = x as f64 + 0.5;
+    let y = y as f64 + 0.5;
+    let width = width as f64;
+    let height = height as f64;
+    let corner = if x < radius && y < radius {
+        Some((radius, radius))
+    } else if x > width - radius && y < radius {
+        Some((width - radius, radius))
+    } else if x < radius && y > height - radius {
+        Some((radius, height - radius))
+    } else if x > width - radius && y > height - radius {
+        Some((width - radius, height - radius))
+    } else {
+        None
+    };
+    corner.map_or(1.0, |(center_x, center_y)| {
+        let distance = ((x - center_x).powi(2) + (y - center_y).powi(2)).sqrt();
+        (radius + 0.5 - distance).clamp(0.0, 1.0)
+    })
 }
 
 impl Default for FrameCompositor {
@@ -713,6 +828,87 @@ mod tests {
         );
         assert!(Arc::ptr_eq(&output.pixels_arc(), &camera_pixels));
         assert_eq!(output.sequence, 3);
+    }
+
+    #[test]
+    fn contract_compositor_places_both_rounded_pip_layouts_at_fixed_bounds() {
+        let now = Instant::now();
+        let camera = Arc::new(Frame::placeholder(PIPELINE_SIZE, 0xff00_00ff, 1, 0, now));
+        let screen = Arc::new(Frame::placeholder(PIPELINE_SIZE, 0xff00_ff00, 2, 0, now));
+        let camera_before = camera.pixels_arc();
+        let screen_before = screen.pixels_arc();
+        let metadata = FrameMetadata {
+            sequence: 3,
+            timestamp_100ns: 4,
+            received_at: now,
+        };
+        let pixel = |frame: &Frame, x: usize, y: usize| {
+            let offset = (y * PIPELINE_SIZE.width as usize + x) * 4;
+            <[u8; 4]>::try_from(&frame.pixels()[offset..offset + 4]).unwrap()
+        };
+        let mut compositor = FrameCompositor::default();
+
+        let webcam_main = compositor.compose_with_pip(
+            Some(&camera),
+            Some(&screen),
+            0.0,
+            Some(PipComposition {
+                layout: StillImagePipLayout::WebcamMain,
+                mix: 1.0,
+            }),
+            0xff00_0000,
+            metadata,
+        );
+        assert_eq!(pixel(&webcam_main, 15, 600), [0xff, 0, 0, 0xff]);
+        assert_eq!(pixel(&webcam_main, 336, 600), [0xff, 0, 0, 0xff]);
+        assert_eq!(pixel(&webcam_main, 16, 524), [0xff, 0, 0, 0xff]);
+        assert_eq!(pixel(&webcam_main, 176, 614), [0, 0xff, 0, 0xff]);
+        assert_eq!(pixel(&webcam_main, 28, 536), [0, 0xff, 0, 0xff]);
+
+        let screen_main = compositor.compose_with_pip(
+            Some(&camera),
+            Some(&screen),
+            1.0,
+            Some(PipComposition {
+                layout: StillImagePipLayout::ScreenMain,
+                mix: 1.0,
+            }),
+            0xff00_0000,
+            metadata,
+        );
+        assert_eq!(pixel(&screen_main, 0, 0), [0, 0xff, 0, 0xff]);
+        assert_eq!(pixel(&screen_main, 176, 614), [0xff, 0, 0, 0xff]);
+        assert_eq!(camera.pixels(), camera_before.as_ref());
+        assert_eq!(screen.pixels(), screen_before.as_ref());
+    }
+
+    #[test]
+    fn contract_compositor_pip_mix_has_exact_endpoints_and_midpoint() {
+        let now = Instant::now();
+        let camera = Arc::new(Frame::placeholder(PIPELINE_SIZE, 0xff00_0000, 1, 0, now));
+        let screen = Arc::new(Frame::placeholder(PIPELINE_SIZE, 0xffff_ffff, 2, 0, now));
+        let metadata = FrameMetadata {
+            sequence: 3,
+            timestamp_100ns: 0,
+            received_at: now,
+        };
+        let center_offset = (614 * PIPELINE_SIZE.width as usize + 176) * 4;
+        let mut compositor = FrameCompositor::default();
+        for (mix, expected) in [(0.0, 0), (0.5, 128), (1.0, 255)] {
+            let output = compositor.compose_with_pip(
+                Some(&camera),
+                Some(&screen),
+                0.0,
+                Some(PipComposition {
+                    layout: StillImagePipLayout::WebcamMain,
+                    mix,
+                }),
+                0xff00_0000,
+                metadata,
+            );
+            assert_eq!(output.pixels()[center_offset], expected);
+            assert_eq!(output.pixels()[center_offset + 3], 0xff);
+        }
     }
 
     #[test]

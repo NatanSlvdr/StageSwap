@@ -5,8 +5,9 @@ use eframe::egui::{
 use stageswap_app::{CommandDispatch, RuntimeHandle};
 use stageswap_core::{
     AdminProfileStatus, AdminProfileStore, AdminRestoreOutcome, AppConfig, AppSnapshot, Command,
-    ComponentFailureKind, ConfigLoad, ConfigStore, DetectionState, DeviceState, Frame, OutputMode,
-    RestartTarget, RunState, Source, UpdateChannel, WebcamFailureKind,
+    ComponentFailureKind, ConfigLoad, ConfigStore, DetectionState, DeviceState, Frame,
+    OutputLayout, OutputMode, RestartTarget, RunState, Source, StillImagePipLayout, UpdateChannel,
+    WebcamFailureKind,
 };
 use stageswap_i18n::{Locale, format_text, text as localized_text};
 use std::collections::HashMap;
@@ -810,6 +811,7 @@ fn ui_preview_config() -> AppConfig {
         interface_language: locale.tag().into(),
         start_automatically: true,
         output_mode: OutputMode::Automatic,
+        still_image_pip_enabled: true,
         ..AppConfig::default()
     }
 }
@@ -3964,6 +3966,84 @@ impl SwitcherApp {
                 );
             },
         );
+
+        settings_section_gap(ui);
+        settings_section_heading(
+            ui,
+            UiIcon::Layers,
+            "Still-image picture-in-picture",
+            "Keep the speaker visible when a presentation image stays unchanged.",
+        );
+        settings_toggle_row(
+            ui,
+            &mut self.config.still_image_pip_enabled,
+            "Use picture-in-picture for still images",
+            "In Auto mode, show both feeds after a non-reference image remains unchanged.",
+        );
+        let enabled = self.config.still_image_pip_enabled;
+        ui.add_enabled_ui(enabled, |ui| {
+            let delay = match self.config.still_image_pip_delay_seconds {
+                30 => tr(ui, "30 seconds"),
+                45 => tr(ui, "45 seconds"),
+                60 => tr(ui, "1 minute"),
+                120 => tr(ui, "2 minutes"),
+                300 => tr(ui, "5 minutes"),
+                _ => tr(ui, "45 seconds"),
+            };
+            settings_fixed_control_row(
+                ui,
+                "Show picture-in-picture after",
+                "Any screen movement restarts this timer.",
+                180.0,
+                |ui| {
+                    egui::ComboBox::from_id_salt("still-image-pip-delay")
+                        .width(180.0)
+                        .selected_text(delay)
+                        .show_ui(ui, |ui| {
+                            for (seconds, label) in [
+                                (30, "30 seconds"),
+                                (45, "45 seconds"),
+                                (60, "1 minute"),
+                                (120, "2 minutes"),
+                                (300, "5 minutes"),
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.config.still_image_pip_delay_seconds,
+                                    seconds,
+                                    tr(ui, label).as_ref(),
+                                );
+                            }
+                        });
+                },
+            );
+            let main_view = match self.config.still_image_pip_layout {
+                StillImagePipLayout::WebcamMain => tr(ui, "Webcam full screen"),
+                StillImagePipLayout::ScreenMain => tr(ui, "Secondary screen full screen"),
+            };
+            settings_fixed_control_row(
+                ui,
+                "Main view",
+                "The other live feed appears in the bottom-left inset.",
+                220.0,
+                |ui| {
+                    egui::ComboBox::from_id_salt("still-image-pip-layout")
+                        .width(220.0)
+                        .selected_text(main_view)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.config.still_image_pip_layout,
+                                StillImagePipLayout::WebcamMain,
+                                tr(ui, "Webcam full screen").as_ref(),
+                            );
+                            ui.selectable_value(
+                                &mut self.config.still_image_pip_layout,
+                                StillImagePipLayout::ScreenMain,
+                                tr(ui, "Secondary screen full screen").as_ref(),
+                            );
+                        });
+                },
+            );
+        });
     }
 
     fn updates_settings(&mut self, ui: &mut egui::Ui) {
@@ -4631,7 +4711,7 @@ impl SwitcherApp {
         options: PreviewOptions,
     ) -> Rect {
         let available = Vec2::new(maximum[0].min(ui.available_width()), maximum[1]);
-        let contour = preview_contour(kind, actual_output);
+        let contour = preview_contour(kind, actual_output, self.snapshot().output_layout);
         let disco_enabled = self.snapshot().disco_enabled;
         let disco_elapsed = Instant::now().saturating_duration_since(self.ui_animation_started_at);
         let active_amount = ui.ctx().animate_bool_with_time(
@@ -7635,9 +7715,21 @@ const HEALTH_STATES: [DeviceState; 4] = [
     DeviceState::Failed,
 ];
 
-fn preview_contour(kind: PreviewKind, actual_output: Source) -> PreviewContour {
+fn preview_contour(
+    kind: PreviewKind,
+    actual_output: Source,
+    output_layout: OutputLayout,
+) -> PreviewContour {
     match kind {
         PreviewKind::Output => PreviewContour::Live,
+        PreviewKind::Webcam | PreviewKind::Screen
+            if matches!(
+                output_layout,
+                OutputLayout::WebcamMainScreenPip | OutputLayout::ScreenMainWebcamPip
+            ) =>
+        {
+            PreviewContour::Active
+        }
         PreviewKind::Webcam if actual_output == Source::Camera => PreviewContour::Active,
         PreviewKind::Screen if actual_output == Source::Screen => PreviewContour::Active,
         PreviewKind::Webcam | PreviewKind::Screen | PreviewKind::Reference => {
@@ -8915,29 +9007,39 @@ mod tests {
     #[test]
     fn contract_preview_contours_mark_live_output_and_active_source() {
         assert_eq!(
-            preview_contour(PreviewKind::Output, Source::Camera),
+            preview_contour(PreviewKind::Output, Source::Camera, OutputLayout::Camera),
             PreviewContour::Live
         );
         assert_eq!(
-            preview_contour(PreviewKind::Webcam, Source::Camera),
+            preview_contour(PreviewKind::Webcam, Source::Camera, OutputLayout::Camera),
             PreviewContour::Active
         );
         assert_eq!(
-            preview_contour(PreviewKind::Screen, Source::Camera),
+            preview_contour(PreviewKind::Screen, Source::Camera, OutputLayout::Camera),
             PreviewContour::Neutral
         );
         assert_eq!(
-            preview_contour(PreviewKind::Screen, Source::Screen),
+            preview_contour(PreviewKind::Screen, Source::Screen, OutputLayout::Screen),
             PreviewContour::Active
         );
         assert_eq!(
-            preview_contour(PreviewKind::Webcam, Source::Placeholder),
+            preview_contour(
+                PreviewKind::Webcam,
+                Source::Placeholder,
+                OutputLayout::Placeholder,
+            ),
             PreviewContour::Neutral
         );
         assert_eq!(
-            preview_contour(PreviewKind::Reference, Source::Screen),
+            preview_contour(PreviewKind::Reference, Source::Screen, OutputLayout::Screen,),
             PreviewContour::Neutral
         );
+        for kind in [PreviewKind::Webcam, PreviewKind::Screen] {
+            assert_eq!(
+                preview_contour(kind, Source::Camera, OutputLayout::WebcamMainScreenPip,),
+                PreviewContour::Active
+            );
+        }
     }
 
     #[test]
@@ -9640,6 +9742,9 @@ mod tests {
         let started_at = Instant::now();
         app.config.cursor_visible = true;
         app.config.selected_video_device_id = "new-camera".into();
+        app.config.still_image_pip_enabled = true;
+        app.config.still_image_pip_delay_seconds = 120;
+        app.config.still_image_pip_layout = StillImagePipLayout::ScreenMain;
         app.pending_settings_save = Some(started_at);
 
         assert!(!app.settings_save_due(started_at + SETTINGS_SAVE_DEBOUNCE / 2));
@@ -9649,7 +9754,14 @@ mod tests {
         app.close_settings();
         assert_eq!(app.view, AppView::Dashboard);
         assert!(app.pending_settings_save.is_none());
-        assert!(store.load().config.cursor_visible);
+        let saved = store.load().config;
+        assert!(saved.cursor_visible);
+        assert!(saved.still_image_pip_enabled);
+        assert_eq!(saved.still_image_pip_delay_seconds, 120);
+        assert_eq!(
+            saved.still_image_pip_layout,
+            StillImagePipLayout::ScreenMain
+        );
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if app.runtime.snapshot().selected_video_device_id == "new-camera" {

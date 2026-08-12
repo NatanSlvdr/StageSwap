@@ -16,6 +16,14 @@ pub enum UpdateChannel {
     Beta,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StillImagePipLayout {
+    #[default]
+    WebcamMain,
+    ScreenMain,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AppConfig {
     pub schema_version: u32,
@@ -27,6 +35,9 @@ pub struct AppConfig {
     pub cursor_visible: bool,
     pub automatic_monitor_rescans: bool,
     pub automatic_screen_capture_recovery: bool,
+    pub still_image_pip_enabled: bool,
+    pub still_image_pip_delay_seconds: u32,
+    pub still_image_pip_layout: StillImagePipLayout,
     pub start_with_windows: bool,
     pub start_minimized: bool,
     pub start_automatically: bool,
@@ -53,6 +64,9 @@ impl Default for AppConfig {
             cursor_visible: false,
             automatic_monitor_rescans: true,
             automatic_screen_capture_recovery: true,
+            still_image_pip_enabled: false,
+            still_image_pip_delay_seconds: 45,
+            still_image_pip_layout: StillImagePipLayout::WebcamMain,
             start_with_windows: false,
             start_minimized: true,
             start_automatically: true,
@@ -81,6 +95,9 @@ struct AppConfigFile {
     cursor_visible: bool,
     automatic_monitor_rescans: bool,
     automatic_screen_capture_recovery: Option<bool>,
+    still_image_pip_enabled: bool,
+    still_image_pip_delay_seconds: u32,
+    still_image_pip_layout: StillImagePipLayout,
     start_with_windows: bool,
     start_minimized: bool,
     start_automatically: bool,
@@ -108,6 +125,9 @@ impl Default for AppConfigFile {
             cursor_visible: config.cursor_visible,
             automatic_monitor_rescans: config.automatic_monitor_rescans,
             automatic_screen_capture_recovery: None,
+            still_image_pip_enabled: config.still_image_pip_enabled,
+            still_image_pip_delay_seconds: config.still_image_pip_delay_seconds,
+            still_image_pip_layout: config.still_image_pip_layout,
             start_with_windows: config.start_with_windows,
             start_minimized: config.start_minimized,
             start_automatically: config.start_automatically,
@@ -142,6 +162,9 @@ impl<'de> Deserialize<'de> for AppConfig {
             automatic_screen_capture_recovery: file
                 .automatic_screen_capture_recovery
                 .unwrap_or(file.automatic_monitor_rescans),
+            still_image_pip_enabled: file.still_image_pip_enabled,
+            still_image_pip_delay_seconds: file.still_image_pip_delay_seconds,
+            still_image_pip_layout: file.still_image_pip_layout,
             start_with_windows: file.start_with_windows,
             start_minimized: file.start_minimized,
             start_automatically: file.start_automatically,
@@ -172,6 +195,12 @@ impl AppConfig {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "similarity_threshold must be between zero and one",
+            ));
+        }
+        if ![30, 45, 60, 120, 300].contains(&self.still_image_pip_delay_seconds) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "still_image_pip_delay_seconds must be an available preset",
             ));
         }
         self.placeholder_color_bgra |= 0xff00_0000;
@@ -675,6 +704,9 @@ mod tests {
             crop_webcam_to_16_9: false,
             selected_monitor_label: "Studio Display".into(),
             automatic_monitor_rescans: false,
+            still_image_pip_enabled: true,
+            still_image_pip_delay_seconds: 120,
+            still_image_pip_layout: StillImagePipLayout::ScreenMain,
             verbose_logging: true,
             output_mode: OutputMode::ForceScreen,
             ..AppConfig::default()
@@ -705,6 +737,14 @@ mod tests {
             let json = serde_json::json!({
                 "schema_version": 1,
                 "similarity_threshold": threshold,
+            })
+            .to_string();
+            assert!(ConfigStore::parse(&json).is_err());
+        }
+        for delay in [0, 29, 31, 90, 301] {
+            let json = serde_json::json!({
+                "schema_version": 1,
+                "still_image_pip_delay_seconds": delay,
             })
             .to_string();
             assert!(ConfigStore::parse(&json).is_err());
@@ -759,6 +799,12 @@ mod tests {
         assert_eq!(config.update_channel, UpdateChannel::Stable);
         assert!(config.notify_updates);
         assert!(!config.verbose_logging);
+        assert!(!config.still_image_pip_enabled);
+        assert_eq!(config.still_image_pip_delay_seconds, 45);
+        assert_eq!(
+            config.still_image_pip_layout,
+            StillImagePipLayout::WebcamMain
+        );
         let disabled =
             ConfigStore::parse(r#"{"schema_version":1,"automatic_monitor_rescans":false}"#)
                 .unwrap();

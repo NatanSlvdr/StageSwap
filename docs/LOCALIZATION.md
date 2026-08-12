@@ -25,6 +25,7 @@ StageSwap uses clear, natural product language in English, French, and neutral i
 | Camera selected in Zoom | Virtual camera | Caméra virtuelle | Cámara virtual |
 | Windows background area | System tray | Zone de notification | Área de notificación |
 | Onboarding flow | Guided setup | Configuration guidée | Configuración guiada |
+| Still-image composition | Still-image picture-in-picture | Image fixe en incrustation | Imagen fija en imagen superpuesta |
 
 ## Context rules
 

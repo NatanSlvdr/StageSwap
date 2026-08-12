@@ -18,6 +18,16 @@ pub enum Source {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OutputLayout {
+    #[default]
+    Camera,
+    Screen,
+    WebcamMainScreenPip,
+    ScreenMainWebcamPip,
+    Placeholder,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DetectionState {
     #[default]
     Unknown,
