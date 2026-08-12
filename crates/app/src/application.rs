@@ -3688,17 +3688,11 @@ impl SwitcherApp {
             "Start minimized",
             "Open in the system tray.",
         );
-        let automatic_result = start_automatically_result(
-            self.locale(),
-            self.config.start_automatically,
-            self.config.start_minimized,
-            self.config.output_mode,
-        );
-        settings_conditional_toggle_row(
+        settings_toggle_row(
             ui,
             &mut self.config.start_automatically,
             "Start automatic switching on launch",
-            &automatic_result,
+            "Start automatic switching when StageSwap launches.",
         );
 
         settings_section_gap(ui);
@@ -3719,11 +3713,6 @@ impl SwitcherApp {
             &mut self.config.confirm_exit,
             "Confirm before exit",
             "Ask before StageSwap fully exits.",
-        );
-        ui.add_space(4.0);
-        settings_result_text(
-            ui,
-            window_behavior_result(self.config.close_to_tray, self.config.confirm_exit),
         );
         ui.separator();
 
@@ -7136,60 +7125,6 @@ fn settings_result_text(ui: &mut egui::Ui, text: &str) -> Rect {
     .rect
 }
 
-fn output_mode_name(locale: Locale, mode: OutputMode) -> std::borrow::Cow<'static, str> {
-    localized_text(
-        locale,
-        match mode {
-            OutputMode::Automatic => "Auto",
-            OutputMode::ForceCamera => "Camera",
-            OutputMode::ForceScreen => "Screen",
-        },
-    )
-}
-
-fn start_automatically_result(
-    locale: Locale,
-    enabled: bool,
-    start_minimized: bool,
-    output_mode: OutputMode,
-) -> String {
-    if enabled {
-        let mode = output_mode_name(locale, output_mode);
-        let destination = localized_text(
-            locale,
-            if start_minimized {
-                "in the system tray"
-            } else {
-                "after the dashboard opens"
-            },
-        );
-        format_text(
-            locale,
-            "On — Starts automatic switching in {0} mode {1}.",
-            &[mode.as_ref(), destination.as_ref()],
-        )
-    } else {
-        localized_text(
-            locale,
-            "Off — Shows the StageSwap off screen until automatic switching starts.",
-        )
-        .into_owned()
-    }
-}
-
-const fn window_behavior_result(close_to_tray: bool, confirm_exit: bool) -> &'static str {
-    match (close_to_tray, confirm_exit) {
-        (true, true) => {
-            "Closing hides the window; Exit from the system tray asks for confirmation."
-        }
-        (true, false) => {
-            "Closing hides the window; Exit from the system tray stops StageSwap immediately."
-        }
-        (false, true) => "Closing the window or choosing Exit asks before StageSwap stops.",
-        (false, false) => "Closing the window or choosing Exit stops StageSwap immediately.",
-    }
-}
-
 fn update_channel_label(channel: UpdateChannel, locale: Locale) -> std::borrow::Cow<'static, str> {
     localized_text(
         locale,
@@ -7292,13 +7227,8 @@ const fn component_health_guidance(
     }
 }
 
-fn settings_toggle_row(
-    ui: &mut egui::Ui,
-    value: &mut bool,
-    title: &str,
-    description: &str,
-) -> SettingsToggleLayout {
-    settings_toggle_row_with_result(ui, value, title, Some(description), None, true)
+fn settings_toggle_row(ui: &mut egui::Ui, value: &mut bool, title: &str, description: &str) {
+    settings_toggle_row_with_description(ui, value, title, description, true)
 }
 
 fn settings_toggle_row_without_separator(
@@ -7306,72 +7236,40 @@ fn settings_toggle_row_without_separator(
     value: &mut bool,
     title: &str,
     description: &str,
-) -> SettingsToggleLayout {
-    settings_toggle_row_with_result(ui, value, title, Some(description), None, false)
+) {
+    settings_toggle_row_with_description(ui, value, title, description, false)
 }
 
-fn settings_conditional_toggle_row(
+fn settings_toggle_row_with_description(
     ui: &mut egui::Ui,
     value: &mut bool,
     title: &str,
-    result: &str,
-) -> SettingsToggleLayout {
-    settings_toggle_row_with_result(ui, value, title, None, Some(result), true)
-}
-
-fn settings_toggle_row_with_result(
-    ui: &mut egui::Ui,
-    value: &mut bool,
-    title: &str,
-    description: Option<&str>,
-    result: Option<&str>,
+    description: &str,
     separator: bool,
-) -> SettingsToggleLayout {
+) {
     const TEXT_CONTROL_GAP: f32 = 12.0;
-    const CONTROL_WIDTH: f32 = 83.0;
+    const CONTROL_WIDTH: f32 = 42.0;
     const VERTICAL_PADDING: f32 = 7.0;
     const TEXT_GAP: f32 = 3.0;
-    const RESULT_GAP: f32 = 4.0;
     let stable_title = title.to_owned();
     let title = tr(ui, title);
-    let description = description.map(|value| tr(ui, value));
-    let result = result.map(|value| tr(ui, value));
+    let description = tr(ui, description);
     let width = ui.available_width();
     let text_width = (width - CONTROL_WIDTH - TEXT_CONTROL_GAP).max(80.0);
     let title_color = Color32::from_rgb(224, 228, 235);
     let description_color = Color32::from_rgb(126, 134, 148);
-    let result_color = Color32::from_rgb(145, 165, 199);
     let title_galley =
         ui.painter()
             .layout_no_wrap(title.to_string(), FontId::proportional(12.5), title_color);
-    let description_galley = description.as_ref().map(|description| {
-        ui.painter().layout(
-            description.to_string(),
-            FontId::proportional(10.0),
-            description_color,
-            text_width,
-        )
-    });
-    let result_galley = result.as_ref().map(|result| {
-        ui.painter().layout(
-            result.to_string(),
-            FontId::proportional(10.0),
-            result_color,
-            text_width,
-        )
-    });
+    let description_galley = ui.painter().layout(
+        description.to_string(),
+        FontId::proportional(10.0),
+        description_color,
+        text_width,
+    );
     let title_height = title_galley.size().y;
-    let description_height = description_galley
-        .as_ref()
-        .map_or(0.0, |galley| TEXT_GAP + galley.size().y);
-    let result_height = result_galley.as_ref().map_or(0.0, |galley| {
-        if description_galley.is_some() {
-            RESULT_GAP + galley.size().y
-        } else {
-            TEXT_GAP + galley.size().y
-        }
-    });
-    let text_height = title_height + description_height + result_height;
+    let description_height = TEXT_GAP + description_galley.size().y;
+    let text_height = title_height + description_height;
     let row_height = (text_height + VERTICAL_PADDING * 2.0).max(52.0);
     let (row, response) = ui.allocate_exact_size(egui::vec2(width, row_height), Sense::click());
     if response.clicked() {
@@ -7385,64 +7283,26 @@ fn settings_toggle_row_with_result(
     if amount > 0.0 && amount < 1.0 {
         ui.ctx().request_repaint();
     }
-    let geometry = settings_switch_geometry(row);
     let text_top = row.center().y - text_height / 2.0;
     let title_position = Pos2::new(row.left(), text_top);
     ui.painter()
         .galley(title_position, title_galley, title_color);
-    let description_rect = description_galley.map(|galley| {
-        let position = Pos2::new(row.left(), text_top + title_height + TEXT_GAP);
-        let rect = Rect::from_min_size(position, galley.size());
-        ui.painter().galley(position, galley, description_color);
-        rect
-    });
-    let result_rect = result_galley.map(|galley| {
-        let result_position = Pos2::new(
-            row.left(),
-            text_top
-                + title_height
-                + if let Some(description_rect) = description_rect {
-                    TEXT_GAP + description_rect.height() + RESULT_GAP
-                } else {
-                    TEXT_GAP
-                },
-        );
-        let rect = Rect::from_min_size(result_position, galley.size());
-        ui.painter().galley(result_position, galley, result_color);
-        rect
-    });
+    let description_position = Pos2::new(row.left(), text_top + title_height + TEXT_GAP);
+    ui.painter()
+        .galley(description_position, description_galley, description_color);
     let (off, on) = settings_switch_colors();
-    ui.painter().rect_filled(
-        geometry.track,
-        geometry.track.height() / 2.0,
-        mix_color(off, on, amount),
-    );
+    let track = settings_switch_geometry(row);
+    ui.painter()
+        .rect_filled(track, track.height() / 2.0, mix_color(off, on, amount));
     ui.painter().rect_stroke(
-        geometry.track,
-        geometry.track.height() / 2.0,
+        track,
+        track.height() / 2.0,
         Stroke::new(1.0, mix_color(Color32::from_rgb(76, 84, 98), on, amount)),
         StrokeKind::Inside,
     );
-    let thumb_x = egui::lerp(
-        (geometry.track.left() + 11.0)..=(geometry.track.right() - 11.0),
-        amount,
-    );
-    ui.painter().circle_filled(
-        Pos2::new(thumb_x, geometry.track.center().y),
-        8.0,
-        Color32::WHITE,
-    );
-    ui.painter().text(
-        geometry.state.center(),
-        Align2::CENTER_CENTER,
-        tr(ui, if *value { "On" } else { "Off" }).as_ref(),
-        FontId::proportional(11.0),
-        if *value {
-            Color32::from_rgb(119, 164, 247)
-        } else {
-            Color32::from_rgb(132, 140, 153)
-        },
-    );
+    let thumb_x = egui::lerp((track.left() + 11.0)..=(track.right() - 11.0), amount);
+    ui.painter()
+        .circle_filled(Pos2::new(thumb_x, track.center().y), 8.0, Color32::WHITE);
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::Checkbox,
@@ -7455,29 +7315,6 @@ fn settings_toggle_row_with_result(
     if separator {
         ui.separator();
     }
-    SettingsToggleLayout {
-        row,
-        description: description_rect,
-        result: result_rect,
-        state: geometry.state,
-        track: geometry.track,
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
-struct SettingsToggleLayout {
-    row: Rect,
-    description: Option<Rect>,
-    result: Option<Rect>,
-    state: Rect,
-    track: Rect,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct SettingsSwitchGeometry {
-    state: Rect,
-    track: Rect,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -7515,16 +7352,11 @@ fn selector_utility_geometry(available: f32, gap: f32) -> SelectorUtilityGeometr
     }
 }
 
-fn settings_switch_geometry(row: Rect) -> SettingsSwitchGeometry {
-    let track = Rect::from_center_size(
+fn settings_switch_geometry(row: Rect) -> Rect {
+    Rect::from_center_size(
         Pos2::new(row.right() - 21.0, row.center().y),
         egui::vec2(42.0, 22.0),
-    );
-    let state = Rect::from_center_size(
-        Pos2::new(track.left() - 24.0, row.center().y),
-        egui::vec2(34.0, 22.0),
-    );
-    SettingsSwitchGeometry { state, track }
+    )
 }
 
 const fn settings_switch_colors() -> (Color32, Color32) {
@@ -8917,6 +8749,61 @@ fn frame_image(frame: &Frame, target: [usize; 2]) -> egui::ColorImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contract_settings_switch_renders_both_states_without_state_labels() {
+        fn collect_text(shape: &egui::Shape, texts: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => texts.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect_text(shape, texts);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for (initial_value, expected_fill) in [
+            (false, settings_switch_colors().0),
+            (true, settings_switch_colors().1),
+        ] {
+            let context = egui::Context::default();
+            let mut value = initial_value;
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(640.0, 100.0))),
+                    ..egui::RawInput::default()
+                },
+                |ui| {
+                    settings_toggle_row_without_separator(
+                        ui,
+                        &mut value,
+                        "Test switch",
+                        "Static switch description.",
+                    );
+                },
+            );
+            let mut texts = Vec::new();
+            for clipped in &output.shapes {
+                collect_text(&clipped.shape, &mut texts);
+            }
+
+            assert!(texts.iter().any(|text| text == "Test switch"));
+            assert!(
+                texts
+                    .iter()
+                    .any(|text| text == "Static switch description.")
+            );
+            assert!(!texts.iter().any(|text| text == "On" || text == "Off"));
+            assert!(output.shapes.iter().any(|clipped| {
+                matches!(
+                    &clipped.shape,
+                    egui::Shape::Rect(rect) if rect.fill == expected_fill
+                )
+            }));
+        }
+    }
 
     #[test]
     fn smoke_default_ui_fonts_are_bundled() {

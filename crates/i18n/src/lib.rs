@@ -68,8 +68,6 @@ macro_rules! catalog {
 pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
     Cow::Borrowed(catalog!(locale, source, {
         // Common controls and states.
-        "On" => ("Activé", "Activado"),
-        "Off" => ("Désactivé", "Desactivado"),
         "Ready" => ("Prêt", "Listo"),
         "Missing" => ("Manquante", "Falta"),
         "Checking" => ("Vérification", "Comprobando"),
@@ -152,6 +150,7 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Start minimized" => ("Démarrer réduit", "Iniciar minimizado"),
         "Open in the system tray." => ("Ouvrir dans la zone de notification.", "Abrir en el área de notificación."),
         "Start automatic switching on launch" => ("Activer le changement automatique au démarrage", "Activar el cambio automático al iniciar"),
+        "Start automatic switching when StageSwap launches." => ("Lancer le changement automatique au démarrage de StageSwap.", "Iniciar el cambio automático al iniciar StageSwap."),
         "Window behavior" => ("Comportement de la fenêtre", "Comportamiento de la ventana"),
         "Choose what happens when you close the StageSwap window." => ("Choisissez ce qui se passe lorsque vous fermez la fenêtre StageSwap.", "Elige qué ocurre al cerrar la ventana de StageSwap."),
         "Keep running in system tray" => ("Continuer dans la zone de notification", "Seguir en el área de notificación"),
@@ -191,14 +190,6 @@ pub fn text<'a>(locale: Locale, source: &'a str) -> Cow<'a, str> {
         "Choose the language used by StageSwap." => ("Choisissez la langue utilisée par StageSwap.", "Elige el idioma que utiliza StageSwap."),
         "Interface language" => ("Langue de l’interface", "Idioma de la interfaz"),
         "Changes apply immediately." => ("Les modifications s’appliquent immédiatement.", "Los cambios se aplican de inmediato."),
-        "On — Starts automatic switching in {0} mode {1}." => ("Activé — Lance le changement automatique en mode {0} {1}.", "Activado: inicia el cambio automático en modo {0} {1}."),
-        "in the system tray" => ("dans la zone de notification", "en el área de notificación"),
-        "after the dashboard opens" => ("après l’ouverture du tableau de bord", "después de abrir el panel"),
-        "Off — Shows the StageSwap off screen until automatic switching starts." => ("Désactivé — Affiche l’écran d’arrêt de StageSwap jusqu’à l’activation du changement automatique.", "Desactivado: muestra la pantalla de StageSwap desactivado hasta que se active el cambio automático."),
-        "Closing hides the window; Exit from the system tray asks for confirmation." => ("La fermeture masque la fenêtre ; Quitter depuis la zone de notification demande confirmation.", "Al cerrar se oculta la ventana; Salir desde el área de notificación pide confirmación."),
-        "Closing hides the window; Exit from the system tray stops StageSwap immediately." => ("La fermeture masque la fenêtre ; Quitter depuis la zone de notification arrête immédiatement StageSwap.", "Al cerrar se oculta la ventana; Salir desde el área de notificación detiene StageSwap de inmediato."),
-        "Closing the window or choosing Exit asks before StageSwap stops." => ("Fermer la fenêtre ou choisir Quitter demande confirmation avant l’arrêt de StageSwap.", "Cerrar la ventana o elegir Salir pide confirmación antes de detener StageSwap."),
-        "Closing the window or choosing Exit stops StageSwap immediately." => ("Fermer la fenêtre ou choisir Quitter arrête immédiatement StageSwap.", "Cerrar la ventana o elegir Salir detiene StageSwap de inmediato."),
 
         // Webcam and screen settings.
         "No camera selected" => ("Aucune caméra sélectionnée", "No hay ninguna cámara seleccionada"),
@@ -515,6 +506,11 @@ mod tests {
                 "Área de notificación",
             ),
             (
+                "Start automatic switching when StageSwap launches.",
+                "Lancer le changement automatique au démarrage de StageSwap.",
+                "Iniciar el cambio automático al iniciar StageSwap.",
+            ),
+            (
                 "Guided setup",
                 "Configuration guidée",
                 "Configuración guiada",
@@ -527,10 +523,6 @@ mod tests {
             assert_eq!(text(Locale::Spanish, english), spanish);
         }
 
-        assert_eq!(
-            text(Locale::Spanish, "in the system tray"),
-            "en el área de notificación"
-        );
         assert_eq!(
             text(Locale::French, "Capture reference image"),
             "Capturer l’image de référence"
@@ -642,6 +634,7 @@ mod tests {
             "Checks the selected screen every 30 seconds. If the image is black or missing twice in a row, StageSwap restarts screen capture.",
             "No reference image — show the screen JW Library shows when no media is playing, then capture it.",
             "Choose what StageSwap does after you sign in to Windows.",
+            "Start automatic switching when StageSwap launches.",
             "Choose what happens when you close the StageSwap window.",
             "Choose whether StageSwap alerts you when something needs attention.",
             "Check whether each video component and media detection are working.",
