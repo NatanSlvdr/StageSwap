@@ -706,14 +706,6 @@ enum DialogAction {
     SetAdminAutoRestore(bool),
 }
 
-#[derive(Clone, Debug, Default)]
-enum SettingsSaveState {
-    #[default]
-    Saved,
-    Pending(Instant),
-    Failed(String),
-}
-
 #[derive(Default)]
 struct DiscoDiagnosticsGesture {
     first_click_at: Option<Instant>,
@@ -967,7 +959,6 @@ struct SettingsSidebarLayout {
     primary_navigation: Vec<Rect>,
     updates: Rect,
     diagnostics: Rect,
-    save_status: Rect,
     go_back: bool,
 }
 
@@ -1109,7 +1100,8 @@ struct SwitcherApp {
     load_warnings: Vec<String>,
     view: AppView,
     settings_tab: SettingsTab,
-    settings_save_state: SettingsSaveState,
+    pending_settings_save: Option<Instant>,
+    settings_save_error: Option<String>,
     admin_profile_status: Option<AdminProfileStatus>,
     active_dialog: Option<ActiveDialog>,
     awaiting_video_device_id: Option<String>,
@@ -1204,7 +1196,8 @@ impl SwitcherApp {
             load_warnings,
             view: AppView::Dashboard,
             settings_tab: SettingsTab::General,
-            settings_save_state: SettingsSaveState::Saved,
+            pending_settings_save: None,
+            settings_save_error: None,
             admin_profile_status,
             active_dialog: None,
             awaiting_video_device_id: None,
@@ -1517,30 +1510,33 @@ impl SwitcherApp {
     }
 
     fn queue_settings_save(&mut self) {
-        self.settings_save_state = SettingsSaveState::Pending(Instant::now());
+        self.pending_settings_save = Some(Instant::now());
     }
 
     fn settings_save_due(&self, now: Instant) -> bool {
-        matches!(
-            &self.settings_save_state,
-            SettingsSaveState::Pending(started_at)
-                if now.saturating_duration_since(*started_at) >= SETTINGS_SAVE_DEBOUNCE
-        )
+        self.pending_settings_save.is_some_and(|started_at| {
+            now.saturating_duration_since(started_at) >= SETTINGS_SAVE_DEBOUNCE
+        })
     }
 
     fn flush_settings(&mut self) {
-        if !matches!(self.settings_save_state, SettingsSaveState::Pending(_)) {
+        if self.pending_settings_save.take().is_none() {
             return;
         }
         self.send(Command::UpdateSettings(Box::new(self.config.clone())));
         match save_config(&self.store, &self.config) {
-            Ok(()) => self.settings_save_state = SettingsSaveState::Saved,
+            Ok(()) => self.settings_save_error = None,
             Err(error) => {
-                let message = format!("Could not save settings: {error}");
-                self.load_warnings.push(message.clone());
-                self.settings_save_state = SettingsSaveState::Failed(message);
+                self.record_settings_save_error(format!("Could not save settings: {error}"));
             }
         }
+    }
+
+    fn record_settings_save_error(&mut self, message: String) {
+        self.log
+            .write("error", "configuration", "SETTINGS_SAVE_FAILED", &message);
+        self.settings_save_error = Some(message.clone());
+        self.load_warnings.push(message);
     }
 
     fn sync_selected_monitor_preference(&mut self, snapshot: &AppSnapshot) {
@@ -1553,9 +1549,13 @@ impl SwitcherApp {
         self.config
             .selected_monitor_label
             .clone_from(&monitor.label);
-        if let Err(error) = save_config(&self.store, &self.config) {
-            self.load_warnings
-                .push(format!("Could not save monitor selection: {error}"));
+        match save_config(&self.store, &self.config) {
+            Ok(()) => self.settings_save_error = None,
+            Err(error) => {
+                self.record_settings_save_error(format!(
+                    "Could not save monitor selection: {error}"
+                ));
+            }
         }
     }
 
@@ -1924,7 +1924,8 @@ impl SwitcherApp {
                     .as_ref()
                     .map(|monitor| monitor.label.clone());
                 self.config = loaded.config;
-                self.settings_save_state = SettingsSaveState::Saved;
+                self.pending_settings_save = None;
+                self.settings_save_error = None;
                 self.send(Command::ReloadSettings(Box::new(self.config.clone())));
                 if let Some(monitor) = selected_monitor {
                     self.send(Command::SelectMonitor(monitor));
@@ -2692,7 +2693,7 @@ impl SwitcherApp {
             setup_control_label(ui, UiIcon::Monitor, "Secondary screen", SETTINGS_BLUE);
             if screen_selected {
                 setup_live_badge(ui);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     if icon_button(
                         ui,
                         UiIcon::Monitor,
@@ -3439,7 +3440,6 @@ impl SwitcherApp {
             );
             debug_assert!(sidebar.inner.updates.is_positive());
             debug_assert!(sidebar.inner.diagnostics.is_positive());
-            debug_assert!(sidebar.inner.save_status.is_positive());
             sidebar.inner.go_back
         })
         .inner
@@ -3581,10 +3581,8 @@ impl SwitcherApp {
                     }
                 }
 
-                let (updates, diagnostics, save_status) = ui
+                let (updates, diagnostics) = ui
                     .with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                        let save_status = self.settings_save_indicator(ui);
-                        ui.add_space(10.0);
                         let (tab, icon) = SettingsTab::DIAGNOSTICS;
                         let label = tab.title(self.locale());
                         let response = settings_nav_button(
@@ -3628,7 +3626,7 @@ impl SwitcherApp {
                             self.dismiss_dialog();
                             self.settings_section_changed_at = Some(Instant::now());
                         }
-                        (response.rect, diagnostics, save_status)
+                        (response.rect, diagnostics)
                     })
                     .inner;
 
@@ -3641,54 +3639,10 @@ impl SwitcherApp {
                     primary_navigation,
                     updates,
                     diagnostics,
-                    save_status,
                     go_back,
                 }
             })
             .inner
-    }
-
-    fn settings_save_indicator(&self, ui: &mut egui::Ui) -> Rect {
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), 42.0),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.label(
-                    RichText::new(tr(ui, "AUTOSAVE"))
-                        .size(9.5)
-                        .strong()
-                        .color(Color32::from_rgb(103, 110, 122)),
-                );
-                let (icon, label, color, detail) = match &self.settings_save_state {
-                    SettingsSaveState::Saved => (
-                        UiIcon::Check,
-                        "Saved",
-                        Color32::from_rgb(134, 213, 169),
-                        None,
-                    ),
-                    SettingsSaveState::Pending(_) => (
-                        UiIcon::Loader,
-                        "Saving…",
-                        Color32::from_rgb(173, 181, 194),
-                        None,
-                    ),
-                    SettingsSaveState::Failed(message) => (
-                        UiIcon::Error,
-                        "Couldn’t save",
-                        Color32::from_rgb(244, 133, 133),
-                        Some(message.as_str()),
-                    ),
-                };
-                let status = ui
-                    .horizontal(|ui| icon_text(ui, icon, label, color, false))
-                    .response;
-                if let Some(detail) = detail {
-                    status.on_hover_text(detail);
-                }
-            },
-        )
-        .response
-        .rect
     }
 
     fn settings_content(&mut self, ui: &mut egui::Ui) {
@@ -3698,6 +3652,10 @@ impl SwitcherApp {
             ui.ctx().request_repaint();
         }
         let before = self.config.clone();
+        if let Some(message) = self.settings_save_error.clone() {
+            settings_save_error_callout(ui, &message);
+            ui.add_space(10.0);
+        }
         egui::ScrollArea::vertical()
             .id_salt(("settings-content", self.settings_tab))
             .auto_shrink([false, false])
@@ -3761,7 +3719,6 @@ impl SwitcherApp {
             self.config.start_with_windows = before.start_with_windows;
             let message = format!("Could not update Start with Windows: {error}");
             self.load_warnings.push(message.clone());
-            self.settings_save_state = SettingsSaveState::Failed(message);
         }
         if self.config != before {
             if self.config.selected_video_device_id != before.selected_video_device_id {
@@ -4171,13 +4128,49 @@ impl SwitcherApp {
     }
 
     fn updates_settings(&mut self, ui: &mut egui::Ui) {
+        let status = update_status_text(self.locale(), &self.update_status);
+        settings_current_version_card(ui, &status, &self.update_status);
+        ui.add_space(12.0);
+
+        let busy = matches!(
+            self.update_status,
+            UpdateStatus::Checking | UpdateStatus::Downloading(_) | UpdateStatus::Installing
+        );
+        let update_available = matches!(self.update_status, UpdateStatus::Available(_));
+        let (action_icon, action_label) = if update_available {
+            (UiIcon::Download, "Install update")
+        } else {
+            (UiIcon::Refresh, "Check for updates")
+        };
+        let action_width = ui.available_width();
+        let action = ui
+            .add_enabled_ui(!busy, |ui| {
+                icon_button(
+                    ui,
+                    action_icon,
+                    action_label,
+                    egui::vec2(action_width, 38.0),
+                    false,
+                    true,
+                )
+            })
+            .inner;
+        if action.clicked() {
+            if update_available {
+                self.install_available_update();
+            } else {
+                self.request_update_check(true);
+            }
+        }
+
+        ui.add_space(18.0);
+
         settings_section_heading(
             ui,
             UiIcon::Settings,
-            "Update preferences",
-            "Choose which published StageSwap versions you want to receive.",
+            "Update settings",
+            "Choose the update channel and notification preferences.",
         );
-        settings_info_row(ui, "Installed version", APP_VERSION_LABEL);
 
         let previous_channel = self.config.update_channel;
         let locale = self.locale();
@@ -4210,60 +4203,6 @@ impl SwitcherApp {
         if self.config.update_channel != previous_channel {
             self.update_status = UpdateStatus::Idle;
             self.request_update_check(false);
-        }
-
-        settings_section_gap(ui);
-        settings_section_heading(
-            ui,
-            UiIcon::Refresh,
-            "Update status",
-            "StageSwap checks once when it starts and only installs after you choose to continue.",
-        );
-        let status = update_status_text(self.locale(), &self.update_status);
-        settings_result_text(ui, &status);
-        ui.add_space(10.0);
-        let busy = matches!(
-            self.update_status,
-            UpdateStatus::Checking | UpdateStatus::Downloading(_) | UpdateStatus::Installing
-        );
-        ui.add_enabled_ui(!busy, |ui| {
-            if translated_button(ui, "Check for updates").clicked() {
-                self.request_update_check(true);
-            }
-        });
-
-        let available = match &self.update_status {
-            UpdateStatus::Available(release) => Some(release.clone()),
-            _ => None,
-        };
-        if let Some(release) = available {
-            ui.add_space(12.0);
-            #[cfg(windows)]
-            if self.portable_mode == stageswap_windows::PortableMode::RunOnce {
-                settings_result_text(
-                    ui,
-                    tr(
-                        ui,
-                        "Continuing installs the updated managed copy of StageSwap for this user.",
-                    )
-                    .as_ref(),
-                );
-                ui.add_space(8.0);
-            }
-            let label = format_text(
-                self.locale(),
-                "Download, install, and restart {0}",
-                &[&format!("v{}", release.version)],
-            );
-            if ui
-                .add_sized(
-                    egui::vec2(ui.available_width().min(320.0), 36.0),
-                    egui::Button::new(label),
-                )
-                .clicked()
-            {
-                self.install_available_update();
-            }
         }
     }
 
@@ -5544,10 +5483,11 @@ impl eframe::App for SwitcherApp {
             && snapshot.selected_video_device_id != self.config.selected_video_device_id
         {
             self.config.selected_video_device_id = snapshot.selected_video_device_id.clone();
-            if let Err(error) = save_config(&self.store, &self.config) {
-                self.load_warnings.push(format!(
+            match save_config(&self.store, &self.config) {
+                Ok(()) => self.settings_save_error = None,
+                Err(error) => self.record_settings_save_error(format!(
                     "Could not save automatic webcam selection: {error}"
-                ));
+                )),
             }
         }
         if self
@@ -7084,6 +7024,128 @@ fn settings_info_card(ui: &mut egui::Ui, paragraphs: &[&str]) -> Rect {
         .rect
 }
 
+fn settings_current_version_card(
+    ui: &mut egui::Ui,
+    status: &str,
+    update_status: &UpdateStatus,
+) -> Rect {
+    let title = tr(ui, "Current version");
+    let (status_icon, status_color) = update_status_indicator(update_status);
+    let card_width = ui.available_width();
+    let card_height: f32 = 92.0;
+    let (card, _) = ui.allocate_exact_size(egui::vec2(card_width, card_height), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(card, 9, Color32::from_rgb(30, 34, 42));
+    painter.rect_stroke(
+        card,
+        9,
+        Stroke::new(1.0, Color32::from_rgb(55, 64, 79)),
+        StrokeKind::Inside,
+    );
+
+    let content = card.shrink2(egui::vec2(14.0, 12.0));
+    let title_color = Color32::from_rgb(154, 161, 174);
+    let status_text_color = Color32::from_rgb(224, 228, 235);
+    let measured_status = painter.layout_no_wrap(
+        status.to_owned(),
+        FontId::proportional(11.0),
+        status_text_color,
+    );
+    let desired_status_width = measured_status.size().x + 54.0;
+    let maximum_status_width = (content.width() - 170.0).max(1.0);
+    let status_width = desired_status_width.min(maximum_status_width);
+    let status_galley = if desired_status_width <= maximum_status_width {
+        measured_status
+    } else {
+        painter.layout(
+            status.to_owned(),
+            FontId::proportional(11.0),
+            status_text_color,
+            (status_width - 54.0).max(1.0),
+        )
+    };
+    let status_height = (status_galley.size().y + 14.0)
+        .max(32.0)
+        .min(content.height());
+    let status_rect = Rect::from_center_size(
+        Pos2::new(content.right() - status_width / 2.0, content.center().y),
+        egui::vec2(status_width, status_height),
+    );
+    let divider_x = status_rect.left() - 13.0;
+    let divider = Rect::from_center_size(
+        Pos2::new(divider_x, content.center().y),
+        egui::vec2(1.0, 40.0),
+    );
+    painter.rect_filled(divider, 0.0, Color32::from_rgb(55, 64, 79));
+
+    painter.rect_filled(
+        status_rect,
+        8,
+        mix_color(Color32::from_rgb(30, 34, 42), status_color, 0.12),
+    );
+
+    let title_galley =
+        painter.layout_no_wrap(title.into_owned(), FontId::proportional(11.0), title_color);
+    let version_galley = painter.layout_no_wrap(
+        APP_VERSION_LABEL.to_owned(),
+        FontId::proportional(23.0),
+        Color32::WHITE,
+    );
+    let version_gap = 4.0;
+    let version_text_height = title_galley.size().y + version_gap + version_galley.size().y;
+    let version_area = Rect::from_min_max(
+        content.min,
+        Pos2::new((divider_x - 12.0).max(content.left()), content.bottom()),
+    );
+    let version_group_width = 28.0 + title_galley.size().x.max(version_galley.size().x);
+    let version_group_left =
+        (version_area.center().x - version_group_width / 2.0).max(version_area.left());
+    let version_text_left = version_group_left + 28.0;
+    let version_text_top = content.center().y - version_text_height / 2.0;
+    painter.galley(
+        Pos2::new(version_text_left, version_text_top),
+        title_galley,
+        title_color,
+    );
+    let version_top = version_text_top + version_text_height - version_galley.size().y;
+    painter.galley(
+        Pos2::new(version_text_left, version_top),
+        version_galley,
+        Color32::WHITE,
+    );
+    let version_icon = Rect::from_center_size(
+        Pos2::new(version_group_left + 9.0, content.center().y),
+        egui::vec2(18.0, 18.0),
+    );
+    ui_icon::paint(painter, version_icon, UiIcon::Info, SETTINGS_BLUE);
+
+    let status_icon_rect = Rect::from_center_size(
+        Pos2::new(status_rect.left() + 20.0, status_rect.center().y),
+        egui::vec2(16.0, 16.0),
+    );
+    ui_icon::paint(painter, status_icon_rect, status_icon, status_color);
+    painter.galley(
+        Pos2::new(
+            status_icon_rect.right() + 10.0,
+            status_rect.center().y - status_galley.size().y / 2.0,
+        ),
+        status_galley,
+        status_text_color,
+    );
+    card
+}
+
+fn update_status_indicator(status: &UpdateStatus) -> (UiIcon, Color32) {
+    match status {
+        UpdateStatus::Idle => (UiIcon::Clock, Color32::from_rgb(154, 161, 174)),
+        UpdateStatus::Checking => (UiIcon::Loader, TRANSITION_AMBER),
+        UpdateStatus::UpToDate => (UiIcon::CheckCircle, ACTIVE_GREEN),
+        UpdateStatus::Available(_) => (UiIcon::Download, SETTINGS_BLUE),
+        UpdateStatus::Downloading(_) | UpdateStatus::Installing => (UiIcon::Loader, SETTINGS_BLUE),
+        UpdateStatus::Failed(_) => (UiIcon::Error, LIVE_RED),
+    }
+}
+
 fn language_selector_text(locale: Locale) -> String {
     format!("      {}", locale.native_name())
 }
@@ -7167,6 +7229,39 @@ fn paint_language_flag(painter: &egui::Painter, rect: Rect, locale: Locale) {
         Stroke::new(0.75, Color32::from_black_alpha(110)),
         StrokeKind::Inside,
     );
+}
+
+fn settings_save_error_callout(ui: &mut egui::Ui, message: &str) {
+    let title = tr(ui, "Could not save settings");
+    egui::Frame::new()
+        .fill(Color32::from_rgb(67, 31, 38))
+        .stroke(Stroke::new(1.0, LIVE_RED.gamma_multiply(0.72)))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::hover());
+                ui_icon::paint(ui.painter(), icon_rect, UiIcon::Error, LIVE_RED);
+                ui.add_space(7.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(title.as_ref())
+                            .size(12.0)
+                            .strong()
+                            .color(LIVE_RED),
+                    );
+                    ui.add_space(3.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(message)
+                                .size(11.0)
+                                .color(Color32::from_rgb(245, 221, 225)),
+                        )
+                        .wrap(),
+                    );
+                });
+            });
+        });
 }
 
 fn settings_section_gap(ui: &mut egui::Ui) {
@@ -9797,7 +9892,7 @@ mod tests {
         let started_at = Instant::now();
         app.config.cursor_visible = true;
         app.config.selected_video_device_id = "new-camera".into();
-        app.settings_save_state = SettingsSaveState::Pending(started_at);
+        app.pending_settings_save = Some(started_at);
 
         assert!(!app.settings_save_due(started_at + SETTINGS_SAVE_DEBOUNCE / 2));
         assert!(app.settings_save_due(started_at + SETTINGS_SAVE_DEBOUNCE));
@@ -9805,7 +9900,7 @@ mod tests {
         app.view = AppView::Settings;
         app.close_settings();
         assert_eq!(app.view, AppView::Dashboard);
-        assert!(matches!(app.settings_save_state, SettingsSaveState::Saved));
+        assert!(app.pending_settings_save.is_none());
         assert!(store.load().config.cursor_visible);
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -9893,10 +9988,11 @@ mod tests {
         app.flush_settings();
 
         assert!(!app.config.show_notifications);
-        assert!(matches!(
-            &app.settings_save_state,
-            SettingsSaveState::Failed(message) if message.contains("Could not save settings")
-        ));
+        assert!(
+            app.settings_save_error
+                .as_deref()
+                .is_some_and(|message| message.contains("Could not save settings"))
+        );
         assert!(
             app.load_warnings
                 .iter()
@@ -9914,7 +10010,7 @@ mod tests {
         app.queue_settings_save();
         app.flush_settings();
 
-        assert!(matches!(app.settings_save_state, SettingsSaveState::Saved));
+        assert!(app.settings_save_error.is_none());
         assert!(store.load().config.verbose_logging);
     }
 
@@ -9926,7 +10022,7 @@ mod tests {
         assert_eq!(app.admin_profile_status, None);
 
         app.config.selected_video_device_id = "pending-admin-camera".into();
-        app.settings_save_state = SettingsSaveState::Pending(Instant::now());
+        app.pending_settings_save = Some(Instant::now());
         app.save_admin_baseline();
         assert_eq!(
             app.admin_profile_status,
@@ -10000,7 +10096,7 @@ mod tests {
         };
         save_config(&store, &user).unwrap();
         app.config = user;
-        app.settings_save_state = SettingsSaveState::Pending(Instant::now());
+        app.pending_settings_save = Some(Instant::now());
         app.open_dialog(AppDialogKind::LoadAdminConfig);
 
         app.load_admin_config();
@@ -10009,7 +10105,8 @@ mod tests {
         assert!(app.dialog_is(AppDialogKind::Admin));
         assert_eq!(app.config, admin);
         assert_eq!(store.load().config, admin);
-        assert!(matches!(app.settings_save_state, SettingsSaveState::Saved));
+        assert!(app.pending_settings_save.is_none());
+        assert!(app.settings_save_error.is_none());
         assert!(!app.admin_profile_status.unwrap().auto_restore_on_launch);
 
         let deadline = Instant::now() + Duration::from_secs(2);
