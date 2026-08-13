@@ -2384,43 +2384,52 @@ impl SwitcherApp {
                     .show(ui, |ui| {
                         ui.set_width(popover_width);
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.allocate_ui_with_layout(
+                        let (header_rect, _) = ui.allocate_exact_size(
                             Vec2::new(ui.available_width(), NOTIFICATION_POPOVER_HEADER_HEIGHT),
-                            egui::Layout::left_to_right(egui::Align::Max),
-                            |ui| {
-                                let (icon_rect, _) =
-                                    ui.allocate_exact_size(Vec2::new(18.0, 18.0), Sense::hover());
-                                ui_icon::paint(
-                                    ui.painter(),
-                                    icon_rect,
-                                    UiIcon::Bell,
-                                    SETTINGS_BLUE,
-                                );
-                                ui.add_space(6.0);
-                                ui.label(
-                                    RichText::new(tr(ui, "Notifications"))
-                                        .size(14.0)
-                                        .strong()
-                                        .color(Color32::WHITE),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let response = ui.add_enabled_ui(has_notifications, |ui| {
-                                            icon_button(
-                                                ui,
-                                                UiIcon::Trash,
-                                                "Clear all",
-                                                Vec2::new(92.0, NOTIFICATION_POPOVER_HEADER_HEIGHT),
-                                                false,
-                                                false,
-                                            )
-                                        });
-                                        clear_all = response.inner.clicked();
-                                    },
-                                );
-                            },
+                            Sense::hover(),
                         );
+                        let clear_all_rect = Rect::from_min_size(
+                            Pos2::new(header_rect.right() - 92.0, header_rect.top()),
+                            Vec2::new(92.0, NOTIFICATION_POPOVER_HEADER_HEIGHT),
+                        );
+                        let title_rect = Rect::from_min_max(
+                            header_rect.min,
+                            Pos2::new(clear_all_rect.left() - 10.0, header_rect.bottom()),
+                        );
+                        let mut title_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .id_salt("notification-popover-title")
+                                .max_rect(title_rect)
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        );
+                        let (icon_rect, _) =
+                            title_ui.allocate_exact_size(Vec2::new(18.0, 18.0), Sense::hover());
+                        ui_icon::paint(title_ui.painter(), icon_rect, UiIcon::Bell, SETTINGS_BLUE);
+                        title_ui.add_space(6.0);
+                        title_ui.label(
+                            RichText::new(tr(&title_ui, "Notifications"))
+                                .size(14.0)
+                                .strong()
+                                .color(Color32::WHITE),
+                        );
+
+                        let mut clear_all_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .id_salt("notification-popover-clear-all")
+                                .max_rect(clear_all_rect)
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        );
+                        let response = clear_all_ui.add_enabled_ui(has_notifications, |ui| {
+                            icon_button(
+                                ui,
+                                UiIcon::Trash,
+                                "Clear all",
+                                Vec2::new(92.0, NOTIFICATION_POPOVER_HEADER_HEIGHT),
+                                false,
+                                false,
+                            )
+                        });
+                        clear_all = response.inner.clicked();
                         ui.add_space(NOTIFICATION_POPOVER_SPACING);
                         ui.separator();
                         ui.add_space(NOTIFICATION_POPOVER_SPACING);
