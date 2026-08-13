@@ -3946,7 +3946,7 @@ impl SwitcherApp {
                                         ui.painter(),
                                         icon_rect,
                                         self.settings_tab.icon(),
-                                        ui_theme::TEXT_SECONDARY,
+                                        SETTINGS_BLUE,
                                     );
                                     ui.label(
                                         RichText::new(self.settings_tab.title(self.locale()))
@@ -7428,7 +7428,7 @@ fn controls_section_heading(ui: &mut egui::Ui, icon: UiIcon, title: &str) -> Rec
     let title = tr(ui, title);
     let heading = ui.horizontal(|ui| {
         let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-        ui_icon::paint(ui.painter(), icon_rect, icon, ui_theme::TEXT_SECONDARY);
+        ui_icon::paint(ui.painter(), icon_rect, icon, SETTINGS_BLUE);
         ui.label(
             RichText::new(title.as_ref())
                 .size(11.0)
@@ -7514,11 +7514,18 @@ fn settings_nav_button(
             .rect_filled(indicator, 2, indicator_color.gamma_multiply(amount));
     }
     let foreground = mix_color(ui_theme::TEXT_SECONDARY, Color32::WHITE, amount);
+    let icon_foreground = if disco_accent.is_some() {
+        // Keep the diagnostic disco treatment unchanged while the regular
+        // settings navigation uses the blue accent.
+        foreground
+    } else {
+        SETTINGS_BLUE
+    };
     let icon_rect = Rect::from_center_size(
         Pos2::new(rect.left() + 22.0, rect.center().y),
         egui::vec2(16.0, 16.0),
     );
-    ui_icon::paint(ui.painter(), icon_rect, icon, foreground);
+    ui_icon::paint(ui.painter(), icon_rect, icon, icon_foreground);
     ui.painter().text(
         Pos2::new(rect.left() + 42.0, rect.center().y),
         Align2::LEFT_CENTER,
@@ -7540,7 +7547,7 @@ fn settings_section_heading(
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(17.0, 17.0), Sense::hover());
-            ui_icon::paint(ui.painter(), rect, icon, ui_theme::TEXT_SECONDARY);
+            ui_icon::paint(ui.painter(), rect, icon, SETTINGS_BLUE);
             ui.label(
                 RichText::new(title.as_ref())
                     .size(14.0)
@@ -7575,12 +7582,7 @@ fn settings_info_card(ui: &mut egui::Ui, paragraphs: &[&str]) -> Rect {
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(17.0, 17.0), Sense::hover());
-                ui_icon::paint(
-                    ui.painter(),
-                    icon_rect,
-                    UiIcon::Info,
-                    ui_theme::TEXT_SECONDARY,
-                );
+                ui_icon::paint(ui.painter(), icon_rect, UiIcon::Info, SETTINGS_BLUE);
                 ui.vertical(|ui| {
                     for (index, paragraph) in paragraphs.iter().enumerate() {
                         if index > 0 {
