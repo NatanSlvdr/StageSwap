@@ -24,9 +24,9 @@ const APP_VERSION_LABEL: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const LIVE_RED: Color32 = Color32::from_rgb(235, 90, 90);
 const ACTIVE_GREEN: Color32 = Color32::from_rgb(76, 205, 132);
 const TRANSITION_AMBER: Color32 = Color32::from_rgb(245, 190, 75);
-const PREVIEW_NEUTRAL: Color32 = Color32::from_rgb(42, 47, 55);
-const SETTINGS_BLUE: Color32 = Color32::from_rgb(64, 118, 216);
-const SETTINGS_SWITCH_OFF: Color32 = Color32::from_rgb(49, 56, 68);
+const PREVIEW_NEUTRAL: Color32 = ui_theme::BORDER_SUBTLE;
+const SETTINGS_BLUE: Color32 = ui_theme::BLUE;
+const SETTINGS_SWITCH_OFF: Color32 = ui_theme::CONTROL_HOVERED;
 const VISIBLE_REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 30);
 const HIDDEN_REFRESH: Duration = Duration::from_millis(250);
 const DASHBOARD_PREVIEW_TEXTURE_LIMIT: [u32; 2] = [480, 270];
@@ -46,9 +46,9 @@ const SETUP_DEMO_LOOP_DURATION: f32 = 7.8;
 const SETUP_DEMO_HOLD_DURATION: f32 = 3.5;
 const SETUP_DEMO_FADE_DURATION: f32 = 0.4;
 const SETUP_HARDWARE_PREVIEW_WIDTH: f32 = 420.0;
-const SETUP_BOOTH_BLACK: Color32 = Color32::from_rgb(16, 18, 23);
-const SETUP_SIGNAL_DECK: Color32 = Color32::from_rgb(26, 29, 36);
-const SETUP_SIGNAL_WHITE: Color32 = Color32::from_rgb(245, 247, 250);
+const SETUP_BOOTH_BLACK: Color32 = ui_theme::SETUP_BLACK;
+const SETUP_SIGNAL_DECK: Color32 = ui_theme::SETUP_DECK;
+const SETUP_SIGNAL_WHITE: Color32 = ui_theme::SETUP_WHITE;
 const REFERENCE_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
 const SETUP_REFERENCE_FLASH_DURATION: Duration = Duration::from_millis(120);
 const SETUP_REFERENCE_CARD_HEIGHT: f32 = 262.0;
@@ -60,11 +60,11 @@ const SETTINGS_SIDEBAR_WIDTH: f32 = 228.0;
 const SETTINGS_PREVIEW_WIDTH: f32 = 480.0;
 const SETTINGS_CONTENT_WIDTH: f32 = SETTINGS_PREVIEW_WIDTH;
 const SETTINGS_PREVIEW_HEIGHT: f32 = 270.0;
-const SETTINGS_SIDEBAR_FILL: Color32 = Color32::from_rgb(20, 22, 27);
+const SETTINGS_SIDEBAR_FILL: Color32 = ui_theme::SIDEBAR;
 const SETTINGS_SIDEBAR_CORNER_RADIUS: u8 = 12;
-const SETTINGS_NAV_HOVERED: Color32 = Color32::from_rgb(32, 35, 41);
-const SETTINGS_NAV_SELECTED: Color32 = Color32::from_rgb(45, 48, 55);
-const SETTINGS_NAV_INDICATOR: Color32 = Color32::from_rgb(151, 157, 168);
+const SETTINGS_NAV_HOVERED: Color32 = ui_theme::SIDEBAR_HOVERED;
+const SETTINGS_NAV_SELECTED: Color32 = ui_theme::SIDEBAR_SELECTED;
+const SETTINGS_NAV_INDICATOR: Color32 = ui_theme::TEXT_MUTED;
 const NOTIFICATION_POPOVER_WIDTH: f32 = 356.0;
 const NOTIFICATION_TOAST_WIDTH: f32 = 372.0;
 const NOTIFICATION_POPOVER_SPACING: f32 = 8.0;
@@ -89,6 +89,8 @@ mod setup_guide;
 mod tray;
 #[path = "ui_icon.rs"]
 mod ui_icon;
+#[path = "ui_theme.rs"]
+mod ui_theme;
 #[path = "update.rs"]
 mod update;
 use local_log::LocalLog;
@@ -306,14 +308,16 @@ pub(crate) fn run() -> eframe::Result {
         Box::new(move |context| {
             ui_icon::install_fonts(&context.egui_ctx);
             let mut visuals = egui::Visuals::dark();
-            visuals.panel_fill = Color32::from_rgb(18, 20, 24);
-            visuals.window_fill = Color32::from_rgb(23, 25, 30);
-            visuals.selection.bg_fill = Color32::from_rgb(55, 115, 245);
+            visuals.panel_fill = ui_theme::PANEL;
+            visuals.window_fill = ui_theme::WINDOW;
+            visuals.selection.bg_fill = ui_theme::SELECTED_BLUE;
             visuals.widgets.inactive.corner_radius = 6.into();
             visuals.widgets.hovered.corner_radius = 6.into();
             visuals.widgets.active.corner_radius = 6.into();
-            visuals.widgets.hovered.bg_fill = Color32::from_rgb(48, 53, 63);
-            visuals.widgets.active.bg_fill = Color32::from_rgb(59, 67, 82);
+            visuals.widgets.inactive.bg_fill = ui_theme::CONTROL;
+            visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, ui_theme::BORDER);
+            visuals.widgets.hovered.bg_fill = ui_theme::CONTROL_HOVERED;
+            visuals.widgets.active.bg_fill = ui_theme::CONTROL_ACTIVE;
             context.egui_ctx.set_visuals(visuals);
             context.egui_ctx.style_mut_of(egui::Theme::Dark, |style| {
                 style.spacing.item_spacing = egui::vec2(10.0, 10.0);
@@ -2373,8 +2377,8 @@ impl SwitcherApp {
             .order(egui::Order::Foreground)
             .show(context, |ui| {
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(27, 31, 39))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(66, 73, 87)))
+                    .fill(ui_theme::SURFACE)
+                    .stroke(Stroke::new(1.0, ui_theme::BORDER))
                     .corner_radius(12)
                     .inner_margin(8)
                     .show(ui, |ui| {
@@ -2435,13 +2439,13 @@ impl SwitcherApp {
                                 ui.label(
                                     RichText::new(tr(ui, "You’re all caught up"))
                                         .strong()
-                                        .color(Color32::from_rgb(228, 232, 239)),
+                                        .color(ui_theme::TEXT_PRIMARY),
                                 );
                                 ui.add_space(NOTIFICATION_POPOVER_SPACING);
                                 ui.label(
                                     RichText::new(tr(ui, "No recent notifications."))
                                         .size(11.0)
-                                        .color(Color32::from_rgb(145, 153, 168)),
+                                        .color(ui_theme::TEXT_MUTED),
                                 );
                                 ui.add_space(NOTIFICATION_POPOVER_SPACING);
                             });
@@ -3006,7 +3010,7 @@ impl SwitcherApp {
                     ui,
                     UiIcon::Image,
                     "Example reference image",
-                    Color32::from_rgb(181, 188, 200),
+                    ui_theme::TEXT_SECONDARY,
                     false,
                 );
                 ui.add_space(13.0);
@@ -3067,8 +3071,8 @@ impl SwitcherApp {
         width: f32,
     ) {
         egui::Frame::new()
-            .fill(mix_color(SETUP_SIGNAL_DECK, SETTINGS_BLUE, 0.035))
-            .stroke(Stroke::new(1.0, SETTINGS_BLUE.gamma_multiply(0.28)))
+            .fill(SETUP_SIGNAL_DECK)
+            .stroke(Stroke::new(1.0, ui_theme::BORDER_SUBTLE))
             .corner_radius(10)
             .inner_margin(14)
             .show(ui, |ui| {
@@ -3123,10 +3127,7 @@ impl SwitcherApp {
             |ui| {
                 egui::Frame::new()
                     .fill(SETUP_SIGNAL_DECK)
-                    .stroke(Stroke::new(
-                        1.0,
-                        mix_color(SETUP_BOOTH_BLACK, SETUP_SIGNAL_WHITE, 0.12),
-                    ))
+                    .stroke(Stroke::new(1.0, ui_theme::BORDER_SUBTLE))
                     .corner_radius(10)
                     .inner_margin(egui::Margin::symmetric(16, 8))
                     .show(ui, |ui| {
@@ -3669,7 +3670,7 @@ impl SwitcherApp {
             context.request_repaint();
         }
         ui.painter()
-            .rect_filled(ui.max_rect(), 0, Color32::from_rgb(17, 19, 23));
+            .rect_filled(ui.max_rect(), 0, ui_theme::BACKGROUND);
         ui.set_min_size(ui.available_size());
         ui.scope(|ui| {
             ui.set_opacity(0.72 + entrance * 0.28);
@@ -3817,7 +3818,7 @@ impl SwitcherApp {
                     RichText::new(tr(ui, "PREFERENCES"))
                         .size(10.0)
                         .strong()
-                        .color(Color32::from_rgb(112, 120, 134)),
+                        .color(ui_theme::TEXT_DIM),
                 );
                 ui.add_space(8.0);
                 let mut primary_navigation = Vec::with_capacity(SettingsTab::PRIMARY.len());
@@ -3945,7 +3946,7 @@ impl SwitcherApp {
                                         ui.painter(),
                                         icon_rect,
                                         self.settings_tab.icon(),
-                                        Color32::from_rgb(119, 164, 247),
+                                        ui_theme::TEXT_SECONDARY,
                                     );
                                     ui.label(
                                         RichText::new(self.settings_tab.title(self.locale()))
@@ -3958,7 +3959,7 @@ impl SwitcherApp {
                                 ui.label(
                                     RichText::new(self.settings_tab.description(self.locale()))
                                         .size(13.0)
-                                        .color(Color32::from_rgb(154, 161, 174)),
+                                        .color(ui_theme::TEXT_MUTED),
                                 );
                                 ui.add_space(18.0);
                                 match self.settings_tab {
@@ -4174,7 +4175,7 @@ impl SwitcherApp {
                 ui.label(
                     RichText::new(tr(ui, "Camera"))
                         .size(12.0)
-                        .color(Color32::from_rgb(224, 228, 235)),
+                        .color(ui_theme::TEXT_PRIMARY),
                 );
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -4242,7 +4243,7 @@ impl SwitcherApp {
                 ui.label(
                     RichText::new(tr(ui, "Display"))
                         .size(12.0)
-                        .color(Color32::from_rgb(224, 228, 235)),
+                        .color(ui_theme::TEXT_PRIMARY),
                 );
                 ui.add_space(4.0);
                 egui::ComboBox::from_id_salt("monitor-selector")
@@ -4310,7 +4311,7 @@ impl SwitcherApp {
                             "Checks 4×/s · confirms after 5 matches or 3 differences · 0.5s fade",
                         ))
                         .size(10.0)
-                        .color(Color32::from_rgb(126, 134, 148)),
+                        .color(ui_theme::TEXT_SUBTLE),
                     )
                     .wrap(),
                 );
@@ -4351,7 +4352,7 @@ impl SwitcherApp {
                     ui.label(
                         RichText::new(tr(ui, "Required similarity"))
                             .size(12.0)
-                            .color(Color32::from_rgb(224, 228, 235)),
+                            .color(ui_theme::TEXT_PRIMARY),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if translated_small_button(ui, "Reset 98%").clicked() {
@@ -4803,7 +4804,7 @@ impl SwitcherApp {
                     ui,
                     preview.kind.icon(),
                     preview.label,
-                    Color32::from_rgb(181, 188, 200),
+                    ui_theme::TEXT_SECONDARY,
                     false,
                 );
                 rect
@@ -4851,8 +4852,8 @@ impl SwitcherApp {
             .preferred_width()
             .min((available_width - 32.0).max(280.0));
         let frame = egui::Frame::new()
-            .fill(Color32::from_rgb(24, 27, 33))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(57, 63, 75)))
+            .fill(ui_theme::SURFACE_DEEP)
+            .stroke(Stroke::new(1.0, ui_theme::BORDER_SUBTLE))
             .corner_radius(12)
             .inner_margin(24)
             .shadow(egui::Shadow {
@@ -4962,7 +4963,7 @@ impl SwitcherApp {
             ))
             .size(14.0)
             .line_height(Some(21.0))
-            .color(Color32::from_rgb(184, 191, 203)),
+            .color(ui_theme::TEXT_SECONDARY),
         );
         ui.add_space(16.0);
 
@@ -5205,7 +5206,7 @@ impl SwitcherApp {
                 let frame_fill = if disco_enabled {
                     mix_color(Color32::from_rgb(12, 14, 18), contour_color, 0.14)
                 } else {
-                    Color32::from_rgb(12, 14, 18)
+                    ui_theme::PREVIEW_BACKGROUND
                 };
                 let preview_frame = egui::Frame::new()
                     .fill(frame_fill)
@@ -5299,14 +5300,14 @@ impl SwitcherApp {
                 ui.label(
                     RichText::new(tr(ui, "Preparing preview…"))
                         .size(12.0)
-                        .color(Color32::from_rgb(112, 120, 134)),
+                        .color(ui_theme::TEXT_DIM),
                 );
             }
         } else {
             ui.label(
                 RichText::new(tr(ui, options.empty_message))
                     .size(12.0)
-                    .color(Color32::from_rgb(112, 120, 134)),
+                    .color(ui_theme::TEXT_DIM),
             );
         }
     }
@@ -5344,8 +5345,8 @@ fn reference_dialog_example_top_offset(row_top: f32, preview_rect: Rect) -> f32 
 
 fn compact_reference_example_card(ui: &mut egui::Ui, textures: &SetupExampleTextures, width: f32) {
     egui::Frame::new()
-        .fill(mix_color(SETUP_SIGNAL_DECK, SETTINGS_BLUE, 0.035))
-        .stroke(Stroke::new(1.0, SETTINGS_BLUE.gamma_multiply(0.28)))
+        .fill(SETUP_SIGNAL_DECK)
+        .stroke(Stroke::new(1.0, ui_theme::BORDER_SUBTLE))
         .corner_radius(10)
         .inner_margin(12)
         .show(ui, |ui| {
@@ -5535,7 +5536,7 @@ fn dialog_content(
         RichText::new(tr(ui, body))
             .size(14.0)
             .line_height(Some(21.0))
-            .color(Color32::from_rgb(184, 191, 203)),
+            .color(ui_theme::TEXT_SECONDARY),
     );
     ui.add_space(24.0);
 
@@ -5622,7 +5623,7 @@ fn dialog_header(ui: &mut egui::Ui, kind: AppDialogKind) {
             RichText::new(tr(ui, kind.title()))
                 .size(19.0)
                 .strong()
-                .color(Color32::from_rgb(235, 238, 244)),
+                .color(ui_theme::TEXT_PRIMARY),
         );
     });
 }
@@ -5639,7 +5640,7 @@ fn admin_dialog_content(
         ))
         .size(14.0)
         .line_height(Some(21.0))
-        .color(Color32::from_rgb(184, 191, 203)),
+        .color(ui_theme::TEXT_SECONDARY),
     );
     ui.add_space(20.0);
     match status {
@@ -5647,7 +5648,7 @@ fn admin_dialog_content(
             ui.label(
                 RichText::new(tr(ui, "No admin config is saved."))
                     .size(13.0)
-                    .color(Color32::from_rgb(137, 146, 160)),
+                    .color(ui_theme::TEXT_SUBTLE),
             );
             ui.add_space(22.0);
             let mut action = None;
@@ -5766,17 +5767,15 @@ fn dialog_button(
     let label = tr(ui, label);
     let (base_fill, base_stroke, text_color) = match tone {
         DialogButtonTone::Secondary => (
-            Color32::from_rgb(40, 44, 53),
-            Stroke::new(1.0, Color32::from_rgb(66, 73, 87)),
-            Color32::from_rgb(224, 228, 235),
+            ui_theme::CONTROL,
+            Stroke::new(1.0, ui_theme::BORDER),
+            ui_theme::TEXT_PRIMARY,
         ),
         DialogButtonTone::Primary => (SETTINGS_BLUE, Stroke::NONE, Color32::WHITE),
         DialogButtonTone::Danger => (Color32::from_rgb(174, 58, 69), Stroke::NONE, Color32::WHITE),
-        DialogButtonTone::DangerOutline => (
-            Color32::from_rgb(24, 27, 33),
-            Stroke::new(1.0, LIVE_RED),
-            LIVE_RED,
-        ),
+        DialogButtonTone::DangerOutline => {
+            (ui_theme::SURFACE_DEEP, Stroke::new(1.0, LIVE_RED), LIVE_RED)
+        }
     };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 38.0), Sense::click());
     let interaction = if response.is_pointer_button_down_on() {
@@ -5791,7 +5790,7 @@ fn dialog_button(
         if matches!(tone, DialogButtonTone::DangerOutline) {
             Stroke::new(2.0, LIVE_RED)
         } else {
-            Stroke::new(1.5, Color32::from_rgb(225, 232, 245))
+            Stroke::new(1.5, ui_theme::TEXT_PRIMARY)
         }
     } else {
         base_stroke
@@ -7005,7 +7004,7 @@ fn setup_footer_button(
 fn setup_reference_example_thumbnail(ui: &mut egui::Ui, texture: egui::TextureId, size: Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter()
-        .rect_filled(rect, 7, Color32::from_rgb(7, 9, 14));
+        .rect_filled(rect, 7, ui_theme::PREVIEW_BACKGROUND);
     ui.painter().image(
         texture,
         rect.shrink(2.0),
@@ -7225,9 +7224,9 @@ fn setup_warning_callout(ui: &mut egui::Ui, width: f32, title: &str, text: &str)
 fn notification_bell(ui: &mut egui::Ui, unread: usize) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(28.0, 28.0), Sense::click());
     let icon_color = if response.hovered() {
-        Color32::from_rgb(204, 211, 223)
+        ui_theme::TEXT_PRIMARY
     } else {
-        Color32::from_rgb(132, 140, 155)
+        ui_theme::TEXT_SUBTLE
     };
     ui_icon::paint(
         ui.painter(),
@@ -7249,7 +7248,7 @@ fn notification_entry_card(ui: &mut egui::Ui, item: &NotificationItem, now: Inst
     let (icon, color) = notification_icon_and_color(item.source, item.tone);
     let available_width = (ui.available_width() - 18.0).max(1.0);
     egui::Frame::new()
-        .fill(mix_color(Color32::from_rgb(27, 31, 39), color, 0.10))
+        .fill(ui_theme::SURFACE)
         .stroke(Stroke::new(1.0, color.gamma_multiply(0.28)))
         .corner_radius(9)
         .inner_margin(egui::Margin::symmetric(9, 7))
@@ -7265,7 +7264,7 @@ fn notification_entry_card(ui: &mut egui::Ui, item: &NotificationItem, now: Inst
                             RichText::new(notification_title(ui, item.source))
                                 .size(12.5)
                                 .strong()
-                                .color(Color32::from_rgb(235, 238, 244)),
+                                .color(ui_theme::TEXT_PRIMARY),
                         );
                         if item.unread {
                             ui.add_space(4.0);
@@ -7277,7 +7276,7 @@ fn notification_entry_card(ui: &mut egui::Ui, item: &NotificationItem, now: Inst
                             ui.label(
                                 RichText::new(notification_age(ui, item.created_at, now))
                                     .size(10.0)
-                                    .color(Color32::from_rgb(145, 153, 168)),
+                                    .color(ui_theme::TEXT_MUTED),
                             );
                         });
                     });
@@ -7287,7 +7286,7 @@ fn notification_entry_card(ui: &mut egui::Ui, item: &NotificationItem, now: Inst
                             RichText::new(&item.body)
                                 .size(11.5)
                                 .line_height(Some(15.0))
-                                .color(Color32::from_rgb(218, 223, 232)),
+                                .color(ui_theme::TEXT_SECONDARY),
                         )
                         .wrap(),
                     );
@@ -7298,7 +7297,7 @@ fn notification_entry_card(ui: &mut egui::Ui, item: &NotificationItem, now: Inst
                                 RichText::new(detail)
                                     .size(10.5)
                                     .line_height(Some(14.0))
-                                    .color(Color32::from_rgb(165, 173, 187)),
+                                    .color(ui_theme::TEXT_MUTED),
                             )
                             .wrap(),
                         );
@@ -7312,7 +7311,7 @@ fn notification_toast_card(ui: &mut egui::Ui, item: &NotificationItem, now: Inst
     let (icon, color) = notification_icon_and_color(item.source, item.tone);
     let available_width = (ui.available_width() - 20.0).max(1.0);
     egui::Frame::new()
-        .fill(Color32::from_rgb(27, 31, 39))
+        .fill(ui_theme::SURFACE)
         .stroke(Stroke::new(1.0, color.gamma_multiply(0.50)))
         .corner_radius(10)
         .inner_margin(egui::Margin::symmetric(10, 8))
@@ -7334,7 +7333,7 @@ fn notification_toast_card(ui: &mut egui::Ui, item: &NotificationItem, now: Inst
                             ui.label(
                                 RichText::new(notification_age(ui, item.created_at, now))
                                     .size(10.0)
-                                    .color(Color32::from_rgb(145, 153, 168)),
+                                    .color(ui_theme::TEXT_MUTED),
                             );
                         });
                     });
@@ -7344,7 +7343,7 @@ fn notification_toast_card(ui: &mut egui::Ui, item: &NotificationItem, now: Inst
                             RichText::new(&item.body)
                                 .size(11.5)
                                 .line_height(Some(15.0))
-                                .color(Color32::from_rgb(218, 223, 232)),
+                                .color(ui_theme::TEXT_SECONDARY),
                         )
                         .wrap(),
                     );
@@ -7429,17 +7428,12 @@ fn controls_section_heading(ui: &mut egui::Ui, icon: UiIcon, title: &str) -> Rec
     let title = tr(ui, title);
     let heading = ui.horizontal(|ui| {
         let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-        ui_icon::paint(
-            ui.painter(),
-            icon_rect,
-            icon,
-            Color32::from_rgb(119, 164, 247),
-        );
+        ui_icon::paint(ui.painter(), icon_rect, icon, ui_theme::TEXT_SECONDARY);
         ui.label(
             RichText::new(title.as_ref())
                 .size(11.0)
                 .strong()
-                .color(Color32::from_rgb(151, 158, 171)),
+                .color(ui_theme::TEXT_MUTED),
         );
     });
     ui.add_space(6.0);
@@ -7466,7 +7460,7 @@ fn settings_back_button(ui: &mut egui::Ui) -> egui::Response {
     let foreground = if response.hovered() {
         Color32::WHITE
     } else {
-        Color32::from_rgb(161, 168, 181)
+        ui_theme::TEXT_SECONDARY
     };
     let icon_rect = Rect::from_center_size(
         Pos2::new(rect.left() + 22.0, rect.center().y),
@@ -7519,7 +7513,7 @@ fn settings_nav_button(
         ui.painter()
             .rect_filled(indicator, 2, indicator_color.gamma_multiply(amount));
     }
-    let foreground = mix_color(Color32::from_rgb(161, 168, 181), Color32::WHITE, amount);
+    let foreground = mix_color(ui_theme::TEXT_SECONDARY, Color32::WHITE, amount);
     let icon_rect = Rect::from_center_size(
         Pos2::new(rect.left() + 22.0, rect.center().y),
         egui::vec2(16.0, 16.0),
@@ -7546,12 +7540,12 @@ fn settings_section_heading(
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(17.0, 17.0), Sense::hover());
-            ui_icon::paint(ui.painter(), rect, icon, Color32::from_rgb(119, 164, 247));
+            ui_icon::paint(ui.painter(), rect, icon, ui_theme::TEXT_SECONDARY);
             ui.label(
                 RichText::new(title.as_ref())
                     .size(14.0)
                     .strong()
-                    .color(Color32::from_rgb(228, 231, 237)),
+                    .color(ui_theme::TEXT_PRIMARY),
             );
         });
         ui.add_space(2.0);
@@ -7559,7 +7553,7 @@ fn settings_section_heading(
             egui::Label::new(
                 RichText::new(description.as_ref())
                     .size(11.0)
-                    .color(Color32::from_rgb(128, 136, 150)),
+                    .color(ui_theme::TEXT_SUBTLE),
             )
             .wrap(),
         );
@@ -7574,8 +7568,8 @@ fn settings_info_card(ui: &mut egui::Ui, paragraphs: &[&str]) -> Rect {
         .map(|paragraph| tr(ui, paragraph))
         .collect::<Vec<_>>();
     egui::Frame::new()
-        .fill(Color32::from_rgb(27, 31, 39))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(52, 61, 76)))
+        .fill(ui_theme::SURFACE)
+        .stroke(Stroke::new(1.0, ui_theme::BORDER_SUBTLE))
         .corner_radius(9)
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
@@ -7585,7 +7579,7 @@ fn settings_info_card(ui: &mut egui::Ui, paragraphs: &[&str]) -> Rect {
                     ui.painter(),
                     icon_rect,
                     UiIcon::Info,
-                    Color32::from_rgb(119, 164, 247),
+                    ui_theme::TEXT_SECONDARY,
                 );
                 ui.vertical(|ui| {
                     for (index, paragraph) in paragraphs.iter().enumerate() {
@@ -7597,7 +7591,7 @@ fn settings_info_card(ui: &mut egui::Ui, paragraphs: &[&str]) -> Rect {
                                 RichText::new(paragraph.as_ref())
                                     .size(11.5)
                                     .line_height(Some(17.0))
-                                    .color(Color32::from_rgb(174, 182, 196)),
+                                    .color(ui_theme::TEXT_SECONDARY),
                             )
                             .wrap(),
                         );
@@ -7620,17 +7614,17 @@ fn settings_current_version_card(
     let card_height: f32 = 92.0;
     let (card, _) = ui.allocate_exact_size(egui::vec2(card_width, card_height), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(card, 9, Color32::from_rgb(30, 34, 42));
+    painter.rect_filled(card, 9, ui_theme::SURFACE_RAISED);
     painter.rect_stroke(
         card,
         9,
-        Stroke::new(1.0, Color32::from_rgb(55, 64, 79)),
+        Stroke::new(1.0, ui_theme::BORDER_SUBTLE),
         StrokeKind::Inside,
     );
 
     let content = card.shrink2(egui::vec2(14.0, 12.0));
-    let title_color = Color32::from_rgb(154, 161, 174);
-    let status_text_color = Color32::from_rgb(224, 228, 235);
+    let title_color = ui_theme::TEXT_MUTED;
+    let status_text_color = ui_theme::TEXT_PRIMARY;
     let measured_status = painter.layout_no_wrap(
         status.to_owned(),
         FontId::proportional(11.0),
@@ -7661,12 +7655,12 @@ fn settings_current_version_card(
         Pos2::new(divider_x, content.center().y),
         egui::vec2(1.0, 40.0),
     );
-    painter.rect_filled(divider, 0.0, Color32::from_rgb(55, 64, 79));
+    painter.rect_filled(divider, 0.0, ui_theme::BORDER_SUBTLE);
 
     painter.rect_filled(
         status_rect,
         8,
-        mix_color(Color32::from_rgb(30, 34, 42), status_color, 0.12),
+        mix_color(ui_theme::SURFACE_RAISED, status_color, 0.12),
     );
 
     let title_galley =
@@ -7722,7 +7716,7 @@ fn settings_current_version_card(
 
 fn update_status_indicator(status: &UpdateStatus) -> (UiIcon, Color32) {
     match status {
-        UpdateStatus::Idle => (UiIcon::Clock, Color32::from_rgb(154, 161, 174)),
+        UpdateStatus::Idle => (UiIcon::Clock, ui_theme::TEXT_MUTED),
         UpdateStatus::Checking => (UiIcon::Loader, TRANSITION_AMBER),
         UpdateStatus::UpToDate => (UiIcon::CheckCircle, ACTIVE_GREEN),
         UpdateStatus::Available(_) => (UiIcon::Download, SETTINGS_BLUE),
@@ -7863,7 +7857,7 @@ fn settings_group_label(ui: &mut egui::Ui, label: &str) {
         RichText::new(label.as_ref())
             .size(11.5)
             .strong()
-            .color(Color32::from_rgb(190, 196, 207)),
+            .color(ui_theme::TEXT_SECONDARY),
     );
     ui.add_space(3.0);
 }
@@ -7874,7 +7868,7 @@ fn settings_result_text(ui: &mut egui::Ui, text: &str) -> Rect {
         egui::Label::new(
             RichText::new(text.as_ref())
                 .size(10.0)
-                .color(Color32::from_rgb(145, 165, 199)),
+                .color(ui_theme::TEXT_MUTED),
         )
         .wrap(),
     )
@@ -8012,8 +8006,8 @@ fn settings_toggle_row_with_description(
     let description = tr(ui, description);
     let width = ui.available_width();
     let text_width = (width - CONTROL_WIDTH - TEXT_CONTROL_GAP).max(80.0);
-    let title_color = Color32::from_rgb(224, 228, 235);
-    let description_color = Color32::from_rgb(126, 134, 148);
+    let title_color = ui_theme::TEXT_PRIMARY;
+    let description_color = ui_theme::TEXT_SUBTLE;
     let title_galley =
         ui.painter()
             .layout_no_wrap(title.to_string(), FontId::proportional(12.5), title_color);
@@ -8053,7 +8047,7 @@ fn settings_toggle_row_with_description(
     ui.painter().rect_stroke(
         track,
         track.height() / 2.0,
-        Stroke::new(1.0, mix_color(Color32::from_rgb(76, 84, 98), on, amount)),
+        Stroke::new(1.0, mix_color(ui_theme::BORDER, on, amount)),
         StrokeKind::Inside,
     );
     let thumb_x = egui::lerp((track.left() + 11.0)..=(track.right() - 11.0), amount);
@@ -8133,14 +8127,14 @@ fn settings_control_row(
             ui.label(
                 RichText::new(title.as_ref())
                     .size(13.0)
-                    .color(Color32::from_rgb(224, 228, 235)),
+                    .color(ui_theme::TEXT_PRIMARY),
             );
             if !description.is_empty() {
                 ui.add(
                     egui::Label::new(
                         RichText::new(description.as_ref())
                             .size(10.5)
-                            .color(Color32::from_rgb(126, 134, 148)),
+                            .color(ui_theme::TEXT_SUBTLE),
                     )
                     .wrap(),
                 );
@@ -8167,12 +8161,12 @@ fn settings_control_row(
                     ui.label(
                         RichText::new(title.as_ref())
                             .size(13.0)
-                            .color(Color32::from_rgb(224, 228, 235)),
+                            .color(ui_theme::TEXT_PRIMARY),
                     );
                     ui.label(
                         RichText::new(description.as_ref())
                             .size(10.5)
-                            .color(Color32::from_rgb(126, 134, 148)),
+                            .color(ui_theme::TEXT_SUBTLE),
                     );
                 },
             );
@@ -8226,12 +8220,12 @@ fn settings_fixed_control_row(
     label_ui.label(
         RichText::new(title.as_ref())
             .size(13.0)
-            .color(Color32::from_rgb(224, 228, 235)),
+            .color(ui_theme::TEXT_PRIMARY),
     );
     label_ui.label(
         RichText::new(description.as_ref())
             .size(10.5)
-            .color(Color32::from_rgb(126, 134, 148)),
+            .color(ui_theme::TEXT_SUBTLE),
     );
 
     let mut control_ui = ui.new_child(
@@ -8263,13 +8257,13 @@ fn settings_single_button_row(
                 ui.label(
                     RichText::new(title.as_ref())
                         .size(13.0)
-                        .color(Color32::from_rgb(224, 228, 235)),
+                        .color(ui_theme::TEXT_PRIMARY),
                 );
                 ui.add(
                     egui::Label::new(
                         RichText::new(description.as_ref())
                             .size(10.5)
-                            .color(Color32::from_rgb(126, 134, 148)),
+                            .color(ui_theme::TEXT_SUBTLE),
                     )
                     .wrap(),
                 );
@@ -8305,13 +8299,13 @@ fn settings_single_button_row(
     label_ui.label(
         RichText::new(title.as_ref())
             .size(13.0)
-            .color(Color32::from_rgb(224, 228, 235)),
+            .color(ui_theme::TEXT_PRIMARY),
     );
     label_ui.add(
         egui::Label::new(
             RichText::new(description.as_ref())
                 .size(10.5)
-                .color(Color32::from_rgb(126, 134, 148)),
+                .color(ui_theme::TEXT_SUBTLE),
         )
         .wrap(),
     );
@@ -8329,7 +8323,7 @@ fn settings_info_row(ui: &mut egui::Ui, title: &str, value: &str) {
                 RichText::new(value.as_ref())
                     .monospace()
                     .size(10.5)
-                    .color(Color32::from_rgb(161, 168, 181)),
+                    .color(ui_theme::TEXT_SECONDARY),
             )
             .wrap(),
         );
@@ -8378,7 +8372,7 @@ fn settings_status_item(
     color: Color32,
 ) {
     ui.horizontal(|ui| {
-        icon_text(ui, icon, label, Color32::from_rgb(183, 190, 202), false);
+        icon_text(ui, icon, label, ui_theme::TEXT_SECONDARY, false);
         ui.add_space(3.0);
         icon_text(ui, status_icon, status, color, false);
     });
@@ -8860,12 +8854,12 @@ fn icon_button_impl(
         ui.visuals().selection.bg_fill
     } else if let Some(accent) = accent {
         mix_color(
-            Color32::from_rgb(25, 28, 33),
+            ui_theme::SURFACE_DEEP,
             accent,
             if response.hovered() { 0.48 } else { 0.34 },
         )
     } else if emphasized && !response.hovered() {
-        Color32::from_rgb(38, 42, 50)
+        ui_theme::CONTROL
     } else {
         visuals.bg_fill
     };

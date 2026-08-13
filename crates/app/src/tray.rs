@@ -9,6 +9,7 @@ use tray_icon::{Icon as TrayImage, TrayIcon, TrayIconBuilder};
 use super::{
     app_icon,
     ui_icon::{self, UiIcon},
+    ui_theme,
 };
 
 pub struct Tray {
@@ -56,8 +57,8 @@ impl Tray {
             Some(app_menu_icon()?),
             None,
         );
-        let start_icon = action_menu_icon(UiIcon::Play, [48, 174, 105, 255])?;
-        let stop_icon = action_menu_icon(UiIcon::Stop, [220, 76, 76, 255])?;
+        let start_icon = action_menu_icon(UiIcon::Play, ui_theme::START_RGBA)?;
+        let stop_icon = action_menu_icon(UiIcon::Stop, ui_theme::STOP_RGBA)?;
         let automation = IconMenuItem::new(
             text(locale, "Start automatic switching"),
             true,
@@ -74,35 +75,35 @@ impl Tray {
             &[&automatic, &camera, &screen, &pip],
         )
         .map_err(|error| format!("could not create tray output-mode menu: {error}"))?;
-        output_mode.set_icon(Some(action_menu_icon(UiIcon::Route, [64, 118, 216, 255])?));
+        output_mode.set_icon(Some(action_menu_icon(UiIcon::Route, ui_theme::BLUE_RGBA)?));
         let rescan_displays = IconMenuItem::new(
             text(locale, "Rescan displays"),
             true,
-            Some(action_menu_icon(UiIcon::Refresh, [64, 118, 216, 255])?),
+            Some(action_menu_icon(UiIcon::Refresh, ui_theme::BLUE_RGBA)?),
             None,
         );
         let restart_screen = IconMenuItem::new(
             text(locale, "Restart screen capture"),
             true,
-            Some(action_menu_icon(UiIcon::Monitor, [64, 118, 216, 255])?),
+            Some(action_menu_icon(UiIcon::Monitor, ui_theme::BLUE_RGBA)?),
             None,
         );
         let restart_virtual_camera = IconMenuItem::new(
             text(locale, "Restart virtual camera"),
             true,
-            Some(action_menu_icon(UiIcon::Broadcast, [64, 118, 216, 255])?),
+            Some(action_menu_icon(UiIcon::Broadcast, ui_theme::BLUE_RGBA)?),
             None,
         );
         let restart_all = IconMenuItem::new(
             text(locale, "Restart all"),
             true,
-            Some(action_menu_icon(UiIcon::Wrench, [64, 118, 216, 255])?),
+            Some(action_menu_icon(UiIcon::Wrench, ui_theme::BLUE_RGBA)?),
             None,
         );
         let open_reference_capture = IconMenuItem::new(
             text(locale, "Open reference capture"),
             true,
-            Some(action_menu_icon(UiIcon::Image, [64, 118, 216, 255])?),
+            Some(action_menu_icon(UiIcon::Image, ui_theme::BLUE_RGBA)?),
             None,
         );
         let recovery = Submenu::with_items(
@@ -117,17 +118,17 @@ impl Tray {
             ],
         )
         .map_err(|error| format!("could not create tray recovery menu: {error}"))?;
-        recovery.set_icon(Some(action_menu_icon(UiIcon::Wrench, [64, 118, 216, 255])?));
+        recovery.set_icon(Some(action_menu_icon(UiIcon::Wrench, ui_theme::BLUE_RGBA)?));
         let settings = IconMenuItem::new(
             text(locale, "Settings"),
             true,
-            Some(action_menu_icon(UiIcon::Settings, [64, 118, 216, 255])?),
+            Some(action_menu_icon(UiIcon::Settings, ui_theme::BLUE_RGBA)?),
             None,
         );
         let exit = IconMenuItem::new(
             text(locale, "Exit"),
             true,
-            Some(action_menu_icon(UiIcon::SignOut, [220, 76, 76, 255])?),
+            Some(action_menu_icon(UiIcon::SignOut, ui_theme::STOP_RGBA)?),
             None,
         );
         let first_separator = PredefinedMenuItem::separator();
