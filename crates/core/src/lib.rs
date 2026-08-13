@@ -38,7 +38,8 @@ pub use monitor::{MonitorTracker, MonitorTrackerSettings, MonitorTrackingResult}
 pub use pacer::FramePacer;
 pub use runtime::{
     AppSnapshot, Command, ComponentFailureKind, ComponentLifecycle, ComponentStatus, PreviewFrames,
-    RestartTarget, RunState, ScreenFailureKind, WebcamFailureKind,
+    RestartTarget, RunState, RuntimeAlert, RuntimeAlertSource, RuntimeWarning, ScreenFailureKind,
+    WebcamFailureKind,
 };
 pub use sha256::{hex as hex_digest, sha256};
 pub use stillness::StillImageDetector;

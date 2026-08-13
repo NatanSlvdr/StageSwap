@@ -88,6 +88,8 @@ The Updates page checks the public GitHub Releases API once at startup and on de
 
 Configuration schema 1, `reference.png`, update-notification state, and JSONL logs live below `%LocalAppData%\StageSwap`. Configuration and reference replacement use validation, backup, writable flushes, and atomic replacement. Logs retain errors, warnings, recovery outcomes, and infrequent lifecycle states for 14 days by default. Verbose logging adds recurring telemetry only for new activity.
 
+Critical runtime and configuration notifications are structured at the runtime boundary, delivered to a session-only in-app notification center, and shown as brief in-app toasts. They are not persisted or sent through native Windows notifications. Update availability remains separately deduplicated per channel in `update-state.json` and is presented as an informational in-app notification when enabled.
+
 Schema 1 stores still-image PIP enablement, one of five validated delays, the selected main view, and the inset size. Missing fields retain the enabled, 45-second, webcam-main, Medium defaults.
 
 A concealed per-user admin profile can store a validated configuration, optional immutable reference snapshot, and an independently controlled auto-restore policy. Startup validates the complete baseline before replacement and rolls back the reference if configuration replacement fails. Invalid admin data fails open with a warning and leaves the working configuration unchanged.

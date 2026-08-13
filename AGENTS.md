@@ -82,7 +82,7 @@ General opens by default. To open a particular page:
 cargo run -p stageswap --bin StageSwap -- --ui-preview matching
 ```
 
-Available page names are `general`, `webcam`, `screen`, `matching`, `updates`, and `diagnostics`. You can still navigate between every page after launch.
+Available page names are `general`, `webcam`, `screen`, `matching`, `updates`, and `diagnostics`. Notification previews are `notifications`, `notifications-empty`, `notifications-critical`, and `notifications-updates`. You can still navigate between every page after launch.
 
 Setup-guide previews are `setup-1` through `setup-5`. Each name opens one deterministic full-window step for the JW Library-to-Zoom workflow.
 

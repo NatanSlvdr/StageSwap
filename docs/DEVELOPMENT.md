@@ -52,6 +52,8 @@ Open a specific page with `general`, `webcam`, `screen`, `matching`, `updates`, 
 cargo run -p stageswap --bin StageSwap -- --ui-preview matching
 ```
 
+Notification previews are `notifications`, `notifications-empty`, `notifications-critical`, and `notifications-updates`. The default `notifications` preview shows the bell with two critical alerts and an update; after 30 seconds of preview activity, it adds an informational activity notification every 30 seconds. The explicit empty, critical, and update previews remain fixed for deterministic state review.
+
 Setup previews are `setup-1` through `setup-5`. The reference step accepts `captured`, `empty`, `review`, or `missing-screen`:
 
 ```bash

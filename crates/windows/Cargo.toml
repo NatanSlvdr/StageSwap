@@ -37,4 +37,3 @@ windows = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-capture = "2.0.0"
-notify-rust = "4.18"

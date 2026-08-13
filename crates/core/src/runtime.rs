@@ -148,6 +148,32 @@ pub struct PreviewFrames {
     pub reference_candidate: Option<Arc<Frame>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RuntimeAlertSource {
+    DeviceWorker,
+    Publisher,
+    VirtualCamera,
+    Webcam,
+    Screen,
+    Matching,
+    Reference,
+    Command,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeWarning {
+    pub source: RuntimeAlertSource,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeAlert {
+    pub id: u64,
+    pub source: RuntimeAlertSource,
+    pub message: String,
+    pub created_at: Instant,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct AppSnapshot {
     pub run_state: RunState,
@@ -173,6 +199,9 @@ pub struct AppSnapshot {
     pub output_fps: Option<u32>,
     pub output_deadline_misses: u64,
     pub warning: Option<String>,
+    pub active_warnings: Arc<[RuntimeWarning]>,
+    pub recent_alerts: Arc<[RuntimeAlert]>,
+    pub recent_alerts_first_id: u64,
     pub recent_activity: Arc<[String]>,
     pub recent_activity_first_id: u64,
     pub previews: PreviewFrames,

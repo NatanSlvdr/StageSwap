@@ -28,7 +28,7 @@ pub use deployment::{
 #[cfg(windows)]
 mod notification;
 #[cfg(windows)]
-pub use notification::{notify_update_available, notify_warning, show_error_dialog};
+pub use notification::show_error_dialog;
 #[cfg(windows)]
 mod http;
 #[cfg(windows)]

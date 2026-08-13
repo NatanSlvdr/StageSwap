@@ -50,7 +50,6 @@ const SETUP_BOOTH_BLACK: Color32 = Color32::from_rgb(16, 18, 23);
 const SETUP_SIGNAL_DECK: Color32 = Color32::from_rgb(26, 29, 36);
 const SETUP_SIGNAL_WHITE: Color32 = Color32::from_rgb(245, 247, 250);
 const REFERENCE_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
-const COMMAND_BUSY_BANNER_DURATION: Duration = Duration::from_secs(5);
 const SETUP_REFERENCE_FLASH_DURATION: Duration = Duration::from_millis(120);
 const SETUP_REFERENCE_CARD_HEIGHT: f32 = 262.0;
 const SETUP_REFERENCE_COLUMN_GAP: f32 = 16.0;
@@ -66,6 +65,12 @@ const SETTINGS_SIDEBAR_CORNER_RADIUS: u8 = 12;
 const SETTINGS_NAV_HOVERED: Color32 = Color32::from_rgb(32, 35, 41);
 const SETTINGS_NAV_SELECTED: Color32 = Color32::from_rgb(45, 48, 55);
 const SETTINGS_NAV_INDICATOR: Color32 = Color32::from_rgb(151, 157, 168);
+const NOTIFICATION_POPOVER_WIDTH: f32 = 356.0;
+const NOTIFICATION_TOAST_WIDTH: f32 = 372.0;
+const NOTIFICATION_POPOVER_SPACING: f32 = 8.0;
+const NOTIFICATION_POPOVER_HEADER_HEIGHT: f32 = 22.0;
+#[cfg(not(windows))]
+const UI_PREVIEW_NOTIFICATION_INTERVAL: Duration = Duration::from_secs(30);
 
 #[path = "app_icon.rs"]
 mod app_icon;
@@ -73,6 +78,8 @@ mod app_icon;
 mod deployment_payload;
 #[path = "local_log.rs"]
 mod local_log;
+#[path = "notifications.rs"]
+mod notifications;
 #[path = "preview_conversion.rs"]
 mod preview_conversion;
 #[path = "setup_guide.rs"]
@@ -85,6 +92,7 @@ mod ui_icon;
 #[path = "update.rs"]
 mod update;
 use local_log::LocalLog;
+use notifications::{NotificationCenter, NotificationItem, NotificationSource, NotificationTone};
 use preview_conversion::PreviewConverter;
 use setup_guide::{
     SetupReturnView, SetupSession, SetupStartup, SetupStateStore, SetupStep, has_existing_user_data,
@@ -106,7 +114,7 @@ pub(crate) fn run() -> eframe::Result {
         Err(error) => {
             eprintln!("StageSwap UI preview: {error}");
             eprintln!(
-                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|updates|diagnostics|setup-1..5|dialog-*] [--ui-language en-US|fr-FR|es] [--ui-setup-reference-state captured|empty|review|missing-screen]"
+                "Usage: StageSwap --ui-preview [general|webcam|screen|matching|updates|diagnostics|notifications[-empty|-critical|-updates]|setup-1..5|dialog-*] [--ui-language en-US|fr-FR|es] [--ui-setup-reference-state captured|empty|review|missing-screen]"
             );
             return Ok(());
         }
@@ -508,6 +516,16 @@ enum UiPreviewTarget {
     Settings(SettingsTab),
     Setup(SetupStep),
     Dialog(AppDialogKind),
+    Notifications(NotificationPreviewState),
+}
+
+#[cfg(not(windows))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NotificationPreviewState {
+    Empty,
+    Critical,
+    Updates,
+    Stacked,
 }
 
 #[cfg(not(windows))]
@@ -573,6 +591,16 @@ fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>,
         Some("dialog-reference-capture") => {
             UiPreviewTarget::Dialog(AppDialogKind::ReferenceCapture)
         }
+        Some("notifications") => UiPreviewTarget::Notifications(NotificationPreviewState::Stacked),
+        Some("notifications-empty") => {
+            UiPreviewTarget::Notifications(NotificationPreviewState::Empty)
+        }
+        Some("notifications-critical") => {
+            UiPreviewTarget::Notifications(NotificationPreviewState::Critical)
+        }
+        Some("notifications-updates") => {
+            UiPreviewTarget::Notifications(NotificationPreviewState::Updates)
+        }
         Some(value) if value.starts_with("setup-") => {
             let number = value
                 .strip_prefix("setup-")
@@ -586,7 +614,7 @@ fn parse_ui_preview_request(args: &[String]) -> Result<Option<UiPreviewRequest>,
             .map(UiPreviewTarget::Settings)
             .ok_or_else(|| {
                 format!(
-                    "unknown UI preview '{value}'; expected a Settings page or dialog-* preview"
+                    "unknown UI preview '{value}'; expected a Settings page, notifications preview, or dialog-* preview"
                 )
             })?,
         _ => UiPreviewTarget::Settings(SettingsTab::General),
@@ -1115,6 +1143,8 @@ const SETTINGS_RECOVERY_TARGETS: [(UiIcon, &str, f32, RestartTarget); 4] = [
 #[cfg(not(windows))]
 struct UiPreviewSession {
     snapshot: AppSnapshot,
+    next_notification_at: Option<Instant>,
+    notification_count: u32,
 }
 
 #[cfg(not(windows))]
@@ -1149,15 +1179,14 @@ struct SwitcherApp {
     render_snapshot: Option<Arc<AppSnapshot>>,
     log: LocalLog,
     last_activity_id: u64,
-    command_banner: Option<(Instant, String)>,
+    notifications: NotificationCenter,
+    notification_center_open: bool,
     update_status: UpdateStatus,
     #[cfg(windows)]
     update_notifications: UpdateNotificationState,
     update_check_started: bool,
     #[cfg(windows)]
     update_worker: Option<UpdateWorker>,
-    #[cfg(windows)]
-    last_notified_warning: Option<String>,
     #[cfg(windows)]
     tray: Option<tray::Tray>,
     #[cfg(windows)]
@@ -1218,8 +1247,16 @@ impl SwitcherApp {
             load_warnings.push(error);
         })
         .ok();
+        let notification_now = Instant::now();
+        let mut notifications = NotificationCenter::default();
         for warning in &load_warnings {
             log.write("warning", "configuration", "LOAD_WARNING", warning);
+            notifications.push_critical(
+                NotificationSource::Configuration,
+                warning.clone(),
+                notification_now,
+                config.show_notifications,
+            );
         }
         Self {
             runtime: RuntimeHandle::spawn(config.clone()),
@@ -1246,15 +1283,14 @@ impl SwitcherApp {
             render_snapshot: None,
             log,
             last_activity_id: 0,
-            command_banner: None,
+            notifications,
+            notification_center_open: false,
             update_status: UpdateStatus::Idle,
             #[cfg(windows)]
             update_notifications,
             update_check_started: false,
             #[cfg(windows)]
             update_worker,
-            #[cfg(windows)]
-            last_notified_warning: None,
             #[cfg(windows)]
             tray: tray::Tray::new(locale).ok(),
             #[cfg(windows)]
@@ -1286,11 +1322,21 @@ impl SwitcherApp {
         Locale::from_tag(&self.config.interface_language).unwrap_or_default()
     }
 
+    fn push_notification_warning(&mut self, source: NotificationSource, message: String) {
+        self.notifications.push_critical(
+            source,
+            message.clone(),
+            Instant::now(),
+            self.config.show_notifications,
+        );
+        self.load_warnings.push(message);
+    }
+
     fn with_setup_startup(mut self, startup: SetupStartup) -> Self {
         for warning in startup.warnings {
             self.log
                 .write("warning", "setup", "SETUP_STATE_WARNING", &warning);
-            self.load_warnings.push(warning);
+            self.push_notification_warning(NotificationSource::Startup, warning);
         }
         if startup.show_setup_guide {
             self.view = AppView::SetupGuide;
@@ -1314,6 +1360,18 @@ impl SwitcherApp {
 
     #[cfg(not(windows))]
     fn with_ui_preview(mut self, request: UiPreviewRequest) -> Self {
+        let preview_now = Instant::now();
+        let periodic_notifications = !matches!(
+            request.target,
+            UiPreviewTarget::Notifications(
+                NotificationPreviewState::Empty
+                    | NotificationPreviewState::Critical
+                    | NotificationPreviewState::Updates
+            )
+        );
+        if periodic_notifications {
+            self.seed_ui_preview_notifications(preview_now);
+        }
         match request.target {
             UiPreviewTarget::Settings(tab) => {
                 self.view = AppView::Settings;
@@ -1344,13 +1402,96 @@ impl SwitcherApp {
                 }
                 self.open_dialog(kind);
             }
+            UiPreviewTarget::Notifications(state) => {
+                self.view = AppView::Dashboard;
+                let now = Instant::now();
+                match state {
+                    NotificationPreviewState::Empty => {
+                        self.notification_center_open = true;
+                    }
+                    NotificationPreviewState::Critical => {
+                        self.notifications.push_critical(
+                            NotificationSource::Webcam,
+                            "The selected webcam stopped delivering frames.",
+                            now,
+                            true,
+                        );
+                        self.notification_center_open = true;
+                    }
+                    NotificationPreviewState::Updates => {
+                        self.notifications.push_update(
+                            "2.4.0",
+                            "StageSwap 2.4.0 is ready. Open Settings → Updates to install it.",
+                            now,
+                            true,
+                        );
+                        self.notification_center_open = true;
+                    }
+                    NotificationPreviewState::Stacked => {
+                        self.notification_center_open = false;
+                    }
+                }
+            }
         }
         self.settings_opened_at = None;
         self.settings_section_changed_at = None;
         self.ui_preview = Some(UiPreviewSession {
             snapshot: ui_preview_snapshot(),
+            next_notification_at: periodic_notifications
+                .then_some(preview_now + UI_PREVIEW_NOTIFICATION_INTERVAL),
+            notification_count: 0,
         });
         self
+    }
+
+    #[cfg(not(windows))]
+    fn seed_ui_preview_notifications(&mut self, now: Instant) {
+        self.notifications.push_critical(
+            NotificationSource::Webcam,
+            "The selected webcam stopped delivering frames.",
+            now,
+            true,
+        );
+        self.notifications.push_critical(
+            NotificationSource::Screen,
+            "The selected secondary screen is not providing frames.",
+            now,
+            true,
+        );
+        self.notifications.push_update(
+            "2.4.0",
+            "StageSwap 2.4.0 is ready. Open Settings → Updates to install it.",
+            now,
+            true,
+        );
+    }
+
+    #[cfg(not(windows))]
+    fn tick_ui_preview_notifications(&mut self, context: &egui::Context, now: Instant) {
+        let count = {
+            let Some(preview) = self.ui_preview.as_mut() else {
+                return;
+            };
+            let Some(next_notification_at) = preview.next_notification_at else {
+                return;
+            };
+            if now < next_notification_at {
+                context.request_repaint_after(next_notification_at - now);
+                return;
+            }
+
+            preview.notification_count = preview.notification_count.saturating_add(1);
+            preview.next_notification_at = Some(now + UI_PREVIEW_NOTIFICATION_INTERVAL);
+            preview.notification_count.to_string()
+        };
+        let message = format_text(
+            self.locale(),
+            "Preview activity notification {0}: 30 seconds have passed.",
+            &[&count],
+        );
+        self.notifications
+            .push_information(NotificationSource::Preview, message, now);
+        context.request_repaint_after(UI_PREVIEW_NOTIFICATION_INTERVAL);
     }
 
     #[cfg(not(windows))]
@@ -1450,18 +1591,12 @@ impl SwitcherApp {
                 let message = "StageSwap is busy. Please try again.".to_owned();
                 self.log
                     .write("warning", "runtime", "COMMAND_QUEUE_BUSY", &message);
-                self.command_banner = Some((Instant::now(), message.clone()));
-                #[cfg(windows)]
-                if self.config.show_notifications
-                    && let Err(error) = stageswap_windows::notify_warning(self.locale(), &message)
-                {
-                    self.log.write(
-                        "warning",
-                        "notification",
-                        "WINDOWS_NOTIFICATION_FAILED",
-                        &error,
-                    );
-                }
+                self.notifications.push_critical(
+                    NotificationSource::Command,
+                    message,
+                    Instant::now(),
+                    self.config.show_notifications,
+                );
                 false
             }
             CommandDispatch::Closed => {
@@ -1469,7 +1604,12 @@ impl SwitcherApp {
                     let message = "StageSwap runtime is unavailable.".to_owned();
                     self.log
                         .write("warning", "runtime", "COMMAND_QUEUE_CLOSED", &message);
-                    self.command_banner = Some((Instant::now(), message));
+                    self.notifications.push_critical(
+                        NotificationSource::Command,
+                        message,
+                        Instant::now(),
+                        self.config.show_notifications,
+                    );
                 }
                 false
             }
@@ -1572,7 +1712,7 @@ impl SwitcherApp {
         self.log
             .write("error", "configuration", "SETTINGS_SAVE_FAILED", &message);
         self.settings_save_error = Some(message.clone());
-        self.load_warnings.push(message);
+        self.push_notification_warning(NotificationSource::Configuration, message);
     }
 
     fn sync_selected_monitor_preference(&mut self, snapshot: &AppSnapshot) {
@@ -1656,24 +1796,39 @@ impl SwitcherApp {
                             .should_notify(self.config.update_channel, release.version);
                     if should_notify {
                         if let Err(error) = self.update_notifications.save(self.store.directory()) {
+                            let message =
+                                format!("Could not save update notification state: {error}");
                             self.log.write(
                                 "warning",
                                 "update",
                                 "UPDATE_NOTIFICATION_STATE_FAILED",
-                                &error,
+                                &message,
                             );
+                            self.notifications.push_critical_with_detail(
+                                NotificationSource::Configuration,
+                                format_text(
+                                    self.locale(),
+                                    "Could not save update notification state.",
+                                    &[],
+                                ),
+                                message.clone(),
+                                Instant::now(),
+                                self.config.show_notifications,
+                            );
+                            self.load_warnings.push(message);
                         }
-                        if let Err(error) = stageswap_windows::notify_update_available(
+                        let version = release.version.to_string();
+                        let message = format_text(
                             self.locale(),
-                            &release.version.to_string(),
-                        ) {
-                            self.log.write(
-                                "warning",
-                                "notification",
-                                "UPDATE_NOTIFICATION_FAILED",
-                                &error,
-                            );
-                        }
+                            "StageSwap {0} is ready. Open Settings → Updates to install it.",
+                            &[&version],
+                        );
+                        self.notifications.push_update(
+                            &version,
+                            message,
+                            Instant::now(),
+                            self.config.notify_updates,
+                        );
                     }
                     self.update_status = UpdateStatus::Available(release);
                 }
@@ -1793,7 +1948,7 @@ impl SwitcherApp {
             );
             self.log
                 .write("warning", "setup", "SETUP_COMPLETION_SAVE_FAILED", &warning);
-            self.load_warnings.push(warning);
+            self.push_notification_warning(NotificationSource::Startup, warning);
         }
     }
 
@@ -1949,7 +2104,7 @@ impl SwitcherApp {
                 for warning in loaded.warnings.drain(..) {
                     self.log
                         .write("warning", "configuration", "LOAD_WARNING", &warning);
-                    self.load_warnings.push(warning);
+                    self.push_notification_warning(NotificationSource::Configuration, warning);
                 }
 
                 let selected_monitor = {
@@ -2046,7 +2201,7 @@ impl SwitcherApp {
             "ADMIN_CONFIGURATION_FAILED",
             &message,
         );
-        self.load_warnings.push(message);
+        self.push_notification_warning(NotificationSource::Configuration, message);
     }
 
     fn import_reference_dialog(&mut self) {
@@ -2055,18 +2210,26 @@ impl SwitcherApp {
             self.send(Command::ImportReference(path));
         }
         #[cfg(not(windows))]
-        self.load_warnings
-            .push("Reference file dialogs are available in the Windows application".into());
+        self.log.write(
+            "info",
+            "ui",
+            "REFERENCE_FILE_DIALOG_UNAVAILABLE",
+            "Reference file dialogs are available in the Windows application",
+        );
     }
 
     fn open_log_directory(&mut self) {
         #[cfg(windows)]
         if let Err(error) = stageswap_windows::open_directory(self.log.directory()) {
-            self.load_warnings.push(error);
+            self.push_notification_warning(NotificationSource::Configuration, error);
         }
         #[cfg(not(windows))]
-        self.load_warnings
-            .push(format!("Log directory: {}", self.log.directory().display()));
+        self.log.write(
+            "info",
+            "ui",
+            "LOG_DIRECTORY_DISPLAY_UNAVAILABLE",
+            &format!("Log directory: {}", self.log.directory().display()),
+        );
     }
 
     fn export_logs(&mut self) {
@@ -2074,12 +2237,18 @@ impl SwitcherApp {
         if let Some(path) = stageswap_windows::pick_log_export_path(self.locale())
             && let Err(error) = self.log.export_to(&path)
         {
-            self.load_warnings
-                .push(format!("Could not export logs: {error}"));
+            self.push_notification_warning(
+                NotificationSource::Configuration,
+                format!("Could not export logs: {error}"),
+            );
         }
         #[cfg(not(windows))]
-        self.load_warnings
-            .push("Log export dialog is available in the Windows application".into());
+        self.log.write(
+            "info",
+            "ui",
+            "LOG_EXPORT_DIALOG_UNAVAILABLE",
+            "Log export dialog is available in the Windows application",
+        );
     }
 
     fn clear_logs(&mut self) {
@@ -2087,9 +2256,10 @@ impl SwitcherApp {
             Ok(()) => self
                 .log
                 .write("info", "logging", "LOGS_CLEARED", "Diagnostic logs cleared"),
-            Err(error) => self
-                .load_warnings
-                .push(format!("Could not clear logs: {error}")),
+            Err(error) => self.push_notification_warning(
+                NotificationSource::Configuration,
+                format!("Could not clear logs: {error}"),
+            ),
         }
     }
 
@@ -2112,13 +2282,6 @@ impl SwitcherApp {
         let render_snapshot = self.snapshot();
         let disco_enabled = render_snapshot.disco_enabled;
         self.render_snapshot = Some(render_snapshot);
-        if self
-            .command_banner
-            .as_ref()
-            .is_some_and(|(shown_at, _)| shown_at.elapsed() >= COMMAND_BUSY_BANNER_DURATION)
-        {
-            self.command_banner = None;
-        }
         let content_rect = ui
             .scope(|ui| {
                 if disco_enabled {
@@ -2148,24 +2311,190 @@ impl SwitcherApp {
             })
             .inner;
         self.dialog(&context);
-        if let Some((_, message)) = &self.command_banner {
-            egui::Area::new(egui::Id::new("command-status-banner"))
-                .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 16.0))
-                .order(egui::Order::Foreground)
-                .show(&context, |ui| {
-                    egui::Frame::new()
-                        .fill(Color32::from_rgb(111, 73, 20))
-                        .corner_radius(8.0)
-                        .inner_margin(egui::Margin::symmetric(14, 8))
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(message).color(Color32::WHITE).strong());
-                        });
-                });
-            context.request_repaint_after(COMMAND_BUSY_BANNER_DURATION);
-        }
+        self.notification_overlay(&context);
         self.paint_disco_interface(&context, content_rect, disco_enabled);
         self.render_snapshot = None;
         content_rect
+    }
+
+    fn notification_overlay(&mut self, context: &egui::Context) {
+        let now = Instant::now();
+        self.notifications.prune(now);
+        if let Some(deadline) = self.notifications.next_toast_deadline() {
+            context.request_repaint_after(deadline.saturating_duration_since(now));
+        }
+
+        if self.active_dialog.is_some() {
+            self.notification_center_open = false;
+            return;
+        }
+
+        let show_bell = matches!(self.view, AppView::Dashboard);
+        if show_bell {
+            let unread = self.notifications.unread_count();
+            let mut clicked = false;
+            egui::Area::new(egui::Id::new("notification-bell"))
+                .anchor(Align2::LEFT_BOTTOM, Vec2::new(14.0, -14.0))
+                .order(egui::Order::Foreground)
+                .show(context, |ui| {
+                    clicked = notification_bell(ui, unread);
+                });
+            let opened_by_bell = clicked && !self.notification_center_open;
+            if clicked {
+                self.notification_center_open = !self.notification_center_open;
+                if self.notification_center_open {
+                    self.notifications.mark_all_read();
+                }
+            }
+            if self.notification_center_open
+                && !opened_by_bell
+                && self.notification_popover(context, now)
+            {
+                self.notification_center_open = false;
+            }
+        } else {
+            self.notification_center_open = false;
+        }
+
+        if !self.notification_center_open {
+            self.notification_toasts(context, now);
+        }
+    }
+
+    fn notification_popover(&mut self, context: &egui::Context, now: Instant) -> bool {
+        let popover_width =
+            (context.content_rect().width() - 48.0).clamp(1.0, NOTIFICATION_POPOVER_WIDTH);
+        let notification_list_height =
+            (context.content_rect().height() - 160.0).clamp(120.0, 360.0);
+        let has_notifications = self.notifications.entries().next().is_some();
+        let mut clear_all = false;
+        let popover = egui::Area::new(egui::Id::new("notification-popover"))
+            .anchor(Align2::LEFT_BOTTOM, Vec2::new(14.0, -54.0))
+            .order(egui::Order::Foreground)
+            .show(context, |ui| {
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(27, 31, 39))
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(66, 73, 87)))
+                    .corner_radius(12)
+                    .inner_margin(8)
+                    .show(ui, |ui| {
+                        ui.set_width(popover_width);
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(ui.available_width(), NOTIFICATION_POPOVER_HEADER_HEIGHT),
+                            egui::Layout::left_to_right(egui::Align::Max),
+                            |ui| {
+                                let (icon_rect, _) =
+                                    ui.allocate_exact_size(Vec2::new(18.0, 18.0), Sense::hover());
+                                ui_icon::paint(
+                                    ui.painter(),
+                                    icon_rect,
+                                    UiIcon::Bell,
+                                    SETTINGS_BLUE,
+                                );
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new(tr(ui, "Notifications"))
+                                        .size(14.0)
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let response = ui.add_enabled_ui(has_notifications, |ui| {
+                                            icon_button(
+                                                ui,
+                                                UiIcon::Trash,
+                                                "Clear all",
+                                                Vec2::new(92.0, NOTIFICATION_POPOVER_HEADER_HEIGHT),
+                                                false,
+                                                false,
+                                            )
+                                        });
+                                        clear_all = response.inner.clicked();
+                                    },
+                                );
+                            },
+                        );
+                        ui.add_space(NOTIFICATION_POPOVER_SPACING);
+                        ui.separator();
+                        ui.add_space(NOTIFICATION_POPOVER_SPACING);
+                        if self.notifications.entries().next().is_none() {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(NOTIFICATION_POPOVER_SPACING);
+                                let (icon_rect, _) =
+                                    ui.allocate_exact_size(Vec2::new(24.0, 24.0), Sense::hover());
+                                ui_icon::paint(
+                                    ui.painter(),
+                                    icon_rect,
+                                    UiIcon::CheckCircle,
+                                    ACTIVE_GREEN,
+                                );
+                                ui.add_space(NOTIFICATION_POPOVER_SPACING);
+                                ui.label(
+                                    RichText::new(tr(ui, "You’re all caught up"))
+                                        .strong()
+                                        .color(Color32::from_rgb(228, 232, 239)),
+                                );
+                                ui.add_space(NOTIFICATION_POPOVER_SPACING);
+                                ui.label(
+                                    RichText::new(tr(ui, "No recent notifications."))
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(145, 153, 168)),
+                                );
+                                ui.add_space(NOTIFICATION_POPOVER_SPACING);
+                            });
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .id_salt("notification-list")
+                                .auto_shrink([false, true])
+                                .content_margin(0.0)
+                                .max_height(notification_list_height)
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.spacing_mut().item_spacing.y = NOTIFICATION_POPOVER_SPACING;
+                                    for item in self.notifications.entries() {
+                                        notification_entry_card(ui, item, now);
+                                    }
+                                });
+                        }
+                    });
+            });
+        if clear_all {
+            self.notifications.clear_all();
+        }
+        context.input(|input| {
+            input.pointer.any_click()
+                && input
+                    .pointer
+                    .interact_pos()
+                    .is_some_and(|position| !popover.response.rect.contains(position))
+        })
+    }
+
+    fn notification_toasts(&self, context: &egui::Context, now: Instant) {
+        let items: Vec<_> = self
+            .notifications
+            .toasts()
+            .filter_map(|toast| self.notifications.entry(toast.notification_id))
+            .cloned()
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        egui::Area::new(egui::Id::new("notification-toasts"))
+            .anchor(Align2::RIGHT_TOP, Vec2::new(-16.0, 16.0))
+            .order(egui::Order::Foreground)
+            .show(context, |ui| {
+                ui.set_width(
+                    (context.content_rect().width() - 32.0).clamp(1.0, NOTIFICATION_TOAST_WIDTH),
+                );
+                ui.spacing_mut().item_spacing.y = 8.0;
+                for item in &items {
+                    notification_toast_card(ui, item, now);
+                }
+            });
     }
 
     fn paint_disco_interface(
@@ -2952,21 +3281,7 @@ impl SwitcherApp {
             self.render_enlarged_dashboard_preview(ui, &snapshot, kind);
             return;
         }
-        for warning in self
-            .load_warnings
-            .iter()
-            .map(String::as_str)
-            .chain(snapshot.warning.as_deref())
-        {
-            egui::Frame::new()
-                .fill(Color32::from_rgb(74, 48, 22))
-                .corner_radius(8)
-                .inner_margin(10)
-                .show(ui, |ui| {
-                    ui.label(RichText::new(warning).color(Color32::from_rgb(255, 210, 130)));
-                });
-        }
-        ui.add_space(8.0);
+        ui.add_space(2.0);
         let available_width = ui.available_width();
         let preview_width = available_width * 0.70;
         let workspace_height = ui.available_height().max(0.0);
@@ -3667,7 +3982,7 @@ impl SwitcherApp {
         {
             self.config.start_with_windows = before.start_with_windows;
             let message = format!("Could not update Start with Windows: {error}");
-            self.load_warnings.push(message.clone());
+            self.push_notification_warning(NotificationSource::Configuration, message);
         }
         if self.config != before {
             if self.config.selected_video_device_id != before.selected_video_device_id {
@@ -3761,8 +4076,10 @@ impl SwitcherApp {
             if translated_button(ui, "Install StageSwap to enable startup").clicked()
                 && let Err(error) = stageswap_windows::request_install()
             {
-                self.load_warnings
-                    .push(format!("Could not start installation: {error}"));
+                self.push_notification_warning(
+                    NotificationSource::Configuration,
+                    format!("Could not start installation: {error}"),
+                );
             }
         } else {
             settings_toggle_row(
@@ -3820,13 +4137,13 @@ impl SwitcherApp {
             ui,
             UiIcon::Bell,
             "Notifications",
-            "Choose whether StageSwap alerts you when something needs attention.",
+            "Choose whether StageSwap shows critical alerts in the app.",
         );
         settings_toggle_row(
             ui,
             &mut self.config.show_notifications,
-            "Show status notifications",
-            "Notify when a component needs attention.",
+            "Show in-app notifications",
+            "Show critical issues in the bell and as brief in-app banners.",
         );
     }
 
@@ -4287,7 +4604,7 @@ impl SwitcherApp {
         {
             #[cfg(windows)]
             if let Err(error) = stageswap_windows::open_camera_privacy_settings() {
-                self.load_warnings.push(error);
+                self.push_notification_warning(NotificationSource::Configuration, error);
             }
         }
 
@@ -5565,7 +5882,13 @@ impl eframe::App for SwitcherApp {
                 }
             }
         }
+        #[cfg(not(windows))]
+        self.tick_ui_preview_notifications(context, Instant::now());
         let snapshot = self.snapshot();
+        let now = Instant::now();
+        self.notifications
+            .ingest_runtime_alerts(&snapshot, self.config.show_notifications, now);
+        self.notifications.prune(now);
         if self
             .awaiting_video_device_id
             .as_ref()
@@ -5618,25 +5941,6 @@ impl eframe::App for SwitcherApp {
                     .write("info", "runtime", "ACTIVITY", activity.as_str());
                 self.last_activity_id = activity_id;
             }
-        }
-        #[cfg(windows)]
-        if self.config.show_notifications
-            && let Some(warning) = snapshot.warning.as_ref()
-            && self.last_notified_warning.as_ref() != Some(warning)
-        {
-            if let Err(error) = stageswap_windows::notify_warning(self.locale(), warning) {
-                self.log.write(
-                    "warning",
-                    "notification",
-                    "WINDOWS_NOTIFICATION_FAILED",
-                    &error,
-                );
-            }
-            self.last_notified_warning = Some(warning.clone());
-        }
-        #[cfg(windows)]
-        if snapshot.warning.is_none() {
-            self.last_notified_warning = None;
         }
         #[cfg(windows)]
         if let Some(tray) = self.tray.as_ref() {
@@ -6916,6 +7220,209 @@ fn setup_warning_callout(ui: &mut egui::Ui, width: f32, title: &str, text: &str)
                 });
         },
     );
+}
+
+fn notification_bell(ui: &mut egui::Ui, unread: usize) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(28.0, 28.0), Sense::click());
+    let icon_color = if response.hovered() {
+        Color32::from_rgb(204, 211, 223)
+    } else {
+        Color32::from_rgb(132, 140, 155)
+    };
+    ui_icon::paint(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), Vec2::new(18.0, 18.0)),
+        UiIcon::Bell,
+        icon_color,
+    );
+    if unread > 0 {
+        ui.painter().circle_filled(
+            Pos2::new(rect.right() - 3.0, rect.top() + 3.0),
+            3.5,
+            LIVE_RED,
+        );
+    }
+    response.on_hover_text(tr(ui, "Notifications")).clicked()
+}
+
+fn notification_entry_card(ui: &mut egui::Ui, item: &NotificationItem, now: Instant) {
+    let (icon, color) = notification_icon_and_color(item.source, item.tone);
+    let available_width = (ui.available_width() - 18.0).max(1.0);
+    egui::Frame::new()
+        .fill(mix_color(Color32::from_rgb(27, 31, 39), color, 0.10))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.28)))
+        .corner_radius(9)
+        .inner_margin(egui::Margin::symmetric(9, 7))
+        .show(ui, |ui| {
+            ui.set_width(available_width);
+            ui.horizontal_top(|ui| {
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(18.0, 18.0), Sense::hover());
+                ui_icon::paint(ui.painter(), icon_rect, icon, color);
+                ui.add_space(7.0);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(notification_title(ui, item.source))
+                                .size(12.5)
+                                .strong()
+                                .color(Color32::from_rgb(235, 238, 244)),
+                        );
+                        if item.unread {
+                            ui.add_space(4.0);
+                            let (dot, _) =
+                                ui.allocate_exact_size(Vec2::new(6.0, 6.0), Sense::hover());
+                            ui.painter().circle_filled(dot.center(), 3.0, color);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(notification_age(ui, item.created_at, now))
+                                    .size(10.0)
+                                    .color(Color32::from_rgb(145, 153, 168)),
+                            );
+                        });
+                    });
+                    ui.add_space(3.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&item.body)
+                                .size(11.5)
+                                .line_height(Some(15.0))
+                                .color(Color32::from_rgb(218, 223, 232)),
+                        )
+                        .wrap(),
+                    );
+                    if let Some(detail) = &item.detail {
+                        ui.add_space(3.0);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(detail)
+                                    .size(10.5)
+                                    .line_height(Some(14.0))
+                                    .color(Color32::from_rgb(165, 173, 187)),
+                            )
+                            .wrap(),
+                        );
+                    }
+                });
+            });
+        });
+}
+
+fn notification_toast_card(ui: &mut egui::Ui, item: &NotificationItem, now: Instant) {
+    let (icon, color) = notification_icon_and_color(item.source, item.tone);
+    let available_width = (ui.available_width() - 20.0).max(1.0);
+    egui::Frame::new()
+        .fill(Color32::from_rgb(27, 31, 39))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.50)))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(available_width);
+            ui.horizontal_top(|ui| {
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(19.0, 19.0), Sense::hover());
+                ui_icon::paint(ui.painter(), icon_rect, icon, color);
+                ui.add_space(7.0);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(notification_title(ui, item.source))
+                                .size(12.0)
+                                .strong()
+                                .color(Color32::WHITE),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(notification_age(ui, item.created_at, now))
+                                    .size(10.0)
+                                    .color(Color32::from_rgb(145, 153, 168)),
+                            );
+                        });
+                    });
+                    ui.add_space(3.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&item.body)
+                                .size(11.5)
+                                .line_height(Some(15.0))
+                                .color(Color32::from_rgb(218, 223, 232)),
+                        )
+                        .wrap(),
+                    );
+                });
+            });
+        });
+}
+
+fn notification_icon_and_color(
+    source: NotificationSource,
+    tone: NotificationTone,
+) -> (UiIcon, Color32) {
+    let icon = match source {
+        NotificationSource::Startup | NotificationSource::Configuration => UiIcon::Settings,
+        NotificationSource::DeviceWorker | NotificationSource::Publisher => UiIcon::Wrench,
+        NotificationSource::VirtualCamera => UiIcon::Broadcast,
+        NotificationSource::Webcam => UiIcon::Camera,
+        NotificationSource::Screen => UiIcon::Monitor,
+        NotificationSource::Matching => UiIcon::Target,
+        NotificationSource::Reference => UiIcon::Image,
+        NotificationSource::Command => UiIcon::Warning,
+        NotificationSource::Updates => UiIcon::Download,
+        NotificationSource::Preview => UiIcon::Info,
+    };
+    let color = match tone {
+        NotificationTone::Critical => LIVE_RED,
+        NotificationTone::Information => SETTINGS_BLUE,
+    };
+    (icon, color)
+}
+
+fn notification_title(ui: &egui::Ui, source: NotificationSource) -> std::borrow::Cow<'static, str> {
+    tr(
+        ui,
+        match source {
+            NotificationSource::Startup => "Startup needs attention",
+            NotificationSource::Configuration => "Configuration needs attention",
+            NotificationSource::DeviceWorker => "Device services need attention",
+            NotificationSource::Publisher => "Frame publisher needs attention",
+            NotificationSource::VirtualCamera => "Zoom output needs attention",
+            NotificationSource::Webcam => "Webcam needs attention",
+            NotificationSource::Screen => "Screen capture needs attention",
+            NotificationSource::Matching => "Matching needs attention",
+            NotificationSource::Reference => "Reference image needs attention",
+            NotificationSource::Command => "StageSwap needs attention",
+            NotificationSource::Updates => "Update available",
+            NotificationSource::Preview => "Preview activity",
+        },
+    )
+}
+
+fn notification_age(ui: &egui::Ui, created_at: Instant, now: Instant) -> String {
+    let seconds = now.saturating_duration_since(created_at).as_secs();
+    if seconds < 60 {
+        return tr(ui, "Just now").into_owned();
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format_text(
+            ui_locale(ui),
+            if minutes == 1 {
+                "{0} minute ago"
+            } else {
+                "{0} minutes ago"
+            },
+            &[&minutes.to_string()],
+        );
+    }
+    let hours = minutes / 60;
+    format_text(
+        ui_locale(ui),
+        if hours == 1 {
+            "{0} hour ago"
+        } else {
+            "{0} hours ago"
+        },
+        &[&hours.to_string()],
+    )
 }
 
 fn controls_section_heading(ui: &mut egui::Ui, icon: UiIcon, title: &str) -> Rect {
@@ -9576,6 +10083,24 @@ mod tests {
                 })
             );
         }
+        for (name, state) in [
+            ("notifications", NotificationPreviewState::Stacked),
+            ("notifications-empty", NotificationPreviewState::Empty),
+            ("notifications-critical", NotificationPreviewState::Critical),
+            ("notifications-updates", NotificationPreviewState::Updates),
+        ] {
+            let args = vec![
+                "StageSwap".to_owned(),
+                "--ui-preview".to_owned(),
+                name.to_owned(),
+            ];
+            assert_eq!(
+                parse_ui_preview_request(&args).unwrap(),
+                Some(UiPreviewRequest {
+                    target: UiPreviewTarget::Notifications(state),
+                })
+            );
+        }
         assert!(
             parse_ui_preview_request(&["StageSwap".to_owned()])
                 .unwrap()
@@ -9652,6 +10177,163 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn flow_ui_preview_seeds_alerts_and_repeats_activity_notifications() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            ui_preview_config(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        )
+        .with_ui_preview(UiPreviewRequest {
+            target: UiPreviewTarget::Notifications(NotificationPreviewState::Stacked),
+        });
+
+        assert_eq!(app.notifications.entries().count(), 3);
+        assert_eq!(app.notifications.toasts().count(), 2);
+        assert_eq!(
+            app.notifications
+                .entries()
+                .filter(|entry| entry.tone == NotificationTone::Critical)
+                .count(),
+            2
+        );
+        assert!(
+            app.notifications
+                .entries()
+                .any(|entry| entry.source == NotificationSource::Updates)
+        );
+
+        let first_due = app
+            .ui_preview
+            .as_ref()
+            .and_then(|preview| preview.next_notification_at)
+            .unwrap();
+        let context = egui::Context::default();
+        app.tick_ui_preview_notifications(&context, first_due);
+
+        assert_eq!(app.notifications.entries().count(), 4);
+        assert_eq!(
+            app.notifications
+                .entries()
+                .filter(|entry| entry.source == NotificationSource::Preview)
+                .count(),
+            1
+        );
+        assert!(
+            app.notifications
+                .entries()
+                .any(|entry| entry.tone == NotificationTone::Information)
+        );
+        assert_eq!(app.notifications.toasts().count(), 2);
+
+        let second_due = app
+            .ui_preview
+            .as_ref()
+            .and_then(|preview| preview.next_notification_at)
+            .unwrap();
+        assert_eq!(second_due, first_due + UI_PREVIEW_NOTIFICATION_INTERVAL);
+        app.tick_ui_preview_notifications(&context, second_due);
+        assert_eq!(
+            app.notifications
+                .entries()
+                .filter(|entry| entry.source == NotificationSource::Preview)
+                .count(),
+            2
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn flow_ui_preview_fixed_notification_states_do_not_start_periodic_activity() {
+        for state in [
+            NotificationPreviewState::Empty,
+            NotificationPreviewState::Critical,
+            NotificationPreviewState::Updates,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let app = SwitcherApp::new(
+                ui_preview_config(),
+                Vec::new(),
+                ConfigStore::new(directory.path()),
+            )
+            .with_ui_preview(UiPreviewRequest {
+                target: UiPreviewTarget::Notifications(state),
+            });
+
+            assert!(
+                app.ui_preview
+                    .as_ref()
+                    .unwrap()
+                    .next_notification_at
+                    .is_none()
+            );
+            assert!(
+                !app.notifications
+                    .entries()
+                    .any(|entry| entry.source == NotificationSource::Preview)
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn flow_notification_popover_closes_on_outside_click() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            ui_preview_config(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        )
+        .with_ui_preview(UiPreviewRequest {
+            target: UiPreviewTarget::Notifications(NotificationPreviewState::Stacked),
+        });
+        let context = egui::Context::default();
+        ui_icon::install_fonts(&context);
+        let viewport = egui::vec2(1280.0, 720.0);
+
+        let render = |app: &mut SwitcherApp, input: egui::RawInput| {
+            let _ = context.run_ui(input, |ui| {
+                app.root_ui(ui);
+            });
+        };
+
+        app.notification_center_open = true;
+        render(
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
+                ..egui::RawInput::default()
+            },
+        );
+        assert!(app.notification_center_open);
+
+        render(
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
+                events: vec![
+                    egui::Event::PointerMoved(Pos2::new(900.0, 100.0)),
+                    egui::Event::PointerButton {
+                        pos: Pos2::new(900.0, 100.0),
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos: Pos2::new(900.0, 100.0),
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..egui::RawInput::default()
+            },
+        );
+        assert!(!app.notification_center_open);
     }
 
     #[cfg(not(windows))]
@@ -9795,7 +10477,7 @@ mod tests {
         ui_icon::install_fonts(&context);
         let viewport = egui::vec2(MIN_WINDOW_HEIGHT * WINDOW_ASPECT_RATIO, MIN_WINDOW_HEIGHT);
 
-        let render_root = |app: &mut SwitcherApp| {
+        let render_root = |app: &mut SwitcherApp, viewport: Vec2| {
             let input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, viewport)),
                 ..egui::RawInput::default()
@@ -9809,7 +10491,39 @@ mod tests {
 
         app.active_dialog = None;
         app.view = AppView::Dashboard;
-        render_root(&mut app);
+        render_root(&mut app, viewport);
+
+        for state in [
+            NotificationPreviewState::Empty,
+            NotificationPreviewState::Critical,
+            NotificationPreviewState::Updates,
+            NotificationPreviewState::Stacked,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut notification_app = SwitcherApp::new(
+                ui_preview_config(),
+                Vec::new(),
+                ConfigStore::new(directory.path()),
+            )
+            .with_ui_preview(UiPreviewRequest {
+                target: UiPreviewTarget::Notifications(state),
+            });
+            notification_app.active_dialog = None;
+            render_root(&mut notification_app, viewport);
+        }
+
+        for locale in Locale::ALL {
+            let directory = tempfile::tempdir().unwrap();
+            let mut config = ui_preview_config();
+            config.interface_language = locale.tag().into();
+            let mut notification_app =
+                SwitcherApp::new(config, Vec::new(), ConfigStore::new(directory.path()))
+                    .with_ui_preview(UiPreviewRequest {
+                        target: UiPreviewTarget::Notifications(NotificationPreviewState::Stacked),
+                    });
+            notification_app.active_dialog = None;
+            render_root(&mut notification_app, egui::vec2(1066.0, 600.0));
+        }
 
         for tab in SettingsTab::ALL {
             app.active_dialog = None;
@@ -9817,7 +10531,7 @@ mod tests {
             app.settings_tab = tab;
             app.settings_opened_at = None;
             app.settings_section_changed_at = None;
-            render_root(&mut app);
+            render_root(&mut app, viewport);
         }
 
         for step in SetupStep::ALL {
@@ -9825,7 +10539,7 @@ mod tests {
             app.view = AppView::SetupGuide;
             app.setup_session = Some(SetupSession::preview(step));
             app.setup_reference_capture = SetupReferenceCaptureState::Idle;
-            render_root(&mut app);
+            render_root(&mut app, viewport);
         }
 
         app.view = AppView::Settings;
@@ -9950,7 +10664,11 @@ mod tests {
             app.setup_reference_capture,
             SetupReferenceCaptureState::Review { .. }
         ));
-        assert!(app.command_banner.is_some());
+        assert!(
+            app.notifications
+                .entries()
+                .any(|entry| entry.source == NotificationSource::Command)
+        );
     }
 
     #[cfg(not(windows))]
@@ -10229,6 +10947,7 @@ mod tests {
             Vec::new(),
             ConfigStore::new(&blocked_path),
         );
+        let initial_notification_count = app.notifications.entries().count();
         app.config.show_notifications = false;
         app.queue_settings_save();
         app.flush_settings();
@@ -10243,6 +10962,10 @@ mod tests {
             app.load_warnings
                 .iter()
                 .any(|warning| warning.contains("Could not save settings"))
+        );
+        assert_eq!(
+            app.notifications.entries().count(),
+            initial_notification_count
         );
     }
 

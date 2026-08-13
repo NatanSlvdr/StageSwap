@@ -4,9 +4,9 @@ use stageswap_core::{
     AppConfig, AppSnapshot, CAPTURE_FRAME_POOL_CAPACITY, Command, DebouncedDetector,
     DetectorSettings, DeviceState, Frame, FrameBufferPool, FrameCompositor, FrameMetadata,
     FramePacer, GrayImage, OutputLayout, OutputMode, PIPELINE_FPS, PIPELINE_SIZE, PipComposition,
-    RunState, Size, Source, SourceAvailability, StillImageDetector, StillImagePipLayout,
-    StillImagePipSize, TransitionController, bgra_to_gray, decide, image_similarity, off_frame,
-    resize_bgra_to_gray, resize_bilinear,
+    RunState, RuntimeAlert, RuntimeAlertSource, RuntimeWarning, Size, Source, SourceAvailability,
+    StillImageDetector, StillImagePipLayout, StillImagePipSize, TransitionController, bgra_to_gray,
+    decide, image_similarity, off_frame, resize_bgra_to_gray, resize_bilinear,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool as StdAtomicBool, Ordering as StdOrdering};
@@ -37,6 +37,7 @@ use std::sync::{Condvar, Mutex};
 const COMMAND_CAPACITY: usize = 32;
 const MAX_COMMANDS_PER_OUTPUT_CYCLE: usize = 8;
 const ACTIVITY_LIMIT: usize = 20;
+const ALERT_LIMIT: usize = 20;
 const REFERENCE_JOB_CAPACITY: usize = 4;
 const REFERENCE_MAX_DIMENSION: u32 = 8192;
 const REFERENCE_MAX_ALLOCATION: u64 = 256 * 1024 * 1024;
@@ -664,6 +665,21 @@ enum WarningSource {
     Command = 8,
 }
 
+impl WarningSource {
+    const fn alert_source(self) -> RuntimeAlertSource {
+        match self {
+            Self::DeviceWorker => RuntimeAlertSource::DeviceWorker,
+            Self::PublisherSink | Self::PublisherController => RuntimeAlertSource::Publisher,
+            Self::VirtualCamera => RuntimeAlertSource::VirtualCamera,
+            Self::WebcamCapture => RuntimeAlertSource::Webcam,
+            Self::ScreenCapture => RuntimeAlertSource::Screen,
+            Self::Hdr => RuntimeAlertSource::Matching,
+            Self::Reference => RuntimeAlertSource::Reference,
+            Self::Command => RuntimeAlertSource::Command,
+        }
+    }
+}
+
 const WARNING_SOURCE_COUNT: usize = 9;
 
 #[derive(Clone)]
@@ -698,9 +714,22 @@ impl WarningRegistry {
         self.entries.iter().find_map(Clone::clone)
     }
 
+    fn active_alerts(&self) -> Vec<RuntimeWarning> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                message.as_ref().map(|message| RuntimeWarning {
+                    source: warning_source_from_index(index).alert_source(),
+                    message: message.clone(),
+                })
+            })
+            .collect()
+    }
+
     #[cfg(windows)]
-    fn copy_device_sources_from(&mut self, source: &Self) -> bool {
-        let mut changed = false;
+    fn copy_device_sources_from(&mut self, source: &Self) -> Vec<(WarningSource, String)> {
+        let mut changed = Vec::new();
         for warning_source in [
             WarningSource::PublisherController,
             WarningSource::VirtualCamera,
@@ -712,10 +741,27 @@ impl WarningRegistry {
             let destination = &mut self.entries[warning_source as usize];
             if destination != source_entry {
                 destination.clone_from(source_entry);
-                changed = true;
+                if let Some(message) = source_entry {
+                    changed.push((warning_source, message.clone()));
+                }
             }
         }
         changed
+    }
+}
+
+fn warning_source_from_index(index: usize) -> WarningSource {
+    match index {
+        0 => WarningSource::DeviceWorker,
+        1 => WarningSource::PublisherSink,
+        2 => WarningSource::PublisherController,
+        3 => WarningSource::VirtualCamera,
+        4 => WarningSource::WebcamCapture,
+        5 => WarningSource::ScreenCapture,
+        6 => WarningSource::Hdr,
+        7 => WarningSource::Reference,
+        8 => WarningSource::Command,
+        _ => unreachable!("warning source index is bounded by WARNING_SOURCE_COUNT"),
     }
 }
 
@@ -773,6 +819,8 @@ struct RuntimeState {
     screen_fps: SourceFpsTracker,
     output_fps: OutputFpsTracker,
     warnings: WarningRegistry,
+    alerts: VecDeque<RuntimeAlert>,
+    next_alert_id: u64,
     activity: VecDeque<String>,
     next_activity_id: u64,
     sequence: u64,
@@ -887,6 +935,8 @@ impl RuntimeState {
             screen_fps: SourceFpsTracker::default(),
             output_fps: OutputFpsTracker::default(),
             warnings: WarningRegistry::default(),
+            alerts: VecDeque::with_capacity(ALERT_LIMIT),
+            next_alert_id: 0,
             activity: VecDeque::with_capacity(ACTIVITY_LIMIT),
             next_activity_id: 1,
             sequence,
@@ -939,15 +989,41 @@ impl RuntimeState {
         self.snapshot.recent_activity = self.activity.iter().cloned().collect::<Vec<_>>().into();
     }
 
+    fn record_alert(&mut self, source: RuntimeAlertSource, message: String) {
+        self.next_alert_id = self.next_alert_id.saturating_add(1).max(1);
+        if self.alerts.len() == ALERT_LIMIT {
+            self.alerts.pop_front();
+        }
+        self.alerts.push_back(RuntimeAlert {
+            id: self.next_alert_id,
+            source,
+            message,
+            created_at: Instant::now(),
+        });
+        self.snapshot.recent_alerts_first_id = self
+            .alerts
+            .front()
+            .map(|alert| alert.id)
+            .unwrap_or_default();
+        self.snapshot.recent_alerts = self.alerts.iter().cloned().collect::<Vec<_>>().into();
+    }
+
+    fn sync_warning_snapshot(&mut self) {
+        self.snapshot.warning = self.warnings.top();
+        self.snapshot.active_warnings = self.warnings.active_alerts().into();
+    }
+
     fn set_warning(&mut self, source: WarningSource, message: impl Into<String>) {
-        if self.warnings.set(source, message) {
-            self.snapshot.warning = self.warnings.top();
+        let message = message.into();
+        if self.warnings.set(source, message.clone()) {
+            self.sync_warning_snapshot();
+            self.record_alert(source.alert_source(), message);
         }
     }
 
     fn clear_warning(&mut self, source: WarningSource) {
         if self.warnings.clear(source) {
-            self.snapshot.warning = self.warnings.top();
+            self.sync_warning_snapshot();
         }
     }
 
@@ -1011,8 +1087,12 @@ impl RuntimeState {
 
     #[cfg(windows)]
     fn merge_device_warnings(&mut self, warnings: &WarningRegistry) {
-        if self.warnings.copy_device_sources_from(warnings) {
-            self.snapshot.warning = self.warnings.top();
+        let changed = self.warnings.copy_device_sources_from(warnings);
+        if !changed.is_empty() {
+            self.sync_warning_snapshot();
+            for (source, message) in changed {
+                self.record_alert(source.alert_source(), message);
+            }
         }
     }
 
@@ -1941,6 +2021,10 @@ impl<P: RuntimePorts> RuntimeEngine<P> {
                         });
                     }
                 } else {
+                    self.state.set_warning(
+                        WarningSource::Command,
+                        "Reference candidate confirmation failed because no candidate is available",
+                    );
                     self.state
                         .record("Reference candidate confirmation failed: no reference candidate");
                 }
@@ -1969,6 +2053,8 @@ impl<P: RuntimePorts> RuntimeEngine<P> {
             _ => None,
         };
         let Some(worker) = self.reference_worker.as_ref() else {
+            self.state
+                .set_warning(WarningSource::Command, "Reference worker is unavailable");
             self.state.record("Reference worker is unavailable");
             return false;
         };
@@ -2590,6 +2676,7 @@ impl DevicePlatform {
                     match webcam.start(&selected) {
                         Ok(()) => Some(selected),
                         Err(error) => {
+                            state.set_warning(WarningSource::WebcamCapture, error.clone());
                             state.record(format!("Webcam initialization failed: {error}"));
                             None
                         }
@@ -2633,6 +2720,7 @@ impl DevicePlatform {
                     ComponentFailureKind::Webcam(webcam_failure_kind(&error)),
                     error.clone(),
                 );
+                state.set_warning(WarningSource::WebcamCapture, error.clone());
                 state.record(format!("Webcam enumeration failed: {error}"));
             }
         }
@@ -2666,6 +2754,7 @@ impl DevicePlatform {
                                 ComponentFailureKind::Screen(screen_failure_kind(&error)),
                                 error.clone(),
                             );
+                            state.set_warning(WarningSource::ScreenCapture, error.clone());
                             state.record(format!("Screen capture failed: {error}"));
                             None
                         }
@@ -2679,6 +2768,7 @@ impl DevicePlatform {
                     ComponentFailureKind::Screen(screen_failure_kind(&error)),
                     error.clone(),
                 );
+                state.set_warning(WarningSource::ScreenCapture, error.clone());
                 state.record(format!("Monitor enumeration failed: {error}"));
                 None
             }
@@ -2700,6 +2790,12 @@ impl DevicePlatform {
             match screen.display_uses_hdr_or_ten_bit(monitor) {
                 Ok(unsupported) => unsupported,
                 Err(error) => {
+                    state.set_warning(
+                        WarningSource::Hdr,
+                        format!(
+                            "Could not determine the selected display color capability: {error}"
+                        ),
+                    );
                     state.record(format!("Display color capability check failed: {error}"));
                     false
                 }
@@ -2830,8 +2926,13 @@ impl DevicePlatform {
                     return;
                 }
                 if let Some(frame) = self.screen.latest_frame() {
+                    state.clear_warning(WarningSource::Reference);
                     state.pending_reference_capture = Some(frame);
                 } else {
+                    state.set_warning(
+                        WarningSource::Reference,
+                        "Reference capture failed because the selected screen has no frame",
+                    );
                     state.record("Reference capture failed: no screen frame");
                 }
             }
@@ -2843,9 +2944,14 @@ impl DevicePlatform {
                     return;
                 }
                 if let Some(frame) = self.screen.latest_frame() {
+                    state.clear_warning(WarningSource::Reference);
                     state.stage_reference_candidate(frame);
                     state.record("Reference candidate captured for review");
                 } else {
+                    state.set_warning(
+                        WarningSource::Reference,
+                        "Reference capture failed because the selected screen has no frame",
+                    );
                     state.record("Reference candidate capture failed: no screen frame");
                 }
             }
@@ -2879,6 +2985,10 @@ impl DevicePlatform {
                     state.snapshot.selected_monitor = Some(monitor);
                     self.restart_screen(state);
                 } else {
+                    state.set_warning(
+                        WarningSource::ScreenCapture,
+                        "Tracked monitor selection failed: monitor unavailable",
+                    );
                     state.record("Tracked monitor selection failed: monitor unavailable");
                 }
             }
@@ -2888,11 +2998,23 @@ impl DevicePlatform {
                     .as_ref()
                     .is_none_or(|worker| !worker.request())
                 {
+                    state.set_warning(
+                        WarningSource::Command,
+                        "Video device refresh worker is unavailable",
+                    );
                     state.record("Video device refresh worker is unavailable");
                 }
             }
             Command::Rescan => {
-                self.request_monitor_scan(state, state.config.cursor_visible);
+                if !self.queue_monitor_scan(state, state.config.cursor_visible) {
+                    state.set_warning(
+                        WarningSource::Command,
+                        "Monitor rescan worker is unavailable",
+                    );
+                    state.record("Monitor rescan worker is unavailable");
+                } else {
+                    state.clear_warning(WarningSource::Command);
+                }
             }
             Command::Stop => {
                 if let Some(publisher) = &self.publisher {
@@ -3062,6 +3184,10 @@ impl DevicePlatform {
                 .snapshot
                 .webcam_component
                 .transition(ComponentLifecycle::Stopped, now);
+            state.set_warning(
+                WarningSource::WebcamCapture,
+                "Webcam restart skipped because no video input is selected",
+            );
             state.record("Webcam restart skipped: no video input selected");
             return;
         }
@@ -3086,6 +3212,7 @@ impl DevicePlatform {
                     ComponentFailureKind::Webcam(webcam_failure_kind(&error)),
                     error.clone(),
                 );
+                state.set_warning(WarningSource::WebcamCapture, error.clone());
                 state.record(format!("Webcam restart failed: {error}"));
             }
         }
@@ -3230,7 +3357,7 @@ impl DevicePlatform {
         {
             state.set_warning(
                 WarningSource::ScreenCapture,
-                "screen capture did not deliver a frame before the startup deadline",
+                "Screen capture is unavailable while HDR or 10-bit color is enabled",
             );
             state.snapshot.screen_state = DeviceState::Failed;
             state.snapshot.screen_component.mark_failed_with_kind(
@@ -3272,6 +3399,10 @@ impl DevicePlatform {
             .first_frame_deadline
             .is_some_and(|deadline| now >= deadline)
         {
+            state.set_warning(
+                WarningSource::ScreenCapture,
+                "Screen capture did not deliver a frame before the startup deadline",
+            );
             state.snapshot.screen_state = DeviceState::Failed;
             state.snapshot.screen_component.mark_failed(
                 now,
@@ -3318,9 +3449,13 @@ impl DevicePlatform {
                     })
                     .collect::<Vec<_>>()
                     .into();
+                state.clear_warning(WarningSource::Command);
                 state.record("Video device list refreshed from settings");
             }
-            Err(error) => state.record(format!("Video device refresh failed: {error}")),
+            Err(error) => {
+                state.set_warning(WarningSource::Command, error.clone());
+                state.record(format!("Video device refresh failed: {error}"));
+            }
         }
     }
 
@@ -3350,6 +3485,10 @@ impl DevicePlatform {
         state.snapshot.availability.screen_ready = false;
         let Some(monitor) = self.selected_monitor.as_ref() else {
             state.snapshot.screen_state = DeviceState::Unavailable;
+            state.set_warning(
+                WarningSource::ScreenCapture,
+                "Screen capture cannot restart because the selected display is unavailable",
+            );
             state.snapshot.screen_component.mark_failed(
                 now,
                 "selected display is unavailable; automatic monitor reselection is disabled",
@@ -3383,6 +3522,7 @@ impl DevicePlatform {
                     ComponentFailureKind::Screen(screen_failure_kind(&error)),
                     error.clone(),
                 );
+                state.set_warning(WarningSource::ScreenCapture, error.clone());
                 state.snapshot.screen_component.consecutive_restart_failures = failures;
                 if automatic {
                     state.snapshot.screen_component.next_permitted_retry =
@@ -5394,13 +5534,35 @@ mod tests {
         state.set_warning(WarningSource::VirtualCamera, "camera");
         state.set_warning(WarningSource::PublisherSink, "publisher");
         assert_eq!(state.snapshot.warning.as_deref(), Some("publisher"));
+        assert_eq!(state.snapshot.active_warnings.len(), 3);
+        assert_eq!(state.snapshot.recent_alerts.len(), 3);
 
         state.clear_warning(WarningSource::VirtualCamera);
         assert_eq!(state.snapshot.warning.as_deref(), Some("publisher"));
+        assert_eq!(state.snapshot.active_warnings.len(), 2);
         state.clear_warning(WarningSource::PublisherSink);
         assert_eq!(state.snapshot.warning.as_deref(), Some("hdr"));
         state.clear_warning(WarningSource::Hdr);
         assert!(state.snapshot.warning.is_none());
+        assert!(state.snapshot.active_warnings.is_empty());
+    }
+
+    #[test]
+    fn contract_warning_changes_emit_one_alert_per_source_message() {
+        let mut state = RuntimeState::new(AppConfig::default());
+        state.set_warning(WarningSource::WebcamCapture, "camera failed");
+        state.set_warning(WarningSource::WebcamCapture, "camera failed");
+        assert_eq!(state.snapshot.recent_alerts.len(), 1);
+        assert_eq!(state.snapshot.recent_alerts[0].id, 1);
+        assert_eq!(state.snapshot.recent_alerts_first_id, 1);
+
+        state.set_warning(WarningSource::WebcamCapture, "camera recovered then failed");
+        assert_eq!(state.snapshot.recent_alerts.len(), 2);
+        assert_eq!(state.snapshot.recent_alerts[1].id, 2);
+        assert_eq!(
+            state.snapshot.recent_alerts[1].source,
+            RuntimeAlertSource::Webcam
+        );
     }
 
     #[test]
