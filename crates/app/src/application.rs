@@ -31,6 +31,9 @@ const VISIBLE_REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 30);
 const HIDDEN_REFRESH: Duration = Duration::from_millis(250);
 const DASHBOARD_PREVIEW_TEXTURE_LIMIT: [u32; 2] = [480, 270];
 const ENLARGED_PREVIEW_TEXTURE_LIMIT: [u32; 2] = [1280, 720];
+const CINEMA_PEEK_SCALE: f32 = 0.92;
+const CINEMA_PEEK_CAPTION_GAP: f32 = 10.0;
+const CINEMA_PEEK_CAPTION_HEIGHT: f32 = 16.0;
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const SETTINGS_ENTRANCE_DURATION: Duration = Duration::from_millis(160);
 const SETTINGS_SECTION_DURATION: Duration = Duration::from_millis(120);
@@ -951,6 +954,13 @@ struct PreviewOptions {
     fps: Option<u32>,
     empty_message: &'static str,
     texture_limit: [u32; 2],
+    style: PreviewStyle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreviewStyle {
+    Card,
+    CinemaPeek,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1048,6 +1058,7 @@ impl PreviewOptions {
             fps,
             empty_message: kind.empty_message(),
             texture_limit: DASHBOARD_PREVIEW_TEXTURE_LIMIT,
+            style: PreviewStyle::Card,
         }
     }
 
@@ -1057,6 +1068,7 @@ impl PreviewOptions {
             fps,
             empty_message: kind.empty_message(),
             texture_limit: ENLARGED_PREVIEW_TEXTURE_LIMIT,
+            style: PreviewStyle::CinemaPeek,
         }
     }
 
@@ -1066,6 +1078,7 @@ impl PreviewOptions {
             fps: None,
             empty_message,
             texture_limit: DASHBOARD_PREVIEW_TEXTURE_LIMIT,
+            style: PreviewStyle::Card,
         }
     }
 }
@@ -2984,12 +2997,18 @@ impl SwitcherApp {
         kind: PreviewKind,
     ) {
         let available = ui.available_size().max(egui::vec2(1.0, 1.0));
-        let preview_width = available.x.min(available.y * WINDOW_ASPECT_RATIO);
+        let content_height =
+            (available.y - CINEMA_PEEK_CAPTION_GAP - CINEMA_PEEK_CAPTION_HEIGHT).max(1.0);
+        let fitted_width = available.x.min(content_height * WINDOW_ASPECT_RATIO);
+        let preview_width = fitted_width * CINEMA_PEEK_SCALE;
         let preview_height = preview_width / WINDOW_ASPECT_RATIO;
+        let content_height = preview_height + CINEMA_PEEK_CAPTION_GAP + CINEMA_PEEK_CAPTION_HEIGHT;
+        let top_margin = ((available.y - content_height) / 2.0).max(0.0);
         ui.allocate_ui_with_layout(
             available,
-            egui::Layout::centered_and_justified(egui::Direction::TopDown),
+            egui::Layout::top_down(egui::Align::Center),
             |ui| {
+                ui.add_space(top_margin);
                 self.preview(
                     ui,
                     kind,
@@ -2998,6 +3017,8 @@ impl SwitcherApp {
                     snapshot.actual_output,
                     PreviewOptions::enlarged(kind, kind.pipeline_fps(snapshot)),
                 );
+                ui.add_space(CINEMA_PEEK_CAPTION_GAP);
+                preview_caption(ui, kind);
             },
         );
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -4827,119 +4848,150 @@ impl SwitcherApp {
         options: PreviewOptions,
     ) -> Rect {
         let available = Vec2::new(maximum[0].min(ui.available_width()), maximum[1]);
-        let contour = preview_contour(kind, actual_output, self.snapshot().output_layout);
-        let disco_enabled = self.snapshot().disco_enabled;
-        let disco_elapsed = Instant::now().saturating_duration_since(self.ui_animation_started_at);
-        let active_amount = ui.ctx().animate_bool_with_time(
-            ui.make_persistent_id((kind.key(), "active-contour")),
-            contour == PreviewContour::Active,
-            0.14,
-        );
-        let disco_offset = match kind {
-            PreviewKind::Webcam => 0.0,
-            PreviewKind::Screen => 0.22,
-            PreviewKind::Reference => 0.46,
-            PreviewKind::Output => 0.7,
-        };
-        let contour_color = if disco_enabled {
-            disco_ui_color(disco_elapsed, disco_offset)
-        } else {
-            match contour {
-                PreviewContour::Live => LIVE_RED,
-                PreviewContour::Active | PreviewContour::Neutral => {
-                    mix_color(PREVIEW_NEUTRAL, ACTIVE_GREEN, active_amount)
-                }
+        let preview_rect = match options.style {
+            PreviewStyle::CinemaPeek => {
+                ui.allocate_ui_with_layout(
+                    available,
+                    egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                    |ui| self.render_preview_content(ui, kind, frame, available, options, true),
+                )
+                .response
+                .rect
+            }
+            PreviewStyle::Card => {
+                let contour = preview_contour(kind, actual_output, self.snapshot().output_layout);
+                let disco_enabled = self.snapshot().disco_enabled;
+                let disco_elapsed =
+                    Instant::now().saturating_duration_since(self.ui_animation_started_at);
+                let active_amount = ui.ctx().animate_bool_with_time(
+                    ui.make_persistent_id((kind.key(), "active-contour")),
+                    contour == PreviewContour::Active,
+                    0.14,
+                );
+                let disco_offset = match kind {
+                    PreviewKind::Webcam => 0.0,
+                    PreviewKind::Screen => 0.22,
+                    PreviewKind::Reference => 0.46,
+                    PreviewKind::Output => 0.7,
+                };
+                let contour_color = if disco_enabled {
+                    disco_ui_color(disco_elapsed, disco_offset)
+                } else {
+                    match contour {
+                        PreviewContour::Live => LIVE_RED,
+                        PreviewContour::Active | PreviewContour::Neutral => {
+                            mix_color(PREVIEW_NEUTRAL, ACTIVE_GREEN, active_amount)
+                        }
+                    }
+                };
+                let contour_width = if disco_enabled { 4.0 } else { 3.0 };
+                let frame_fill = if disco_enabled {
+                    mix_color(Color32::from_rgb(12, 14, 18), contour_color, 0.14)
+                } else {
+                    Color32::from_rgb(12, 14, 18)
+                };
+                let preview_frame = egui::Frame::new()
+                    .fill(frame_fill)
+                    .stroke(Stroke::new(contour_width, contour_color))
+                    .corner_radius(8)
+                    .inner_margin(3);
+                let frame_margin = preview_frame.total_margin();
+                let inner_size = (available
+                    - egui::vec2(
+                        frame_margin.left + frame_margin.right,
+                        frame_margin.top + frame_margin.bottom,
+                    ))
+                .max(egui::vec2(1.0, 1.0));
+                preview_frame
+                    .show(ui, |ui| {
+                        ui.allocate_ui_with_layout(
+                            inner_size,
+                            egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                            |ui| {
+                                self.render_preview_content(
+                                    ui, kind, frame, inner_size, options, false,
+                                );
+                            },
+                        );
+                    })
+                    .response
+                    .rect
             }
         };
-        let contour_width = if disco_enabled { 4.0 } else { 3.0 };
-        let frame_fill = if disco_enabled {
-            mix_color(Color32::from_rgb(12, 14, 18), contour_color, 0.14)
-        } else {
-            Color32::from_rgb(12, 14, 18)
-        };
-        let preview_frame = egui::Frame::new()
-            .fill(frame_fill)
-            .stroke(Stroke::new(contour_width, contour_color))
-            .corner_radius(8)
-            .inner_margin(3);
-        let frame_margin = preview_frame.total_margin();
-        let inner_size = (available
-            - egui::vec2(
-                frame_margin.left + frame_margin.right,
-                frame_margin.top + frame_margin.bottom,
-            ))
-        .max(egui::vec2(1.0, 1.0));
-        let preview = preview_frame.show(ui, |ui| {
-            ui.allocate_ui_with_layout(
-                inner_size,
-                egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                |ui| {
-                    if let Some(frame) = frame {
-                        let texture_size = preview_texture_size(
-                            frame.as_ref(),
-                            inner_size,
-                            ui.ctx().pixels_per_point(),
-                            options.texture_limit,
-                        );
-                        let prepared = {
-                            let converter = self
-                                .preview_converters
-                                .entry(kind)
-                                .or_insert_with(|| PreviewConverter::new(kind.key()));
-                            converter.submit(Arc::clone(frame), texture_size);
-                            converter.take_ready()
-                        };
-                        if let Some(prepared) = prepared {
-                            if let Some(texture) = self.textures.get_mut(kind.key()) {
-                                if !Arc::ptr_eq(&texture.source, &prepared.frame)
-                                    || texture.size != prepared.size
-                                {
-                                    texture.texture.set(prepared.image, TextureOptions::LINEAR);
-                                    texture.source = prepared.frame;
-                                    texture.size = prepared.size;
-                                }
-                            } else {
-                                let texture = ui.ctx().load_texture(
-                                    kind.key(),
-                                    prepared.image,
-                                    TextureOptions::LINEAR,
-                                );
-                                self.textures.insert(
-                                    kind.key(),
-                                    PreviewTexture {
-                                        source: prepared.frame,
-                                        size: prepared.size,
-                                        texture,
-                                    },
-                                );
-                            }
-                        }
-                        if let Some(texture) = self.textures.get(kind.key()) {
-                            ui.add(
-                                egui::Image::new((texture.texture.id(), inner_size))
-                                    .maintain_aspect_ratio(true),
-                            );
-                        } else {
-                            ui.label(
-                                RichText::new(tr(ui, "Preparing preview…"))
-                                    .size(12.0)
-                                    .color(Color32::from_rgb(112, 120, 134)),
-                            );
-                        }
-                    } else {
-                        ui.label(
-                            RichText::new(tr(ui, options.empty_message))
-                                .size(12.0)
-                                .color(Color32::from_rgb(112, 120, 134)),
-                        );
-                    }
-                },
-            );
-        });
         if options.show_fps {
-            paint_fps_overlay(ui, preview.response.rect, options.fps);
+            paint_fps_overlay(ui, preview_rect, options.fps);
         }
-        preview.response.rect
+        preview_rect
+    }
+
+    fn render_preview_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        kind: PreviewKind,
+        frame: Option<&Arc<Frame>>,
+        size: Vec2,
+        options: PreviewOptions,
+        rounded: bool,
+    ) {
+        if let Some(frame) = frame {
+            let texture_size = preview_texture_size(
+                frame.as_ref(),
+                size,
+                ui.ctx().pixels_per_point(),
+                options.texture_limit,
+            );
+            let prepared = {
+                let converter = self
+                    .preview_converters
+                    .entry(kind)
+                    .or_insert_with(|| PreviewConverter::new(kind.key()));
+                converter.submit(Arc::clone(frame), texture_size);
+                converter.take_ready()
+            };
+            if let Some(prepared) = prepared {
+                if let Some(texture) = self.textures.get_mut(kind.key()) {
+                    if !Arc::ptr_eq(&texture.source, &prepared.frame)
+                        || texture.size != prepared.size
+                    {
+                        texture.texture.set(prepared.image, TextureOptions::LINEAR);
+                        texture.source = prepared.frame;
+                        texture.size = prepared.size;
+                    }
+                } else {
+                    let texture =
+                        ui.ctx()
+                            .load_texture(kind.key(), prepared.image, TextureOptions::LINEAR);
+                    self.textures.insert(
+                        kind.key(),
+                        PreviewTexture {
+                            source: prepared.frame,
+                            size: prepared.size,
+                            texture,
+                        },
+                    );
+                }
+            }
+            if let Some(texture) = self.textures.get(kind.key()) {
+                let mut image =
+                    egui::Image::new((texture.texture.id(), size)).maintain_aspect_ratio(true);
+                if rounded {
+                    image = image.corner_radius(8);
+                }
+                ui.add(image);
+            } else {
+                ui.label(
+                    RichText::new(tr(ui, "Preparing preview…"))
+                        .size(12.0)
+                        .color(Color32::from_rgb(112, 120, 134)),
+                );
+            }
+        } else {
+            ui.label(
+                RichText::new(tr(ui, options.empty_message))
+                    .size(12.0)
+                    .color(Color32::from_rgb(112, 120, 134)),
+            );
+        }
     }
 }
 
@@ -9383,6 +9435,70 @@ mod tests {
         let output = PreviewOptions::dashboard(PreviewKind::Output, Some(30));
         assert!(output.show_fps);
         assert_eq!(output.fps, Some(30));
+        assert_eq!(output.style, PreviewStyle::Card);
+        assert_eq!(
+            PreviewOptions::enlarged(PreviewKind::Output, Some(30)).style,
+            PreviewStyle::CinemaPeek
+        );
+        assert_eq!(CINEMA_PEEK_SCALE, 0.92);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn smoke_enlarged_dashboard_preview_keeps_metadata_without_contour() {
+        fn collect_text(shape: &egui::Shape, texts: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => texts.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect_text(shape, texts);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn has_stroke(shape: &egui::Shape) -> bool {
+            match shape {
+                egui::Shape::Rect(rect) => rect.stroke.width > 0.0,
+                egui::Shape::Vec(shapes) => shapes.iter().any(has_stroke),
+                _ => false,
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            ui_preview_config(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        )
+        .with_ui_preview(UiPreviewRequest {
+            target: UiPreviewTarget::Settings(SettingsTab::General),
+        });
+        app.view = AppView::Dashboard;
+        app.enlarged_dashboard_preview = Some(PreviewKind::Output);
+        let context = egui::Context::default();
+        ui_icon::install_fonts(&context);
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 720.0))),
+                ..egui::RawInput::default()
+            },
+            |ui| app.dashboard(ui),
+        );
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            collect_text(&clipped.shape, &mut texts);
+        }
+        assert!(texts.iter().any(|text| text == "ZOOM OUTPUT"));
+        assert!(texts.iter().any(|text| text == "LIVE"));
+        assert!(texts.iter().any(|text| text == "30 FPS"));
+        assert!(
+            !output
+                .shapes
+                .iter()
+                .any(|clipped| has_stroke(&clipped.shape))
+        );
     }
 
     #[cfg(not(windows))]
