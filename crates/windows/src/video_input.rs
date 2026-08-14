@@ -837,28 +837,35 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
                             pixels
                         };
                         let sequence = self.state.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Ok(frame) = Frame::new(
+                        let frame = Frame::new(
                             pixels,
                             PIPELINE_SIZE,
                             PIPELINE_SIZE.width * 4,
                             sequence,
                             timestamp,
                             Instant::now(),
-                        ) && self.state.is_current(self.expected_generation)
-                            && let Ok(mut latest) = self.state.latest.lock()
-                        {
-                            *latest = Some(Arc::new(frame));
+                        )
+                        .map_err(|error| format!("invalid webcam frame: {error:?}"))?;
+                        if self.state.is_current(self.expected_generation) {
+                            *self
+                                .state
+                                .latest
+                                .lock()
+                                .map_err(|_| "webcam frame state is poisoned".to_owned())? =
+                                Some(Arc::new(frame));
                             self.state.clear_failure();
                         }
                         Ok(())
                     });
                 if let Err(error) = copy_result {
+                    self.state.dropped_frames.fetch_add(1, Ordering::Relaxed);
                     self.state.set_failure(
                         webcam_failure_without_hresult(&self.state, error, true),
                         false,
                     );
                 }
             } else {
+                self.state.dropped_frames.fetch_add(1, Ordering::Relaxed);
                 self.state.set_failure(
                     webcam_failure_without_hresult(
                         &self.state,

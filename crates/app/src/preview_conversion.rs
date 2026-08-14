@@ -3,6 +3,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+const PREVIEW_REFRESH_EARLY_TOLERANCE: Duration = Duration::from_millis(2);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PreviewFrameId {
     pub(crate) sequence: u64,
@@ -90,7 +92,8 @@ impl PreviewConverter {
                 });
         if !profile_changed
             && state.last_submitted_at.is_some_and(|submitted| {
-                now.saturating_duration_since(submitted) < minimum_interval
+                now.saturating_duration_since(submitted)
+                    < minimum_interval.saturating_sub(PREVIEW_REFRESH_EARLY_TOLERANCE)
             })
         {
             return;
@@ -299,5 +302,42 @@ mod tests {
         let state = converter.shared.0.lock().unwrap();
         assert_eq!(state.latest_request.unwrap().0.sequence, 3);
         assert_eq!(state.latest_request.unwrap().1, [1280, 720]);
+    }
+
+    #[test]
+    fn contract_thirty_fps_cadence_accepts_small_repaint_jitter_without_halving() {
+        let converter = PreviewConverter::new("jitter-test");
+        let now = Instant::now();
+        let interval = Duration::from_nanos(1_000_000_000 / 30);
+        let frame = |sequence, elapsed| {
+            Arc::new(Frame::placeholder(
+                stageswap_core::Size::new(1280, 720),
+                0xff00_0000 | sequence as u32,
+                sequence,
+                0,
+                now + elapsed,
+            ))
+        };
+
+        converter.submit(frame(1, Duration::ZERO), [240, 135], interval, now);
+        converter.submit(
+            frame(2, Duration::from_millis(20)),
+            [240, 135],
+            interval,
+            now + Duration::from_millis(20),
+        );
+        {
+            let state = converter.shared.0.lock().unwrap();
+            assert_eq!(state.latest_request.unwrap().0.sequence, 1);
+        }
+
+        converter.submit(
+            frame(3, Duration::from_millis(32)),
+            [240, 135],
+            interval,
+            now + Duration::from_millis(32),
+        );
+        let state = converter.shared.0.lock().unwrap();
+        assert_eq!(state.latest_request.unwrap().0.sequence, 3);
     }
 }

@@ -345,7 +345,7 @@ pub(crate) fn run() -> eframe::Result {
             #[cfg(not(windows))]
             let app = app.with_setup_reference_preview_state(setup_reference_preview_state);
             #[cfg(windows)]
-            let app =
+            let mut app =
                 app.with_launch_context(launch_context.mode, instance_receiver, instance_readiness);
             #[cfg(windows)]
             if let Some(visible) = initial_visibility_override(start_visible, app.tray.is_some()) {
@@ -355,6 +355,7 @@ pub(crate) fn run() -> eframe::Result {
                 context
                     .egui_ctx
                     .send_viewport_cmd(egui::ViewportCommand::Visible(visible));
+                app.window_visible = visible;
             }
             Ok(Box::new(app))
         }),
@@ -9701,6 +9702,13 @@ mod tests {
         app.preview_converters
             .insert(PreviewKind::Webcam, converter);
         app.enlarged_dashboard_preview = Some(PreviewKind::Webcam);
+        let output_sequence = app
+            .runtime
+            .snapshot()
+            .previews
+            .final_output
+            .expect("the stopped runtime publishes an output frame")
+            .sequence;
 
         app.hide_window(&egui::Context::default());
         drop(frame);
@@ -9711,6 +9719,23 @@ mod tests {
         assert!(!app.window_visible);
         assert_eq!(app.enlarged_dashboard_preview, None);
         assert_eq!(Arc::strong_count(&pixels), 1);
+        let runtime_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = app.runtime.snapshot();
+            if snapshot
+                .previews
+                .final_output
+                .as_ref()
+                .is_some_and(|output| output.sequence > output_sequence)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < runtime_deadline,
+                "runtime output stopped while the window was hidden"
+            );
+            thread::yield_now();
+        }
         assert!(
             app.preview_converters
                 .get(&PreviewKind::Webcam)
@@ -9771,6 +9796,26 @@ mod tests {
             ENLARGED_PREVIEW_TEXTURE_LIMIT,
         );
         assert_eq!(enlarged, [1280, 720]);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn flow_four_thirty_fps_embedded_previews_fit_inside_one_cpu_second() {
+        let frame = Frame::placeholder(
+            stageswap_core::Size::new(1280, 720),
+            0xff03_0201,
+            1,
+            0,
+            Instant::now(),
+        );
+        let started = Instant::now();
+        for _ in 0..120 {
+            std::hint::black_box(frame_image(&frame, [240, 135]));
+        }
+        assert!(
+            started.elapsed() <= Duration::from_secs(1),
+            "120 embedded preview conversions exceeded one CPU second"
+        );
     }
 
     #[cfg(not(windows))]

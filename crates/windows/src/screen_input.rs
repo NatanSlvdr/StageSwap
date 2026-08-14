@@ -219,6 +219,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             Ok(())
         })();
         if let Err(error) = &result {
+            self.shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
             self.shared
                 .record_failure(self.expected_generation, error.clone());
         }
