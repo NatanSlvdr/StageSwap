@@ -332,6 +332,45 @@ struct FittedCache {
     plan: Option<ScalePlan>,
 }
 
+#[derive(Clone, Debug)]
+struct PipAlphaMask {
+    size: Size,
+    coverage: Arc<[u16]>,
+    opaque_spans: Arc<[(usize, usize)]>,
+}
+
+impl PipAlphaMask {
+    fn new(size: Size) -> Self {
+        let width = size.width as usize;
+        let height = size.height as usize;
+        let coverage = (0..height)
+            .flat_map(|y| {
+                (0..width).map(move |x| {
+                    (rounded_corner_coverage(x, y, width, height, STILL_IMAGE_PIP_CORNER_RADIUS)
+                        * 256.0)
+                        .round() as u16
+                })
+            })
+            .collect::<Vec<_>>();
+        let opaque_spans = (0..height)
+            .map(|y| {
+                let row = &coverage[y * width..(y + 1) * width];
+                let start = row.iter().position(|value| *value == 256).unwrap_or(width);
+                let end = row
+                    .iter()
+                    .rposition(|value| *value == 256)
+                    .map_or(start, |index| index + 1);
+                (start, end)
+            })
+            .collect::<Vec<_>>();
+        Self {
+            size,
+            coverage: coverage.into(),
+            opaque_spans: opaque_spans.into(),
+        }
+    }
+}
+
 impl FittedCache {
     fn fit(&mut self, source: &Arc<Frame>, output: Size) -> Arc<[u8]> {
         if source.size == output && source.stride == output.width * 4 {
@@ -382,6 +421,7 @@ pub struct FrameCompositor {
     screen: FittedCache,
     pip_camera: FittedCache,
     pip_screen: FittedCache,
+    pip_mask: Option<PipAlphaMask>,
     placeholder_color: Option<u32>,
     placeholder_pixels: Arc<[u8]>,
     blend_pool: FrameBufferPool,
@@ -396,6 +436,7 @@ impl Clone for FrameCompositor {
             screen: self.screen.clone(),
             pip_camera: self.pip_camera.clone(),
             pip_screen: self.pip_screen.clone(),
+            pip_mask: self.pip_mask.clone(),
             placeholder_color: self.placeholder_color,
             placeholder_pixels: Arc::clone(&self.placeholder_pixels),
             blend_pool: FrameBufferPool::new(
@@ -422,6 +463,7 @@ impl FrameCompositor {
             screen: FittedCache::default(),
             pip_camera: FittedCache::default(),
             pip_screen: FittedCache::default(),
+            pip_mask: None,
             placeholder_color: None,
             placeholder_pixels: Arc::from([]),
             blend_pool: FrameBufferPool::new(
@@ -446,6 +488,16 @@ impl FrameCompositor {
             self.placeholder_color = Some(color_bgra);
         }
         Arc::clone(&self.placeholder_pixels)
+    }
+
+    fn pip_alpha_mask(&mut self, size: Size) -> PipAlphaMask {
+        if self.pip_mask.as_ref().is_none_or(|mask| mask.size != size) {
+            self.pip_mask = Some(PipAlphaMask::new(size));
+        }
+        self.pip_mask
+            .as_ref()
+            .expect("PIP alpha mask was initialized")
+            .clone()
     }
 
     pub fn compose(
@@ -514,39 +566,27 @@ impl FrameCompositor {
                     .map(|frame| self.pip_camera.fit(frame, inset_size))
                     .unwrap_or_else(|| self.placeholder(color_bgra)),
             };
+            let mask = self.pip_alpha_mask(inset_size);
             let output_width = self.output.width as usize;
-            let inset_width = inset_size.width as usize;
-            let inset_height = inset_size.height as usize;
             let origin_x = STILL_IMAGE_PIP_MARGIN as usize;
             let origin_y =
                 (self.output.height - STILL_IMAGE_PIP_MARGIN - inset_size.height) as usize;
             self.pip_pool
                 .write_with_fallback(|pixels| {
                     pixels.copy_from_slice(&background);
-                    for y in 0..inset_height {
-                        for x in 0..inset_width {
-                            let coverage = rounded_corner_coverage(
-                                x,
-                                y,
-                                inset_width,
-                                inset_height,
-                                STILL_IMAGE_PIP_CORNER_RADIUS,
-                            );
-                            let weight = (pip_mix * coverage * 256.0).round() as u16;
-                            if weight == 0 {
-                                continue;
-                            }
-                            let inverse = 256 - weight;
-                            let destination = ((origin_y + y) * output_width + origin_x + x) * 4;
-                            let source = (y * inset_width + x) * 4;
-                            for channel in 0..4 {
-                                pixels[destination + channel] =
-                                    ((u16::from(pixels[destination + channel]) * inverse
-                                        + u16::from(inset[source + channel]) * weight
-                                        + 128)
-                                        >> 8) as u8;
-                            }
-                        }
+                    let mix_weight = (pip_mix * 256.0).round() as u16;
+                    if mix_weight == 256 {
+                        copy_opaque_pip(pixels, &inset, &mask, output_width, origin_x, origin_y);
+                    } else if mix_weight > 0 {
+                        blend_transitioning_pip(
+                            pixels,
+                            &inset,
+                            &mask,
+                            mix_weight,
+                            output_width,
+                            origin_x,
+                            origin_y,
+                        );
                     }
                     Ok::<(), Infallible>(())
                 })
@@ -563,6 +603,80 @@ impl FrameCompositor {
             metadata.received_at,
         )
         .expect("compositor output is valid")
+    }
+}
+
+fn blend_bgra_pixel(destination: &mut [u8], source: &[u8], weight: u16) {
+    let inverse = 256 - weight;
+    for channel in 0..4 {
+        destination[channel] = ((u16::from(destination[channel]) * inverse
+            + u16::from(source[channel]) * weight
+            + 128)
+            >> 8) as u8;
+    }
+}
+
+fn copy_opaque_pip(
+    output: &mut [u8],
+    inset: &[u8],
+    mask: &PipAlphaMask,
+    output_width: usize,
+    origin_x: usize,
+    origin_y: usize,
+) {
+    let width = mask.size.width as usize;
+    for (y, &(opaque_start, opaque_end)) in mask.opaque_spans.iter().enumerate() {
+        let output_row = ((origin_y + y) * output_width + origin_x) * 4;
+        let inset_row = y * width * 4;
+        if opaque_start < opaque_end {
+            output[output_row + opaque_start * 4..output_row + opaque_end * 4]
+                .copy_from_slice(&inset[inset_row + opaque_start * 4..inset_row + opaque_end * 4]);
+        }
+        for x in (0..opaque_start).chain(opaque_end..width) {
+            let weight = mask.coverage[y * width + x];
+            if weight == 0 {
+                continue;
+            }
+            let destination = output_row + x * 4;
+            let source = inset_row + x * 4;
+            blend_bgra_pixel(
+                &mut output[destination..destination + 4],
+                &inset[source..source + 4],
+                weight,
+            );
+        }
+    }
+}
+
+fn blend_transitioning_pip(
+    output: &mut [u8],
+    inset: &[u8],
+    mask: &PipAlphaMask,
+    mix_weight: u16,
+    output_width: usize,
+    origin_x: usize,
+    origin_y: usize,
+) {
+    let width = mask.size.width as usize;
+    let height = mask.size.height as usize;
+    for y in 0..height {
+        let output_row = ((origin_y + y) * output_width + origin_x) * 4;
+        let inset_row = y * width * 4;
+        for x in 0..width {
+            let weight =
+                (u32::from(mask.coverage[y * width + x]) * u32::from(mix_weight) + 128) / 256;
+            let weight = weight as u16;
+            if weight == 0 {
+                continue;
+            }
+            let destination = output_row + x * 4;
+            let source = inset_row + x * 4;
+            blend_bgra_pixel(
+                &mut output[destination..destination + 4],
+                &inset[source..source + 4],
+                weight,
+            );
+        }
     }
 }
 
@@ -964,6 +1078,44 @@ mod tests {
         }
     }
 
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn flow_pip_composition_keeps_release_720p_work_inside_the_frame_budget() {
+        let now = Instant::now();
+        let camera = Arc::new(Frame::placeholder(PIPELINE_SIZE, 0xff20_4060, 1, 0, now));
+        let screen = Arc::new(Frame::placeholder(PIPELINE_SIZE, 0xff80_a0c0, 2, 0, now));
+        let mut compositor = FrameCompositor::default();
+        let started = Instant::now();
+        for sequence in 1..=300 {
+            let mix = if sequence <= 15 {
+                sequence as f64 / 15.0
+            } else {
+                1.0
+            };
+            let output = compositor.compose_with_pip(
+                Some(&camera),
+                Some(&screen),
+                0.0,
+                Some(PipComposition {
+                    layout: StillImagePipLayout::WebcamMain,
+                    size: StillImagePipSize::Large,
+                    mix,
+                }),
+                0xff00_0000,
+                FrameMetadata {
+                    sequence,
+                    timestamp_100ns: sequence as i64,
+                    received_at: now,
+                },
+            );
+            std::hint::black_box(output);
+        }
+        assert!(
+            started.elapsed() <= Duration::from_secs(10),
+            "300 PIP frames exceeded the 30 fps processing budget"
+        );
+    }
+
     #[test]
     fn contract_compositor_pip_mix_has_exact_endpoints_and_midpoint() {
         let now = Instant::now();
@@ -1178,6 +1330,42 @@ mod tests {
             assert!(second.iter().all(|byte| *byte == 2));
             assert!(fallback.iter().all(|byte| *byte == 3));
         }
+    }
+
+    #[test]
+    fn contract_four_retained_capture_slots_fall_back_then_recover_pool_reuse() {
+        let mut pool = FrameBufferPool::new(32, CAPTURE_FRAME_POOL_CAPACITY);
+        let retained = (0..CAPTURE_FRAME_POOL_CAPACITY)
+            .map(|value| {
+                pool.write_with_fallback(|pixels| {
+                    pixels.fill(value as u8);
+                    Ok::<(), ()>(())
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pool.allocated_slots(), CAPTURE_FRAME_POOL_CAPACITY);
+
+        let fallback = pool
+            .write_with_fallback(|pixels| {
+                pixels.fill(9);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        assert_eq!(pool.allocated_slots(), CAPTURE_FRAME_POOL_CAPACITY);
+        assert_eq!(pool.exhaustion_count(), 1);
+        assert!(fallback.iter().all(|value| *value == 9));
+
+        let first_pointer = Arc::as_ptr(&retained[0]);
+        drop(retained);
+        let reused = pool
+            .write_with_fallback(|pixels| {
+                pixels.fill(7);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        assert_eq!(Arc::as_ptr(&reused), first_pointer);
+        assert_eq!(pool.allocated_slots(), CAPTURE_FRAME_POOL_CAPACITY);
     }
 
     #[test]

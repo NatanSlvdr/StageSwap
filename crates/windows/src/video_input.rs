@@ -534,6 +534,7 @@ struct CaptureState {
     generation: AtomicU64,
     sequence: AtomicU64,
     dropped_frames: AtomicU64,
+    pool_fallbacks: AtomicU64,
     device_tag: AtomicU64,
 }
 
@@ -556,6 +557,7 @@ impl Default for CaptureState {
             generation: AtomicU64::new(0),
             sequence: AtomicU64::new(0),
             dropped_frames: AtomicU64::new(0),
+            pool_fallbacks: AtomicU64::new(0),
             device_tag: AtomicU64::new(0),
         }
     }
@@ -809,22 +811,30 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
                             let _ = unsafe { buffer.Unlock() };
                             result?;
                         }
-                        let pooled = self.state.pool.lock().ok().and_then(|mut pool| {
-                            pool.try_write(|destination| {
-                                aspect_fit_bgra_into(
-                                    &tight,
-                                    size,
-                                    size.width * 4,
-                                    destination,
-                                    PIPELINE_SIZE,
-                                )
-                            })
-                            .ok()
-                            .flatten()
-                        });
-                        let Some(pixels) = pooled else {
-                            self.state.dropped_frames.fetch_add(1, Ordering::Relaxed);
-                            return Ok(());
+                        let pixels = {
+                            let mut pool = self
+                                .state
+                                .pool
+                                .lock()
+                                .map_err(|_| "webcam frame pool is poisoned".to_owned())?;
+                            let previous_exhaustions = pool.exhaustion_count();
+                            let pixels = pool
+                                .write_with_fallback(|destination| {
+                                    aspect_fit_bgra_into(
+                                        &tight,
+                                        size,
+                                        size.width * 4,
+                                        destination,
+                                        PIPELINE_SIZE,
+                                    )
+                                })
+                                .map_err(|error| {
+                                    format!("could not normalize webcam frame: {error:?}")
+                                })?;
+                            if pool.exhaustion_count() > previous_exhaustions {
+                                self.state.pool_fallbacks.fetch_add(1, Ordering::Relaxed);
+                            }
+                            pixels
                         };
                         let sequence = self.state.sequence.fetch_add(1, Ordering::Relaxed) + 1;
                         if let Ok(frame) = Frame::new(
@@ -1087,6 +1097,10 @@ impl MediaFoundationVideoInput {
 
     pub fn dropped_frame_count(&self) -> u64 {
         self.state.dropped_frames.load(Ordering::Relaxed)
+    }
+
+    pub fn pool_fallback_count(&self) -> u64 {
+        self.state.pool_fallbacks.load(Ordering::Relaxed)
     }
 }
 

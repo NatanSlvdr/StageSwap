@@ -21,6 +21,7 @@ This index connects product contracts to their primary implementation areas and 
 | Saved webcam identity, tiered RGB32/NV12/YUY2/MJPEG negotiation, row-aware normalization | `MediaFoundationVideoInput`; video format ranking and copy plan | Ranking, optional-metadata, stride, conversion, x64-build, and native format checks |
 | Compatible media-type changes are revalidated; eligible failure retries the same webcam three times | Capture callback; `WebcamRecovery` | Media-type-change, circuit-breaker, generation, and recovery-state tests |
 | Windows Graphics Capture with cursor option, capability/HDR preflight, and session-valid readiness | `WindowsGraphicsScreenInput`; `DevicePlatform` | Lifecycle, closure, processing-error, old-generation, SDR/HDR, and native capture checks |
+| Four-slot capture pools cannot stall when consumers temporarily retain every slot | `FrameBufferPool`; webcam and screen normalization | Pool-exhaustion fallback, recovery/reuse, pressure-counter, and cross-target checks |
 | Reference discovery is bounded, nonblocking, and requires the same winning display twice | `MonitorTracker`; monitor-scan worker | Ranking, confirmation, coalescing, shutdown, and multi-monitor tests |
 | Selected-screen recovery checks only the stored display and restarts after two black/missing samples | Runtime recovery scheduler; screen lifecycle | Interval, threshold, confirmation-reset, retry, and stored-identity tests |
 
@@ -41,7 +42,7 @@ This index connects product contracts to their primary implementation areas and 
 | Schema 1 configuration and atomic, rollback-safe configuration/reference persistence | `ConfigStore`; `persist_rgba_atomic`; `save_config_atomic` | Round-trip, migration, corruption, writable-flush, and rollback tests |
 | Hidden admin baseline supports validated manual or startup restore | `AdminProfileStore`; Settings admin window | Profile, gesture, policy, transactional restore, rollback, and invalid-data tests |
 | Dashboard, six settings categories, setup, tray controls, notifications, previews, three focused restarts, and restart-all | `stageswap` application and tray modules | Focused `smoke_`, `contract_`, and `flow_` tests; deterministic previews; native review |
-| Runtime-owned FPS and latest-only preview conversion remain valid while hidden | Runtime metrics; preview workers | Mailbox, conversion, hidden-state, and UI flow tests |
+| Embedded previews are 240×135/30 fps, enlarged previews are 1280×720/30 fps, and all preview work is suspended in the tray without retaining source frames | Runtime metrics; preview workers; window visibility state | Cadence/profile, non-retention, suspension, mailbox, hidden-state, and UI flow tests |
 | Fourteen-day JSONL logs and runtime-applied verbose logging | Diagnostics/logging modules | Retention, serialization, malformed-entry, preference, and activity-stream tests |
 
 ## Deployment and updates

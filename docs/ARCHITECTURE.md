@@ -35,7 +35,7 @@ The internal and published contract is immutable CPU BGRA at 1280×720 and 30 fp
 2. Media Foundation ranks progressive RGB32, NV12, YUY2, and MJPEG webcam modes. It prefers RGB32 1280×720 at 30 fps, honors actual row pitch, and normalizes compatible input into the fixed frame contract.
 3. Optional webcam cropping uses the native aspect ratio to create a centered 16:9 crop. Native 16:9 and unknown-aspect input stays unchanged. The crop feeds both preview and output.
 4. Detection derives a 160×90 grayscale image from the screen every 250 ms. Five matches select the webcam; three mismatches select the screen. When enabled, a second detector times exact, consecutive non-reference thumbnails; motion, reference return, near-black input, source loss, or manual mode resets it.
-5. Composition uses aspect-fit scaling, black letterboxing, configurable missing-source fallback, and reversible 500 ms source and PIP blends. Automatic or forced PIP uses a rounded bottom-left inset with a 16 px margin, supports Mini 320×180, Medium 384×216, and Large 448×252 sizes, and allows either source as the main view.
+5. Composition uses aspect-fit scaling, black letterboxing, configurable missing-source fallback, and reversible 500 ms source and PIP blends. Automatic or forced PIP uses a rounded bottom-left inset with a 16 px margin, supports Mini 320×180, Medium 384×216, and Large 448×252 sizes, and allows either source as the main view. Per-size corner masks are cached, and established opaque regions use bulk row copies so PIP remains inside the output deadline.
 6. A monotonic deadline pacer publishes at 30 fps without catch-up bursts or accumulated drift.
 
 ## Runtime ownership and backpressure
@@ -46,7 +46,9 @@ The runtime mailbox is bounded. It processes at most eight ordered commands per 
 
 Lifecycle snapshots distinguish stopped, starting, waiting for first frame, ready, stale, restarting, and failed states. Webcam readiness requires a fresh frame from the current generation. Screen readiness requires a session-valid frame from the live capture, even if its pixels have not changed. Capture errors, closure, and replacement invalidate the relevant generation.
 
-Dashboard rendering does not own the output clock. Visible previews use dedicated latest-only conversion workers and bounded display-sized textures. Runtime-owned FPS measurements remain meaningful while the dashboard is hidden; hidden UI work is throttled to 250 ms.
+Webcam and screen normalization normally recycle four immutable CPU buffers per capture. If all four are temporarily retained, capture uses an unpooled one-frame fallback instead of stalling; pressure and true-drop counters remain separate and are surfaced in Diagnostics.
+
+Dashboard rendering does not own the output clock. Embedded previews use dedicated latest-only conversion workers capped at 240×135 and 30 refreshes per second. Only one explicitly enlarged preview may request 1280×720 at 30 refreshes per second. Converted textures retain lightweight frame identities rather than source frames. Closing to the tray suspends and drains all preview work while runtime-owned capture, detection, FPS measurement, composition, and publication continue independently.
 
 ## Capture, discovery, and recovery
 

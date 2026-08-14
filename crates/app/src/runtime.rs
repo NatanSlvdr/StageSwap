@@ -892,6 +892,46 @@ struct PublisherDiagnosticsState {
     last_reported_at: Option<Instant>,
 }
 
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct CaptureDiagnosticsState {
+    webcam_dropped: u64,
+    screen_dropped: u64,
+    webcam_fallbacks: u64,
+    screen_fallbacks: u64,
+    last_reported_at: Option<Instant>,
+}
+
+#[cfg(any(windows, test))]
+impl CaptureDiagnosticsState {
+    fn observe(
+        &mut self,
+        webcam_dropped: u64,
+        screen_dropped: u64,
+        webcam_fallbacks: u64,
+        screen_fallbacks: u64,
+        now: Instant,
+    ) -> bool {
+        let changed = self.webcam_dropped != webcam_dropped
+            || self.screen_dropped != screen_dropped
+            || self.webcam_fallbacks != webcam_fallbacks
+            || self.screen_fallbacks != screen_fallbacks;
+        let heartbeat_due = self.last_reported_at.is_none_or(|reported| {
+            now.saturating_duration_since(reported) >= Duration::from_secs(5)
+        });
+        self.webcam_dropped = webcam_dropped;
+        self.screen_dropped = screen_dropped;
+        self.webcam_fallbacks = webcam_fallbacks;
+        self.screen_fallbacks = screen_fallbacks;
+        if changed || heartbeat_due {
+            self.last_reported_at = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 impl RuntimeState {
     #[cfg(test)]
     fn new(config: AppConfig) -> Self {
@@ -2562,6 +2602,7 @@ struct DevicePlatform {
     monitor_scan_generation: u64,
     monitor_scan_worker: Option<MonitorScanWorker>,
     video_device_worker: Option<VideoDeviceWorker>,
+    capture_diagnostics: CaptureDiagnosticsState,
 }
 
 #[cfg(windows)]
@@ -2841,6 +2882,7 @@ impl DevicePlatform {
             monitor_scan_generation: 1,
             monitor_scan_worker,
             video_device_worker,
+            capture_diagnostics: CaptureDiagnosticsState::default(),
         };
         if state.config.automatic_monitor_rescans {
             platform.request_monitor_scan(state, state.config.cursor_visible);
@@ -3272,6 +3314,26 @@ impl DevicePlatform {
         }
         if screen_capture_recovery_due {
             self.check_screen_capture_recovery(state, now);
+        }
+        let webcam_dropped = self.webcam.dropped_frame_count();
+        let screen_dropped = self.screen.dropped_frame_count();
+        let webcam_fallbacks = self.webcam.pool_fallback_count();
+        let screen_fallbacks = self.screen.pool_fallback_count();
+        state.snapshot.webcam_capture_dropped_frames = webcam_dropped;
+        state.snapshot.screen_capture_dropped_frames = screen_dropped;
+        state.snapshot.webcam_capture_pool_fallbacks = webcam_fallbacks;
+        state.snapshot.screen_capture_pool_fallbacks = screen_fallbacks;
+        if self.capture_diagnostics.observe(
+            webcam_dropped,
+            screen_dropped,
+            webcam_fallbacks,
+            screen_fallbacks,
+            now,
+        ) {
+            state.record_verbose(format!(
+                "Capture buffer status: webcam_dropped={webcam_dropped}, screen_dropped={screen_dropped}, webcam_pool_fallbacks={webcam_fallbacks}, screen_pool_fallbacks={screen_fallbacks}, output_deadline_misses={}",
+                state.snapshot.output_deadline_misses
+            ));
         }
         let webcam = self.webcam.latest_frame();
         let webcam_is_stale = webcam.as_ref().is_some_and(|frame| {
@@ -3996,6 +4058,10 @@ impl Platform {
         state.snapshot.selected_video_device_id = app.selected_video_device_id.clone();
         state.snapshot.webcam_native_format = app.webcam_native_format.clone();
         state.snapshot.webcam_output_format = app.webcam_output_format.clone();
+        state.snapshot.webcam_capture_dropped_frames = app.webcam_capture_dropped_frames;
+        state.snapshot.screen_capture_dropped_frames = app.screen_capture_dropped_frames;
+        state.snapshot.webcam_capture_pool_fallbacks = app.webcam_capture_pool_fallbacks;
+        state.snapshot.screen_capture_pool_fallbacks = app.screen_capture_pool_fallbacks;
         state.snapshot.monitors = Arc::clone(&app.monitors);
         state.snapshot.selected_monitor = app.selected_monitor.clone();
         state.merge_device_warnings(&device.warnings);
@@ -5341,6 +5407,17 @@ mod tests {
         diagnostics.last_disconnect_error = Some(109);
         state.record_publisher_diagnostics(diagnostics, now + Duration::from_millis(10));
         assert_eq!(state.activity.len(), 2);
+    }
+
+    #[test]
+    fn contract_capture_diagnostics_report_changes_and_throttle_heartbeats() {
+        let now = Instant::now();
+        let mut diagnostics = CaptureDiagnosticsState::default();
+        assert!(diagnostics.observe(0, 0, 0, 0, now));
+        assert!(!diagnostics.observe(0, 0, 0, 0, now + Duration::from_secs(1)));
+        assert!(diagnostics.observe(0, 0, 1, 0, now + Duration::from_secs(2)));
+        assert!(!diagnostics.observe(0, 0, 1, 0, now + Duration::from_secs(3)));
+        assert!(diagnostics.observe(0, 0, 1, 0, now + Duration::from_secs(7)));
     }
 
     #[test]

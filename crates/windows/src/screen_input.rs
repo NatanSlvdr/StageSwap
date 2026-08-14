@@ -106,6 +106,7 @@ struct Shared {
     failure: Mutex<Option<String>>,
     generation: AtomicU64,
     sequence: AtomicU64,
+    pool_fallbacks: AtomicU64,
     dropped_frames: AtomicU64,
 }
 
@@ -179,9 +180,10 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             let height = frame.height();
             let buffer = frame.buffer().map_err(|error| error.to_string())?;
             let pixels = buffer.as_nopadding_buffer(&mut self.scratch);
+            let previous_exhaustions = self.pool.exhaustion_count();
             let pixels = self
                 .pool
-                .try_write(|destination| {
+                .write_with_fallback(|destination| {
                     aspect_fit_bgra_into(
                         pixels,
                         Size::new(width, height),
@@ -191,10 +193,9 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     )
                 })
                 .map_err(|error| format!("could not normalize screen frame: {error:?}"))?;
-            let Some(pixels) = pixels else {
-                self.shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
-                return Ok(());
-            };
+            if self.pool.exhaustion_count() > previous_exhaustions {
+                self.shared.pool_fallbacks.fetch_add(1, Ordering::Relaxed);
+            }
             let sequence = self.shared.sequence.fetch_add(1, Ordering::Relaxed) + 1;
             let frame = Frame::new(
                 pixels,
@@ -250,6 +251,10 @@ impl Default for WindowsGraphicsScreenInput {
 impl WindowsGraphicsScreenInput {
     pub fn dropped_frame_count(&self) -> u64 {
         self.shared.dropped_frames.load(Ordering::Relaxed)
+    }
+
+    pub fn pool_fallback_count(&self) -> u64 {
+        self.shared.pool_fallbacks.load(Ordering::Relaxed)
     }
 
     pub fn last_error(&self) -> Option<String> {

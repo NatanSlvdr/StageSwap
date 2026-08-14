@@ -29,8 +29,10 @@ const SETTINGS_BLUE: Color32 = ui_theme::BLUE;
 const SETTINGS_SWITCH_OFF: Color32 = ui_theme::CONTROL_HOVERED;
 const VISIBLE_REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 30);
 const HIDDEN_REFRESH: Duration = Duration::from_millis(250);
-const DASHBOARD_PREVIEW_TEXTURE_LIMIT: [u32; 2] = [480, 270];
+const DASHBOARD_PREVIEW_TEXTURE_LIMIT: [u32; 2] = [240, 135];
 const ENLARGED_PREVIEW_TEXTURE_LIMIT: [u32; 2] = [1280, 720];
+const EMBEDDED_PREVIEW_REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 30);
+const ENLARGED_PREVIEW_REFRESH: Duration = Duration::from_nanos(1_000_000_000 / 30);
 const CINEMA_PEEK_SCALE: f32 = 0.92;
 const CINEMA_PEEK_CAPTION_GAP: f32 = 10.0;
 const CINEMA_PEEK_CAPTION_HEIGHT: f32 = 16.0;
@@ -95,7 +97,7 @@ mod ui_theme;
 mod update;
 use local_log::LocalLog;
 use notifications::{NotificationCenter, NotificationItem, NotificationSource, NotificationTone};
-use preview_conversion::PreviewConverter;
+use preview_conversion::{PreviewConverter, PreviewFrameId};
 use setup_guide::{
     SetupReturnView, SetupSession, SetupStartup, SetupStateStore, SetupStep, has_existing_user_data,
 };
@@ -324,7 +326,8 @@ pub(crate) fn run() -> eframe::Result {
                 style.spacing.button_padding = egui::vec2(14.0, 8.0);
             });
             let app = SwitcherApp::new(loaded.config, loaded.warnings, store)
-                .with_setup_startup(setup_startup);
+                .with_setup_startup(setup_startup)
+                .with_initial_window_visibility(start_visible);
             #[cfg(not(windows))]
             let app = if let Some(request) = ui_preview_request {
                 app.with_ui_preview(request)
@@ -771,7 +774,7 @@ impl DiscoDiagnosticsGesture {
 }
 
 struct PreviewTexture {
-    source: Arc<Frame>,
+    source: PreviewFrameId,
     size: [usize; 2],
     texture: TextureHandle,
 }
@@ -986,6 +989,7 @@ struct PreviewOptions {
     fps: Option<u32>,
     empty_message: &'static str,
     texture_limit: [u32; 2],
+    refresh_interval: Duration,
     style: PreviewStyle,
 }
 
@@ -1090,6 +1094,7 @@ impl PreviewOptions {
             fps,
             empty_message: kind.empty_message(),
             texture_limit: DASHBOARD_PREVIEW_TEXTURE_LIMIT,
+            refresh_interval: EMBEDDED_PREVIEW_REFRESH,
             style: PreviewStyle::Card,
         }
     }
@@ -1100,6 +1105,7 @@ impl PreviewOptions {
             fps,
             empty_message: kind.empty_message(),
             texture_limit: ENLARGED_PREVIEW_TEXTURE_LIMIT,
+            refresh_interval: ENLARGED_PREVIEW_REFRESH,
             style: PreviewStyle::CinemaPeek,
         }
     }
@@ -1110,6 +1116,7 @@ impl PreviewOptions {
             fps: None,
             empty_message,
             texture_limit: DASHBOARD_PREVIEW_TEXTURE_LIMIT,
+            refresh_interval: EMBEDDED_PREVIEW_REFRESH,
             style: PreviewStyle::Card,
         }
     }
@@ -1207,6 +1214,7 @@ struct SwitcherApp {
     setup_demo_preview_state: Option<SetupDemoPreviewState>,
     setup_animations_enabled: bool,
     enlarged_dashboard_preview: Option<PreviewKind>,
+    window_visible: bool,
     exit_requested: bool,
     last_window_size: Option<Vec2>,
     disco_diagnostics_gesture: DiscoDiagnosticsGesture,
@@ -1314,6 +1322,7 @@ impl SwitcherApp {
             #[cfg(not(windows))]
             setup_animations_enabled: true,
             enlarged_dashboard_preview: None,
+            window_visible: true,
             exit_requested: false,
             last_window_size: None,
             disco_diagnostics_gesture: DiscoDiagnosticsGesture::default(),
@@ -1324,6 +1333,31 @@ impl SwitcherApp {
 
     fn locale(&self) -> Locale {
         Locale::from_tag(&self.config.interface_language).unwrap_or_default()
+    }
+
+    fn with_initial_window_visibility(mut self, visible: bool) -> Self {
+        self.window_visible = visible;
+        self
+    }
+
+    #[cfg(windows)]
+    fn show_window(&mut self, context: &egui::Context) {
+        self.window_visible = true;
+        context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        context.send_viewport_cmd(egui::ViewportCommand::Focus);
+        context.request_repaint();
+    }
+
+    fn hide_window(&mut self, context: &egui::Context) {
+        self.window_visible = false;
+        self.enlarged_dashboard_preview = None;
+        self.render_snapshot = None;
+        for converter in self.preview_converters.values() {
+            converter.suspend();
+        }
+        context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        context.request_repaint_after(HIDDEN_REFRESH);
     }
 
     fn push_notification_warning(&mut self, source: NotificationSource, message: String) {
@@ -4693,6 +4727,25 @@ impl SwitcherApp {
         );
         settings_info_row(
             ui,
+            "Capture buffers",
+            &format!(
+                "Webcam: {} dropped · {} fallbacks · Screen: {} dropped · {} fallbacks",
+                snapshot.webcam_capture_dropped_frames,
+                snapshot.webcam_capture_pool_fallbacks,
+                snapshot.screen_capture_dropped_frames,
+                snapshot.screen_capture_pool_fallbacks,
+            ),
+        );
+        settings_info_row(
+            ui,
+            "Output timing",
+            &format!(
+                "{} missed 30 fps deadline(s) this session",
+                snapshot.output_deadline_misses
+            ),
+        );
+        settings_info_row(
+            ui,
             "Transitions",
             "Reversible 500 ms fade using the live screen frame",
         );
@@ -5272,16 +5325,19 @@ impl SwitcherApp {
                     .preview_converters
                     .entry(kind)
                     .or_insert_with(|| PreviewConverter::new(kind.key()));
-                converter.submit(Arc::clone(frame), texture_size);
+                converter.submit(
+                    Arc::clone(frame),
+                    texture_size,
+                    options.refresh_interval,
+                    Instant::now(),
+                );
                 converter.take_ready()
             };
             if let Some(prepared) = prepared {
                 if let Some(texture) = self.textures.get_mut(kind.key()) {
-                    if !Arc::ptr_eq(&texture.source, &prepared.frame)
-                        || texture.size != prepared.size
-                    {
+                    if texture.source != prepared.id || texture.size != prepared.size {
                         texture.texture.set(prepared.image, TextureOptions::LINEAR);
-                        texture.source = prepared.frame;
+                        texture.source = prepared.id;
                         texture.size = prepared.size;
                     }
                 } else {
@@ -5291,7 +5347,7 @@ impl SwitcherApp {
                     self.textures.insert(
                         kind.key(),
                         PreviewTexture {
-                            source: prepared.frame,
+                            source: prepared.id,
                             size: prepared.size,
                             texture,
                         },
@@ -5877,9 +5933,7 @@ impl eframe::App for SwitcherApp {
             for command in commands {
                 match command {
                     stageswap_windows::InstanceCommand::Show => {
-                        context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        self.show_window(context);
                     }
                     stageswap_windows::InstanceCommand::ShutdownForReplacement => {
                         let _ = save_config(&self.store, &self.config);
@@ -5958,15 +6012,11 @@ impl eframe::App for SwitcherApp {
         if let Some(action) = self.tray.as_ref().and_then(tray::Tray::poll) {
             match action {
                 tray::TrayAction::Show => {
-                    context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.show_window(context);
                 }
                 tray::TrayAction::OpenSettings => {
                     self.open_settings();
-                    context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.show_window(context);
                 }
                 tray::TrayAction::ToggleAutomation => {
                     if matches!(snapshot.run_state, RunState::Running | RunState::Starting) {
@@ -5993,16 +6043,12 @@ impl eframe::App for SwitcherApp {
                     self.settings_tab = SettingsTab::Matching;
                     self.settings_section_changed_at = Some(Instant::now());
                     self.begin_reference_capture();
-                    context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.show_window(context);
                 }
                 tray::TrayAction::Exit => {
                     if self.config.confirm_exit {
                         self.open_dialog(AppDialogKind::Exit);
-                        context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        self.show_window(context);
                     } else {
                         self.exit_requested = true;
                         context.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -6036,7 +6082,7 @@ impl eframe::App for SwitcherApp {
         let close_requested = context.input(|input| input.viewport().close_requested());
         if close_requested && self.config.close_to_tray && !self.exit_requested {
             context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.hide_window(context);
         } else if close_requested && self.config.confirm_exit && !self.exit_requested {
             context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if !self.dialog_is(AppDialogKind::Exit) {
@@ -6048,6 +6094,11 @@ impl eframe::App for SwitcherApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         set_ui_locale(ui.ctx(), self.locale());
+        if !self.window_visible {
+            self.render_snapshot = None;
+            ui.ctx().request_repaint_after(HIDDEN_REFRESH);
+            return;
+        }
         self.root_ui(ui);
         #[cfg(not(windows))]
         if let Some(capture) = self.ui_screenshot.as_mut()
@@ -9622,6 +9673,53 @@ mod tests {
         assert_eq!(HIDDEN_REFRESH, Duration::from_millis(250));
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn contract_hiding_window_suspends_preview_work_and_releases_source_frames() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = SwitcherApp::new(
+            ui_preview_config(),
+            Vec::new(),
+            ConfigStore::new(directory.path()),
+        );
+        let now = Instant::now();
+        let frame = Arc::new(Frame::placeholder(
+            stageswap_core::Size::new(1280, 720),
+            0xff00_0001,
+            1,
+            0,
+            now,
+        ));
+        let pixels = frame.pixels_arc();
+        let converter = PreviewConverter::new(PreviewKind::Webcam.key());
+        converter.submit(
+            Arc::clone(&frame),
+            [240, 135],
+            EMBEDDED_PREVIEW_REFRESH,
+            now,
+        );
+        app.preview_converters
+            .insert(PreviewKind::Webcam, converter);
+        app.enlarged_dashboard_preview = Some(PreviewKind::Webcam);
+
+        app.hide_window(&egui::Context::default());
+        drop(frame);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&pixels) > 1 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(!app.window_visible);
+        assert_eq!(app.enlarged_dashboard_preview, None);
+        assert_eq!(Arc::strong_count(&pixels), 1);
+        assert!(
+            app.preview_converters
+                .get(&PreviewKind::Webcam)
+                .unwrap()
+                .take_ready()
+                .is_none()
+        );
+    }
+
     #[test]
     fn contract_preview_conversion_preserves_size_and_bgra_channels() {
         let frame = Frame::new(
@@ -9653,7 +9751,7 @@ mod tests {
             1.0,
             DASHBOARD_PREVIEW_TEXTURE_LIMIT,
         );
-        assert_eq!(size, [320, 180]);
+        assert_eq!(size, [240, 135]);
         let image = frame_image(&frame, size);
         assert_eq!(image.size, size);
         assert_eq!(image.pixels[0], Color32::from_rgb(3, 2, 1));
@@ -9664,7 +9762,7 @@ mod tests {
             2.0,
             DASHBOARD_PREVIEW_TEXTURE_LIMIT,
         );
-        assert_eq!(high_dpi, [480, 270]);
+        assert_eq!(high_dpi, [240, 135]);
 
         let enlarged = preview_texture_size(
             &frame,
@@ -9816,15 +9914,17 @@ mod tests {
                     0,
                     now,
                 )),
-                [480, 270],
+                [240, 135],
+                Duration::ZERO,
+                now,
             );
         }
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if let Some(prepared) = converter.take_ready()
-                && prepared.frame.sequence == 12
+                && prepared.id.sequence == 12
             {
-                assert_eq!(prepared.size, [480, 270]);
+                assert_eq!(prepared.size, [240, 135]);
                 assert_eq!(prepared.image.pixels[0], Color32::from_rgb(0, 0, 12));
                 break;
             }
@@ -9948,10 +10048,12 @@ mod tests {
         assert!(output.show_fps);
         assert_eq!(output.fps, Some(30));
         assert_eq!(output.style, PreviewStyle::Card);
-        assert_eq!(
-            PreviewOptions::enlarged(PreviewKind::Output, Some(30)).style,
-            PreviewStyle::CinemaPeek
-        );
+        assert_eq!(output.texture_limit, [240, 135]);
+        assert_eq!(output.refresh_interval, EMBEDDED_PREVIEW_REFRESH);
+        let enlarged = PreviewOptions::enlarged(PreviewKind::Output, Some(30));
+        assert_eq!(enlarged.texture_limit, [1280, 720]);
+        assert_eq!(enlarged.refresh_interval, ENLARGED_PREVIEW_REFRESH);
+        assert_eq!(enlarged.style, PreviewStyle::CinemaPeek);
         assert_eq!(CINEMA_PEEK_SCALE, 0.92);
     }
 
