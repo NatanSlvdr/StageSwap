@@ -6,21 +6,21 @@ This index connects product contracts to their primary implementation areas and 
 
 | Contract | Primary implementation | Verification evidence |
 | --- | --- | --- |
-| Immutable CPU BGRA frames at 1280×720 and 30 fps | `stageswap-core::Frame`; app compositor and pacer | Invalid-frame, aspect-fit, blend, immutable-storage, and pacing tests |
+| Immutable CPU BGRA frames at 1280×720 and 30 fps | `stageswap-core::Frame`; capture normalization, compositor, and pacers | Invalid-frame, aspect-fit/fill, blend, immutable-storage, and pacing tests |
 | Visual comparison every 250 ms with five-match/three-mismatch debounce | Runtime detector; `DebouncedDetector` | Detector threshold/debounce tests and runtime switching flows |
 | Optional Auto-only still-image PIP requires exact continuous non-reference samples and both live sources | `StillImageDetector`; runtime PIP policy | Stillness reset/timing, forced-mode, source-loss, and paused-content flows |
 | Missing reference or screen falls back to webcam; missing webcam uses the configured placeholder | `decide`; compositor fallback policy | Decision-table and composition contract tests |
 | Reversible 500 ms source transition with black letterboxing | `TransitionController`; `Frame::blend`; aspect-fit cache | Transition reversal, blend boundary, and fit tests |
-| Rounded bottom-left PIP supports Mini 320×180, Medium 384×216, and Large 448×252 sizes, either main source, and automatic or forced activation without changing output format | `FrameCompositor`; PIP mix state | Per-size geometry, rounded-mask, endpoint, midpoint, forced-mode, immutability, and dual-layout tests |
+| Rounded bottom-left PIP supports Mini 320×180, Medium 384×216, and Large 448×252 sizes, either main source, and automatic or forced activation without changing output format | `FrameCompositor`; cached direct-sampling PIP plan; PIP mix state | Per-size geometry, rounded-mask, endpoint, midpoint, missing-source, rotating-source performance, immutability, and dual-layout tests |
 | Stopped automation publishes the canonical StageSwap off frame at 30 fps | Runtime stopped state; shared off-frame generator | Stopped-output and publisher fallback tests |
 
 ## Capture and recovery
 
 | Contract | Primary implementation | Verification evidence |
 | --- | --- | --- |
-| Saved webcam identity, tiered RGB32/NV12/YUY2/MJPEG negotiation, row-aware normalization | `MediaFoundationVideoInput`; video format ranking and copy plan | Ranking, optional-metadata, stride, conversion, x64-build, and native format checks |
+| Saved webcam identity, tiered RGB32/NV12/YUY2/MJPEG negotiation, row-aware capture normalization, optional 16:9 aspect-fill, and 30 fps processing ceiling | `MediaFoundationVideoInput`; rational format ranking, callback pacer, and fit/fill primitives | Rational-ranking, 30/60/59.94/120 admission, decimation-counter, crop-toggle, aspect, stride, conversion, x64-build, and native format checks |
 | Compatible media-type changes are revalidated; eligible failure retries the same webcam three times | Capture callback; `WebcamRecovery` | Media-type-change, circuit-breaker, generation, and recovery-state tests |
-| Windows Graphics Capture with cursor option, capability/HDR preflight, and session-valid readiness | `WindowsGraphicsScreenInput`; `DevicePlatform` | Lifecycle, closure, processing-error, old-generation, SDR/HDR, and native capture checks |
+| Windows Graphics Capture with cursor option, capability/HDR preflight, session-valid readiness, and two transient processing failures before terminal failure | `WindowsGraphicsScreenInput`; per-generation failure streak; `DevicePlatform` | Retained-frame, streak-reset, third-failure, closure, old-generation, SDR/HDR, and native capture checks |
 | Four-slot capture pools cannot stall when consumers temporarily retain every slot | `FrameBufferPool`; webcam and screen normalization | Pool-exhaustion fallback, recovery/reuse, pressure-counter, and cross-target checks |
 | Reference discovery is bounded, nonblocking, and requires the same winning display twice | `MonitorTracker`; monitor-scan worker | Ranking, confirmation, coalescing, shutdown, and multi-monitor tests |
 | Selected-screen recovery checks only the stored display and restarts after two black/missing samples | Runtime recovery scheduler; screen lifecycle | Interval, threshold, confirmation-reset, retry, and stored-identity tests |
@@ -31,8 +31,8 @@ This index connects product contracts to their primary implementation areas and 
 | --- | --- | --- |
 | Deterministic lifecycle, bounded mailbox, ordered actions, coalesced settings, independent shutdown | `RuntimeEngine`; runtime mailbox | Virtual-clock lifecycle, command-flood, ordering, coalescing, and shutdown tests |
 | Deadline-based output pacing without drift or catch-up bursts | `FramePacer` | Long-gap and missed-deadline tests |
-| Strict 40-byte bounded frame IPC with two-second expiry and latest-frame retention | `FrameHeader`; `SharedFrameCache`; `FramePublisher` | Header, validation, expiry, and slow-consumer IPC tests |
-| Rust Media Foundation COM source implements the required source and stream interfaces | `stageswap-media-source::com_server` | Windows COM/source-state tests and PE validation |
+| Strict 40-byte bounded frame IPC with two-second expiry, latest-frame retention, and reconnect-scoped sequence epochs | `FrameHeader`; `SharedFrameCache`; `FramePublisher` | Header, validation, invalidation ordering, reconnect reset, duplicate rejection, publisher-restart, expiry, and slow-consumer IPC tests |
+| Rust Media Foundation COM source implements the required source and stream interfaces and synchronously stops its pipe worker during stream shutdown | `stageswap-media-source::com_server` | Repeated-shutdown, worker-join, retained-sample, Windows COM/source-state tests, and PE validation |
 | RGB32 and NV12 1280×720 at 30 fps; limited-range BT.601 NV12 metadata; no 1080p | `MediaStream` media types and NV12 sequence cache | Color/grayscale conversion and metadata tests; Media Foundation probe; Windows Camera and Zoom checks |
 
 ## Configuration, UI, and diagnostics

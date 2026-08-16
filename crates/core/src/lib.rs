@@ -25,7 +25,7 @@ pub use frame::{
     FrameError, FrameMetadata, PIPELINE_FPS, PIPELINE_SIZE, PipComposition,
     STILL_IMAGE_PIP_CORNER_RADIUS, STILL_IMAGE_PIP_LARGE_SIZE, STILL_IMAGE_PIP_MARGIN,
     STILL_IMAGE_PIP_MEDIUM_SIZE, STILL_IMAGE_PIP_MINI_SIZE, STILL_IMAGE_PIP_SIZE,
-    aspect_fit_bgra_into, off_frame, off_frame_pixels,
+    aspect_fill_bgra_into, aspect_fit_bgra_into, off_frame, off_frame_pixels,
 };
 pub use image::{
     GrayImage, ImageError, bgra_to_gray, image_similarity, resize_bgra_to_gray, resize_bilinear,

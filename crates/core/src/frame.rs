@@ -220,6 +220,76 @@ pub fn aspect_fit_bgra_into(
     Ok(())
 }
 
+pub fn aspect_fill_bgra_into(
+    source: &[u8],
+    source_size: Size,
+    source_stride: u32,
+    source_display_aspect_ratio: f64,
+    destination: &mut [u8],
+    output: Size,
+) -> Result<(), FrameError> {
+    if !source_display_aspect_ratio.is_finite() || source_display_aspect_ratio <= 0.0 {
+        return Err(FrameError::InvalidAspectRatio);
+    }
+    if source_size.width == 0 || source_size.height == 0 || output.width == 0 || output.height == 0
+    {
+        return Err(FrameError::Empty);
+    }
+    let source_row_bytes = source_size
+        .width
+        .checked_mul(4)
+        .ok_or(FrameError::TooLarge)?;
+    if source_stride < source_row_bytes {
+        return Err(FrameError::InvalidStride);
+    }
+    let source_bytes = usize::try_from(source_stride)
+        .ok()
+        .and_then(|stride| stride.checked_mul(source_size.height as usize))
+        .ok_or(FrameError::TooLarge)?;
+    let output_stride = output.width.checked_mul(4).ok_or(FrameError::TooLarge)?;
+    let output_bytes = usize::try_from(output_stride)
+        .ok()
+        .and_then(|stride| stride.checked_mul(output.height as usize))
+        .ok_or(FrameError::TooLarge)?;
+    if source.len() < source_bytes || destination.len() != output_bytes {
+        return Err(FrameError::InvalidLength);
+    }
+
+    let output_aspect_ratio = output.width as f64 / output.height as f64;
+    let (crop_width, crop_height) = if source_display_aspect_ratio > output_aspect_ratio {
+        (
+            (source_size.width as f64 * output_aspect_ratio / source_display_aspect_ratio)
+                .round()
+                .clamp(1.0, source_size.width as f64) as u32,
+            source_size.height,
+        )
+    } else {
+        (
+            source_size.width,
+            (source_size.height as f64 * source_display_aspect_ratio / output_aspect_ratio)
+                .round()
+                .clamp(1.0, source_size.height as f64) as u32,
+        )
+    };
+    let x_offset = (source_size.width - crop_width) / 2;
+    let y_offset = (source_size.height - crop_height) / 2;
+    for y in 0..output.height {
+        let source_y =
+            y_offset + ((u64::from(y) * u64::from(crop_height)) / u64::from(output.height)) as u32;
+        let source_row = source_y as usize * source_stride as usize;
+        let destination_row = y as usize * output_stride as usize;
+        for x in 0..output.width {
+            let source_x = x_offset
+                + ((u64::from(x) * u64::from(crop_width)) / u64::from(output.width)) as u32;
+            let source_offset = source_row + source_x as usize * 4;
+            let destination_offset = destination_row + x as usize * 4;
+            destination[destination_offset..destination_offset + 4]
+                .copy_from_slice(&source[source_offset..source_offset + 4]);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FrameMetadata {
     pub sequence: u64,
@@ -336,7 +406,6 @@ struct FittedCache {
 struct PipAlphaMask {
     size: Size,
     coverage: Arc<[u16]>,
-    opaque_spans: Arc<[(usize, usize)]>,
 }
 
 impl PipAlphaMask {
@@ -352,22 +421,31 @@ impl PipAlphaMask {
                 })
             })
             .collect::<Vec<_>>();
-        let opaque_spans = (0..height)
-            .map(|y| {
-                let row = &coverage[y * width..(y + 1) * width];
-                let start = row.iter().position(|value| *value == 256).unwrap_or(width);
-                let end = row
-                    .iter()
-                    .rposition(|value| *value == 256)
-                    .map_or(start, |index| index + 1);
-                (start, end)
-            })
-            .collect::<Vec<_>>();
         Self {
             size,
             coverage: coverage.into(),
-            opaque_spans: opaque_spans.into(),
         }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct PipScaleCache {
+    plan: Option<ScalePlan>,
+}
+
+impl PipScaleCache {
+    fn plan(&mut self, source: &Frame, output: Size) -> ScalePlan {
+        if self
+            .plan
+            .as_ref()
+            .is_none_or(|plan| !plan.matches(source, output))
+        {
+            self.plan = Some(ScalePlan::new(source, output));
+        }
+        self.plan
+            .as_ref()
+            .expect("PIP scale plan was initialized")
+            .clone()
     }
 }
 
@@ -419,8 +497,8 @@ pub struct FrameCompositor {
     output: Size,
     camera: FittedCache,
     screen: FittedCache,
-    pip_camera: FittedCache,
-    pip_screen: FittedCache,
+    pip_camera: PipScaleCache,
+    pip_screen: PipScaleCache,
     pip_mask: Option<PipAlphaMask>,
     placeholder_color: Option<u32>,
     placeholder_pixels: Arc<[u8]>,
@@ -461,8 +539,8 @@ impl FrameCompositor {
             output,
             camera: FittedCache::default(),
             screen: FittedCache::default(),
-            pip_camera: FittedCache::default(),
-            pip_screen: FittedCache::default(),
+            pip_camera: PipScaleCache::default(),
+            pip_screen: PipScaleCache::default(),
             pip_mask: None,
             placeholder_color: None,
             placeholder_pixels: Arc::from([]),
@@ -558,13 +636,15 @@ impl FrameCompositor {
                     && self.output.height >= inset_size.height + STILL_IMAGE_PIP_MARGIN * 2,
                 "PIP output must contain the selected inset and margins"
             );
-            let inset = match pip.layout {
-                StillImagePipLayout::WebcamMain => screen
-                    .map(|frame| self.pip_screen.fit(frame, inset_size))
-                    .unwrap_or_else(|| self.placeholder(color_bgra)),
-                StillImagePipLayout::ScreenMain => camera
-                    .map(|frame| self.pip_camera.fit(frame, inset_size))
-                    .unwrap_or_else(|| self.placeholder(color_bgra)),
+            let (inset, scale_plan) = match pip.layout {
+                StillImagePipLayout::WebcamMain => (
+                    screen.map(Arc::as_ref),
+                    screen.map(|frame| self.pip_screen.plan(frame, inset_size)),
+                ),
+                StillImagePipLayout::ScreenMain => (
+                    camera.map(Arc::as_ref),
+                    camera.map(|frame| self.pip_camera.plan(frame, inset_size)),
+                ),
             };
             let mask = self.pip_alpha_mask(inset_size);
             let output_width = self.output.width as usize;
@@ -575,19 +655,19 @@ impl FrameCompositor {
                 .write_with_fallback(|pixels| {
                     pixels.copy_from_slice(&background);
                     let mix_weight = (pip_mix * 256.0).round() as u16;
-                    if mix_weight == 256 {
-                        copy_opaque_pip(pixels, &inset, &mask, output_width, origin_x, origin_y);
-                    } else if mix_weight > 0 {
-                        blend_transitioning_pip(
-                            pixels,
-                            &inset,
-                            &mask,
-                            mix_weight,
+                    compose_pip_direct(
+                        pixels,
+                        inset,
+                        scale_plan.as_ref(),
+                        color_bgra,
+                        &mask,
+                        mix_weight,
+                        PipTarget {
                             output_width,
                             origin_x,
                             origin_y,
-                        );
-                    }
+                        },
+                    );
                     Ok::<(), Infallible>(())
                 })
                 .expect("an infallible PIP composition cannot fail")
@@ -616,52 +696,28 @@ fn blend_bgra_pixel(destination: &mut [u8], source: &[u8], weight: u16) {
     }
 }
 
-fn copy_opaque_pip(
-    output: &mut [u8],
-    inset: &[u8],
-    mask: &PipAlphaMask,
+#[derive(Clone, Copy)]
+struct PipTarget {
     output_width: usize,
     origin_x: usize,
     origin_y: usize,
-) {
-    let width = mask.size.width as usize;
-    for (y, &(opaque_start, opaque_end)) in mask.opaque_spans.iter().enumerate() {
-        let output_row = ((origin_y + y) * output_width + origin_x) * 4;
-        let inset_row = y * width * 4;
-        if opaque_start < opaque_end {
-            output[output_row + opaque_start * 4..output_row + opaque_end * 4]
-                .copy_from_slice(&inset[inset_row + opaque_start * 4..inset_row + opaque_end * 4]);
-        }
-        for x in (0..opaque_start).chain(opaque_end..width) {
-            let weight = mask.coverage[y * width + x];
-            if weight == 0 {
-                continue;
-            }
-            let destination = output_row + x * 4;
-            let source = inset_row + x * 4;
-            blend_bgra_pixel(
-                &mut output[destination..destination + 4],
-                &inset[source..source + 4],
-                weight,
-            );
-        }
-    }
 }
 
-fn blend_transitioning_pip(
+fn compose_pip_direct(
     output: &mut [u8],
-    inset: &[u8],
+    source: Option<&Frame>,
+    scale_plan: Option<&ScalePlan>,
+    placeholder_color: u32,
     mask: &PipAlphaMask,
     mix_weight: u16,
-    output_width: usize,
-    origin_x: usize,
-    origin_y: usize,
+    target: PipTarget,
 ) {
     let width = mask.size.width as usize;
     let height = mask.size.height as usize;
+    let placeholder = placeholder_color.to_le_bytes();
+    let black = [0, 0, 0, 0xff];
     for y in 0..height {
-        let output_row = ((origin_y + y) * output_width + origin_x) * 4;
-        let inset_row = y * width * 4;
+        let output_row = ((target.origin_y + y) * target.output_width + target.origin_x) * 4;
         for x in 0..width {
             let weight =
                 (u32::from(mask.coverage[y * width + x]) * u32::from(mix_weight) + 128) / 256;
@@ -670,12 +726,30 @@ fn blend_transitioning_pip(
                 continue;
             }
             let destination = output_row + x * 4;
-            let source = inset_row + x * 4;
-            blend_bgra_pixel(
-                &mut output[destination..destination + 4],
-                &inset[source..source + 4],
-                weight,
-            );
+            let source_pixel = source
+                .zip(scale_plan)
+                .map_or(&placeholder[..], |(source, plan)| {
+                    let plan_x = x.checked_sub(plan.x_offset as usize);
+                    let plan_y = y.checked_sub(plan.y_offset as usize);
+                    match (plan_x, plan_y) {
+                        (Some(plan_x), Some(plan_y))
+                            if plan_x < plan.source_x.len() && plan_y < plan.source_rows.len() =>
+                        {
+                            let offset = plan.source_rows[plan_y] + plan.source_x[plan_x];
+                            &source.pixels[offset..offset + 4]
+                        }
+                        _ => &black,
+                    }
+                });
+            if weight == 256 {
+                output[destination..destination + 4].copy_from_slice(source_pixel);
+            } else {
+                blend_bgra_pixel(
+                    &mut output[destination..destination + 4],
+                    source_pixel,
+                    weight,
+                );
+            }
         }
     }
 }
@@ -711,6 +785,7 @@ impl Default for FrameCompositor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameError {
     Empty,
+    InvalidAspectRatio,
     InvalidStride,
     InvalidLength,
     TooLarge,
@@ -1084,9 +1159,33 @@ mod tests {
         let now = Instant::now();
         let camera = Arc::new(Frame::placeholder(PIPELINE_SIZE, 0xff20_4060, 1, 0, now));
         let screen = Arc::new(Frame::placeholder(PIPELINE_SIZE, 0xff80_a0c0, 2, 0, now));
+        let camera_pixels = camera.pixels_arc();
+        let screen_pixels = screen.pixels_arc();
         let mut compositor = FrameCompositor::default();
         let started = Instant::now();
         for sequence in 1..=300 {
+            let camera = Arc::new(
+                Frame::new(
+                    Arc::clone(&camera_pixels),
+                    PIPELINE_SIZE,
+                    PIPELINE_SIZE.width * 4,
+                    sequence,
+                    sequence as i64,
+                    now,
+                )
+                .unwrap(),
+            );
+            let screen = Arc::new(
+                Frame::new(
+                    Arc::clone(&screen_pixels),
+                    PIPELINE_SIZE,
+                    PIPELINE_SIZE.width * 4,
+                    sequence,
+                    sequence as i64,
+                    now,
+                )
+                .unwrap(),
+            );
             let mix = if sequence <= 15 {
                 sequence as f64 / 15.0
             } else {
@@ -1114,6 +1213,104 @@ mod tests {
             started.elapsed() <= Duration::from_secs(10),
             "300 PIP frames exceeded the 30 fps processing budget"
         );
+    }
+
+    #[test]
+    fn contract_aspect_fill_center_crops_four_three_sixteen_nine_and_ultrawide() {
+        let pixel_source = |size: Size| {
+            (0..size.height)
+                .flat_map(|y| (0..size.width).flat_map(move |x| [x as u8, y as u8, 0, 0xff]))
+                .collect::<Vec<_>>()
+        };
+
+        let sixteen_nine = Size::new(16, 9);
+        let source = pixel_source(sixteen_nine);
+        let mut output = vec![0; source.len()];
+        aspect_fill_bgra_into(
+            &source,
+            sixteen_nine,
+            16 * 4,
+            16.0 / 9.0,
+            &mut output,
+            sixteen_nine,
+        )
+        .unwrap();
+        assert_eq!(output, source);
+
+        let four_three = Size::new(12, 9);
+        let source = pixel_source(four_three);
+        let mut output = vec![0; 16 * 9 * 4];
+        aspect_fill_bgra_into(
+            &source,
+            four_three,
+            12 * 4,
+            4.0 / 3.0,
+            &mut output,
+            sixteen_nine,
+        )
+        .unwrap();
+        assert_eq!(&output[..4], &[0, 1, 0, 0xff]);
+        assert_eq!(
+            &output[(8 * 16 + 15) * 4..(8 * 16 + 16) * 4],
+            &[11, 7, 0, 0xff]
+        );
+
+        let ultrawide = Size::new(21, 9);
+        let source = pixel_source(ultrawide);
+        aspect_fill_bgra_into(
+            &source,
+            ultrawide,
+            21 * 4,
+            21.0 / 9.0,
+            &mut output,
+            sixteen_nine,
+        )
+        .unwrap();
+        assert_eq!(&output[..4], &[2, 0, 0, 0xff]);
+        assert_eq!(&output[15 * 4..16 * 4], &[17, 0, 0, 0xff]);
+    }
+
+    #[test]
+    fn contract_aspect_fill_rejects_invalid_display_aspect_ratios() {
+        let mut output = vec![0; 16];
+        for ratio in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                aspect_fill_bgra_into(
+                    &[0; 16],
+                    Size::new(2, 2),
+                    8,
+                    ratio,
+                    &mut output,
+                    Size::new(2, 2),
+                ),
+                Err(FrameError::InvalidAspectRatio)
+            );
+        }
+    }
+
+    #[test]
+    fn contract_missing_pip_source_uses_the_configured_fallback_color() {
+        let now = Instant::now();
+        let camera = Arc::new(Frame::placeholder(PIPELINE_SIZE, 0xff00_0000, 1, 0, now));
+        let mut compositor = FrameCompositor::default();
+        let output = compositor.compose_with_pip(
+            Some(&camera),
+            None,
+            0.0,
+            Some(PipComposition {
+                layout: StillImagePipLayout::WebcamMain,
+                size: StillImagePipSize::Medium,
+                mix: 1.0,
+            }),
+            0xff03_0201,
+            FrameMetadata {
+                sequence: 2,
+                timestamp_100ns: 0,
+                received_at: now,
+            },
+        );
+        let center = (596 * PIPELINE_SIZE.width as usize + 208) * 4;
+        assert_eq!(&output.pixels()[center..center + 4], &[1, 2, 3, 0xff]);
     }
 
     #[test]

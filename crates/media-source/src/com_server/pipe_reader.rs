@@ -44,17 +44,21 @@ impl PipeReader {
             .ok();
         Self { stop, worker }
     }
+
+    pub(super) fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            // SAFETY: the raw handle belongs to the still-live worker thread and
+            // is used only to cancel its synchronous named-pipe open or read.
+            let _ = unsafe { CancelSynchronousIo(HANDLE(worker.as_raw_handle())) };
+            let _ = worker.join();
+        }
+    }
 }
 
 impl Drop for PipeReader {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            // SAFETY: the raw handle belongs to the still-live worker thread and
-            // is used only to cancel its synchronous named-pipe read.
-            let _ = unsafe { CancelSynchronousIo(HANDLE(worker.as_raw_handle())) };
-            let _ = worker.join();
-        }
+        self.stop();
     }
 }
 
@@ -66,6 +70,11 @@ fn reader_loop(path: &str, stop: &AtomicBool, cache: &Mutex<SharedFrameCache>) {
     while !stop.load(Ordering::Acquire) {
         let mut pipe = match OpenOptions::new().read(true).open(path) {
             Ok(pipe) => {
+                let Ok(mut cache) = cache.lock() else {
+                    return;
+                };
+                cache.reset_for_new_connection();
+                drop(cache);
                 diagnostics::rate_limited(
                     "pipe-connected",
                     Duration::from_secs(5),

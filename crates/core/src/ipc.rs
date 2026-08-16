@@ -100,6 +100,11 @@ impl SharedFrameCache {
     pub fn invalidate(&mut self) {
         self.latest = None;
     }
+
+    pub fn reset_for_new_connection(&mut self) {
+        self.last_sequence = 0;
+        self.latest = None;
+    }
 }
 
 impl FrameHeader {
@@ -307,5 +312,38 @@ mod tests {
         cache.ingest(header, vec![0; 16].into(), now).unwrap();
         assert_eq!(cache.last_sequence(), 7);
         assert!(cache.latest(now).is_some());
+    }
+
+    #[test]
+    fn contract_connection_reset_starts_a_new_sequence_epoch() {
+        let now = Instant::now();
+        let header = FrameHeader {
+            sequence: 7,
+            size: Size::new(2, 2),
+            stride: 8,
+            timestamp_100ns: 10,
+            frame_bytes: 16,
+        };
+        let mut cache = SharedFrameCache::default();
+        cache.ingest(header, vec![0; 16].into(), now).unwrap();
+        cache.invalidate();
+        assert_eq!(cache.last_sequence(), 7);
+        assert_eq!(
+            cache.ingest(header, vec![0; 16].into(), now),
+            Err(CacheError::InvalidSequence)
+        );
+
+        cache.reset_for_new_connection();
+        assert_eq!(cache.last_sequence(), 0);
+        let first = FrameHeader {
+            sequence: 1,
+            ..header
+        };
+        cache.ingest(first, vec![0; 16].into(), now).unwrap();
+        assert_eq!(cache.last_sequence(), 1);
+        assert_eq!(
+            cache.ingest(first, vec![0; 16].into(), now),
+            Err(CacheError::InvalidSequence)
+        );
     }
 }

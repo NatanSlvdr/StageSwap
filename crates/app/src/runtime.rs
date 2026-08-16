@@ -123,10 +123,6 @@ const WEBCAM_RECOVERY_DELAYS: [Duration; 3] = [
     Duration::from_secs(1),
     Duration::from_secs(2),
 ];
-#[cfg(any(windows, test))]
-const TARGET_WEBCAM_ASPECT_RATIO: f64 = 16.0 / 9.0;
-#[cfg(any(windows, test))]
-const WEBCAM_ASPECT_RATIO_TOLERANCE: f64 = 0.01;
 const BLACK_LUMA_THRESHOLD: u8 = 16;
 const BLACK_PIXEL_PERCENT: usize = 99;
 #[cfg(any(windows, test))]
@@ -384,122 +380,6 @@ impl Drop for RuntimeHandle {
             let _ = worker.join();
         }
     }
-}
-
-#[cfg(any(windows, test))]
-struct WebcamCropCache {
-    source: Option<Arc<Frame>>,
-    cropped: Option<Arc<Frame>>,
-    format: Option<(Size, u32, u64)>,
-    source_x: Vec<usize>,
-    source_rows: Vec<usize>,
-    frame_pool: FrameBufferPool,
-}
-
-#[cfg(any(windows, test))]
-impl Default for WebcamCropCache {
-    fn default() -> Self {
-        Self {
-            source: None,
-            cropped: None,
-            format: None,
-            source_x: Vec::new(),
-            source_rows: Vec::new(),
-            frame_pool: FrameBufferPool::new(
-                PIPELINE_SIZE.width as usize * PIPELINE_SIZE.height as usize * 4,
-                CAPTURE_FRAME_POOL_CAPACITY,
-            ),
-        }
-    }
-}
-
-#[cfg(any(windows, test))]
-impl WebcamCropCache {
-    fn apply(
-        &mut self,
-        source: Arc<Frame>,
-        enabled: bool,
-        native_aspect_ratio: Option<f64>,
-    ) -> Arc<Frame> {
-        let Some(zoom) = webcam_crop_zoom(enabled, native_aspect_ratio) else {
-            return source;
-        };
-        let format = (source.size, source.stride, zoom.to_bits());
-        if self
-            .source
-            .as_ref()
-            .is_some_and(|cached| Arc::ptr_eq(cached, &source))
-            && self.format == Some(format)
-            && let Some(cropped) = &self.cropped
-        {
-            return Arc::clone(cropped);
-        }
-        if self.format != Some(format) {
-            let crop_width = (source.size.width as f64 / zoom).round().max(1.0) as u32;
-            let crop_height = (source.size.height as f64 / zoom).round().max(1.0) as u32;
-            let x_offset = (source.size.width - crop_width) / 2;
-            let y_offset = (source.size.height - crop_height) / 2;
-            self.source_x = (0..source.size.width)
-                .map(|x| {
-                    let source_x = x_offset
-                        + ((u64::from(x) * u64::from(crop_width)) / u64::from(source.size.width))
-                            as u32;
-                    source_x as usize * 4
-                })
-                .collect();
-            self.source_rows = (0..source.size.height)
-                .map(|y| {
-                    let source_y = y_offset
-                        + ((u64::from(y) * u64::from(crop_height)) / u64::from(source.size.height))
-                            as u32;
-                    source_y as usize * source.stride as usize
-                })
-                .collect();
-            self.format = Some(format);
-        }
-        let pixels = self
-            .frame_pool
-            .write_with_fallback_sized(source.pixels().len(), |pixels| {
-                for (y, source_row) in self.source_rows.iter().copied().enumerate() {
-                    let destination_row = y * source.stride as usize;
-                    for (x, source_x) in self.source_x.iter().copied().enumerate() {
-                        let source_offset = source_row + source_x;
-                        let destination = destination_row + x * 4;
-                        pixels[destination..destination + 4]
-                            .copy_from_slice(&source.pixels()[source_offset..source_offset + 4]);
-                    }
-                }
-                Ok::<(), std::convert::Infallible>(())
-            })
-            .expect("webcam crop is infallible");
-        let cropped = Arc::new(
-            Frame::new(
-                pixels,
-                source.size,
-                source.stride,
-                source.sequence,
-                source.timestamp_100ns,
-                source.received_at,
-            )
-            .expect("webcam crop preserves valid frame dimensions"),
-        );
-        self.source = Some(source);
-        self.cropped = Some(Arc::clone(&cropped));
-        cropped
-    }
-}
-
-#[cfg(any(windows, test))]
-fn webcam_crop_zoom(enabled: bool, native_aspect_ratio: Option<f64>) -> Option<f64> {
-    let aspect_ratio = enabled
-        .then_some(native_aspect_ratio)
-        .flatten()
-        .filter(|ratio| ratio.is_finite() && *ratio > 0.0)?;
-    let relative_difference =
-        ((aspect_ratio - TARGET_WEBCAM_ASPECT_RATIO) / TARGET_WEBCAM_ASPECT_RATIO).abs();
-    (relative_difference > WEBCAM_ASPECT_RATIO_TOLERANCE).then(|| {
-        (aspect_ratio / TARGET_WEBCAM_ASPECT_RATIO).max(TARGET_WEBCAM_ASPECT_RATIO / aspect_ratio)
-    })
 }
 
 #[cfg(any(windows, test))]
@@ -835,8 +715,6 @@ struct RuntimeState {
     #[cfg(windows)]
     pending_reference_capture: Option<Arc<Frame>>,
     #[cfg(any(windows, test))]
-    webcam_crop: WebcamCropCache,
-    #[cfg(any(windows, test))]
     publisher_diagnostics: PublisherDiagnosticsState,
 }
 
@@ -990,8 +868,6 @@ impl RuntimeState {
             last_detection: now - Duration::from_millis(250),
             #[cfg(windows)]
             pending_reference_capture: None,
-            #[cfg(any(windows, test))]
-            webcam_crop: WebcamCropCache::default(),
             #[cfg(any(windows, test))]
             publisher_diagnostics: PublisherDiagnosticsState::default(),
         }
@@ -2693,6 +2569,7 @@ impl DevicePlatform {
             }
         }
         let mut webcam = MediaFoundationVideoInput::default();
+        webcam.set_crop_to_16_9(state.config.crop_webcam_to_16_9);
         state
             .snapshot
             .webcam_component
@@ -2895,6 +2772,9 @@ impl DevicePlatform {
         match command {
             Command::UpdateSettings(config) | Command::ReloadSettings(config) => {
                 let reload_settings = matches!(command, Command::ReloadSettings(_));
+                if config.crop_webcam_to_16_9 != state.config.crop_webcam_to_16_9 {
+                    self.webcam.set_crop_to_16_9(config.crop_webcam_to_16_9);
+                }
                 if config.selected_video_device_id != state.config.selected_video_device_id {
                     let now = Instant::now();
                     self.webcam_recovery.reset();
@@ -3786,7 +3666,6 @@ struct DeviceSnapshot {
     app: AppSnapshot,
     warnings: WarningRegistry,
     observed_at: Option<Instant>,
-    native_aspect_ratio: Option<f64>,
     publisher: Option<FramePublisherSink>,
     legacy_capture: Option<(u64, Arc<Frame>)>,
     candidate_event: Option<(u64, Option<Arc<Frame>>)>,
@@ -3989,7 +3868,6 @@ fn publish_device_snapshot(
         app: state.snapshot.clone(),
         warnings: state.warnings.clone(),
         observed_at: Some(Instant::now()),
-        native_aspect_ratio: platform.webcam.native_display_aspect_ratio(),
         publisher: platform.publisher.as_ref().map(FramePublisher::sink),
         legacy_capture: legacy_capture.clone(),
         candidate_event: candidate_event.clone(),
@@ -4074,13 +3952,7 @@ impl Platform {
         let webcam = (!webcam_is_stale)
             .then(|| app.previews.webcam.clone())
             .flatten();
-        state.snapshot.previews.webcam = webcam.map(|frame| {
-            state.webcam_crop.apply(
-                frame,
-                state.config.crop_webcam_to_16_9,
-                device.native_aspect_ratio,
-            )
-        });
+        state.snapshot.previews.webcam = webcam;
         if webcam_is_stale {
             state.snapshot.webcam_state = DeviceState::Failed;
             state
@@ -5101,105 +4973,6 @@ mod tests {
             started_at.elapsed() <= Duration::from_secs(10),
             "300 disco frames exceeded the 30 fps processing budget"
         );
-    }
-
-    #[test]
-    fn flow_webcam_crop_is_aspect_aware_and_shares_processed_output() {
-        let now = Instant::now();
-        let size = Size::new(1280, 720);
-        let mut pixels = vec![0; size.width as usize * size.height as usize * 4];
-        for y in 0..size.height as usize {
-            for x in 0..size.width as usize {
-                let offset = (y * size.width as usize + x) * 4;
-                pixels[offset..offset + 4].copy_from_slice(
-                    if !(160..1120).contains(&x) || !(90..630).contains(&y) {
-                        &[0, 0, 255, 255]
-                    } else {
-                        &[0, 255, 0, 255]
-                    },
-                );
-            }
-        }
-        let raw = Arc::new(Frame::new(pixels.into(), size, size.width * 4, 9, 321, now).unwrap());
-        let mut state = RuntimeState::new(AppConfig::default());
-        let processed = state
-            .webcam_crop
-            .apply(Arc::clone(&raw), true, Some(4.0 / 3.0));
-        let cached = state
-            .webcam_crop
-            .apply(Arc::clone(&raw), true, Some(4.0 / 3.0));
-        assert!(!Arc::ptr_eq(&processed, &raw));
-        assert!(Arc::ptr_eq(&processed, &cached));
-        assert_eq!(processed.size, size);
-        assert_eq!(processed.sequence, 9);
-        assert_eq!(processed.timestamp_100ns, 321);
-        assert_eq!(processed.received_at, now);
-        assert!(
-            processed
-                .pixels()
-                .chunks_exact(4)
-                .all(|pixel| pixel == [0, 255, 0, 255])
-        );
-        assert!(Arc::ptr_eq(
-            &state
-                .webcam_crop
-                .apply(Arc::clone(&raw), false, Some(4.0 / 3.0)),
-            &raw
-        ));
-        assert!(Arc::ptr_eq(
-            &state
-                .webcam_crop
-                .apply(Arc::clone(&raw), true, Some(16.0 / 9.0)),
-            &raw
-        ));
-        assert!(Arc::ptr_eq(
-            &state.webcam_crop.apply(Arc::clone(&raw), true, None),
-            &raw
-        ));
-
-        state.snapshot.previews.webcam = Some(Arc::clone(&processed));
-        state.snapshot.availability.camera_ready = true;
-        state.snapshot.run_state = RunState::Running;
-        state.snapshot.mode = OutputMode::ForceCamera;
-        state.tick(now + Duration::from_millis(33));
-
-        let output = state
-            .snapshot
-            .previews
-            .final_output
-            .as_ref()
-            .expect("camera output is present");
-        assert!(Arc::ptr_eq(&processed.pixels_arc(), &output.pixels_arc()));
-    }
-
-    #[test]
-    fn flow_webcam_crop_tolerance_and_cache_include_input_aspect_ratio() {
-        let now = Instant::now();
-        let size = Size::new(1280, 720);
-        let pixels = (0..size.height)
-            .flat_map(|y| {
-                (0..size.width).flat_map(move |x| {
-                    let value = ((x + y) % 255) as u8;
-                    [value, value, value, 255]
-                })
-            })
-            .collect::<Vec<_>>();
-        let raw = Arc::new(Frame::new(pixels.into(), size, size.width * 4, 1, 2, now).unwrap());
-        let mut crop = WebcamCropCache::default();
-
-        let within_tolerance =
-            TARGET_WEBCAM_ASPECT_RATIO * (1.0 + WEBCAM_ASPECT_RATIO_TOLERANCE / 2.0);
-        assert!(Arc::ptr_eq(
-            &crop.apply(Arc::clone(&raw), true, Some(within_tolerance)),
-            &raw
-        ));
-
-        let four_by_three = crop.apply(Arc::clone(&raw), true, Some(4.0 / 3.0));
-        let square = crop.apply(Arc::clone(&raw), true, Some(1.0));
-        let wider = crop.apply(Arc::clone(&raw), true, Some(21.0 / 9.0));
-        assert!(!Arc::ptr_eq(&four_by_three, &square));
-        assert_ne!(four_by_three.pixels(), square.pixels());
-        assert_ne!(square.pixels(), wider.pixels());
     }
 
     fn frame_with_bright_pixels(bright_pixels: usize) -> Frame {

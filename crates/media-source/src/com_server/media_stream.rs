@@ -147,7 +147,7 @@ pub(super) struct MediaStream {
     off_nv12: Arc<[u8]>,
     nv12_cache: Mutex<Nv12Cache>,
     sample_allocator: Mutex<SampleAllocatorState>,
-    _pipe_reader: PipeReader,
+    pipe_reader: Mutex<Option<PipeReader>>,
     state: Mutex<StreamState>,
     request_samples: AtomicU64,
     queued_samples: AtomicU64,
@@ -201,7 +201,7 @@ impl MediaStream {
             off_nv12: off_nv12.into(),
             nv12_cache: Mutex::new(Nv12Cache::default()),
             sample_allocator: Mutex::new(SampleAllocatorState::default()),
-            _pipe_reader: pipe_reader,
+            pipe_reader: Mutex::new(Some(pipe_reader)),
             state: Mutex::new(StreamState {
                 parent: None,
                 state: MF_STREAM_STATE_STOPPED,
@@ -390,6 +390,14 @@ impl MediaStream {
         state.state = MF_STREAM_STATE_STOPPED;
         state.parent = None;
         drop(state);
+        if let Ok(mut pipe_reader) = self.pipe_reader.lock()
+            && let Some(mut pipe_reader) = pipe_reader.take()
+        {
+            pipe_reader.stop();
+        }
+        if let Ok(mut frames) = self.frames.lock() {
+            frames.invalidate();
+        }
         if let Ok(mut allocator) = self.sample_allocator.lock()
             && let Some(allocator) = allocator.allocator.take()
         {
@@ -797,6 +805,32 @@ mod tests {
         assert_eq!(super::super::DllCanUnloadNow(), S_OK);
         drop(sample);
         assert_eq!(super::super::DllCanUnloadNow(), S_OK);
+        Ok(())
+    }
+
+    #[test]
+    fn native_stream_shutdown_is_idempotent_and_joins_the_pipe_worker_while_alive()
+    -> windows_core::Result<()> {
+        let _test_lock = super::super::TEST_LOCK
+            .lock()
+            .expect("media-source test lock poisoned");
+        // SAFETY: initializes Media Foundation for this test process.
+        unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
+        let _foundation = MediaFoundation;
+        let stream = MediaStream::new(r"\\.\pipe\StageSwap.Nonexistent.Shutdown.Test".into())?;
+
+        stream.shutdown();
+        assert!(stream.pipe_reader.lock().unwrap().is_none());
+        assert!(
+            stream
+                .frames
+                .lock()
+                .unwrap()
+                .latest(std::time::Instant::now())
+                .is_none()
+        );
+        stream.shutdown();
+        assert!(stream.pipe_reader.lock().unwrap().is_none());
         Ok(())
     }
 

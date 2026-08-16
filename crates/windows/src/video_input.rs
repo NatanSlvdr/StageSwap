@@ -1,10 +1,11 @@
 use crate::{InputDevice, VideoInput};
 use stageswap_core::{
-    CAPTURE_FRAME_POOL_CAPACITY, Frame, FrameBufferPool, PIPELINE_SIZE, Size, aspect_fit_bgra_into,
+    CAPTURE_FRAME_POOL_CAPACITY, Frame, FrameBufferPool, FramePacer, PIPELINE_SIZE, Size,
+    aspect_fill_bgra_into, aspect_fit_bgra_into,
 };
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::E_ACCESSDENIED;
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer2, IMFActivate, IMFMediaEvent, IMFMediaType, IMFSample, IMFSourceReader,
@@ -31,6 +32,20 @@ use windows_core::{HRESULT, Interface, PCWSTR, PWSTR, Ref, implement};
 
 const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 const WEBCAM_FAILURE_THRESHOLD: u32 = 3;
+const WEBCAM_FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 30);
+const WEBCAM_FRAME_EARLY_TOLERANCE: Duration = Duration::from_millis(1);
+const TARGET_WEBCAM_ASPECT_RATIO: f64 = 16.0 / 9.0;
+const WEBCAM_ASPECT_RATIO_TOLERANCE: f64 = 0.01;
+
+fn should_aspect_fill(enabled: bool, display_aspect_ratio: Option<f64>) -> bool {
+    enabled
+        && display_aspect_ratio.is_some_and(|ratio| {
+            ratio.is_finite()
+                && ratio > 0.0
+                && ((ratio - TARGET_WEBCAM_ASPECT_RATIO) / TARGET_WEBCAM_ASPECT_RATIO).abs()
+                    > WEBCAM_ASPECT_RATIO_TOLERANCE
+        })
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebcamCaptureFailure {
@@ -100,6 +115,39 @@ struct WebcamFormatCandidate {
     subtype_rank: u8,
 }
 
+fn sort_webcam_formats(formats: &mut [WebcamFormatCandidate]) {
+    formats.sort_by(|left, right| {
+        let fixed_rank = |candidate: &WebcamFormatCandidate| {
+            let exact_rgb32 = !(candidate.subtype_rank == 0
+                && candidate.size == PIPELINE_SIZE
+                && u64::from(candidate.frame_rate_numerator)
+                    == 30 * u64::from(candidate.frame_rate_denominator));
+            let rgb32_fallback = candidate.subtype_rank != 0;
+            let aspect_error = (i64::from(candidate.size.width) * 9
+                - i64::from(candidate.size.height) * 16)
+                .unsigned_abs();
+            let resolution_error = (i64::from(candidate.size.width)
+                * i64::from(candidate.size.height)
+                - i64::from(PIPELINE_SIZE.width) * i64::from(PIPELINE_SIZE.height))
+            .unsigned_abs();
+            (exact_rgb32, rgb32_fallback, aspect_error, resolution_error)
+        };
+        fixed_rank(left)
+            .cmp(&fixed_rank(right))
+            .then_with(|| {
+                let left_error = (i64::from(left.frame_rate_numerator)
+                    - 30 * i64::from(left.frame_rate_denominator))
+                .unsigned_abs();
+                let right_error = (i64::from(right.frame_rate_numerator)
+                    - 30 * i64::from(right.frame_rate_denominator))
+                .unsigned_abs();
+                (u128::from(left_error) * u128::from(right.frame_rate_denominator))
+                    .cmp(&(u128::from(right_error) * u128::from(left.frame_rate_denominator)))
+            })
+            .then_with(|| left.subtype_rank.cmp(&right.subtype_rank))
+    });
+}
+
 fn ranked_native_formats(reader: &IMFSourceReader) -> Vec<WebcamFormatCandidate> {
     let mut formats = Vec::new();
     for index in 0.. {
@@ -148,30 +196,7 @@ fn ranked_native_formats(reader: &IMFSourceReader) -> Vec<WebcamFormatCandidate>
             formats.push(candidate);
         }
     }
-    formats.sort_by_key(|candidate| {
-        let exact_rgb32 = !(candidate.subtype_rank == 0
-            && candidate.size == PIPELINE_SIZE
-            && u64::from(candidate.frame_rate_numerator)
-                == 30 * u64::from(candidate.frame_rate_denominator));
-        let rgb32_fallback = candidate.subtype_rank != 0;
-        let aspect_error = (i64::from(candidate.size.width) * 9
-            - i64::from(candidate.size.height) * 16)
-            .unsigned_abs();
-        let resolution_error = (i64::from(candidate.size.width) * i64::from(candidate.size.height)
-            - i64::from(PIPELINE_SIZE.width) * i64::from(PIPELINE_SIZE.height))
-        .unsigned_abs();
-        let frame_rate_error = (i64::from(candidate.frame_rate_numerator)
-            - 30 * i64::from(candidate.frame_rate_denominator))
-        .unsigned_abs();
-        (
-            exact_rgb32,
-            rgb32_fallback,
-            aspect_error,
-            resolution_error,
-            frame_rate_error,
-            candidate.subtype_rank,
-        )
-    });
+    sort_webcam_formats(&mut formats);
     formats
 }
 
@@ -525,6 +550,8 @@ struct CaptureState {
     latest: Mutex<Option<Arc<Frame>>>,
     format: Mutex<Size>,
     native_display_aspect_ratio: Mutex<Option<f64>>,
+    crop_to_16_9: AtomicBool,
+    pacer: Mutex<Option<FramePacer>>,
     stride: AtomicI32,
     scratch: Mutex<Vec<u8>>,
     pool: Mutex<FrameBufferPool>,
@@ -545,6 +572,8 @@ impl Default for CaptureState {
             latest: Mutex::new(None),
             format: Mutex::new(Size::default()),
             native_display_aspect_ratio: Mutex::new(None),
+            crop_to_16_9: AtomicBool::new(true),
+            pacer: Mutex::new(None),
             stride: AtomicI32::new(0),
             scratch: Mutex::new(Vec::new()),
             pool: Mutex::new(FrameBufferPool::new(
@@ -603,6 +632,18 @@ impl CaptureState {
             }
         }
         Ok(())
+    }
+
+    fn admit_frame(&self, now: Instant) -> bool {
+        let Ok(mut pacer) = self.pacer.lock() else {
+            return false;
+        };
+        let pacer = pacer.get_or_insert_with(|| FramePacer::new(now, WEBCAM_FRAME_INTERVAL));
+        if !pacer.is_due(now, WEBCAM_FRAME_EARLY_TOLERANCE) {
+            return false;
+        }
+        pacer.advance(now);
+        true
     }
 
     fn set_failure(&self, details: WebcamCaptureFailure, terminal: bool) {
@@ -739,6 +780,11 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
             );
             return Ok(());
         }
+        let now = Instant::now();
+        if !self.state.admit_frame(now) {
+            let _ = self.state.request_next(self.expected_generation);
+            return Ok(());
+        }
         if let Some(sample) = sample.as_ref() {
             // SAFETY: the sample and selected buffer remain live for this callback. Taking the
             // original first buffer preserves IMF2DBuffer2 row metadata when the driver exposes it.
@@ -818,15 +864,36 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
                                 .lock()
                                 .map_err(|_| "webcam frame pool is poisoned".to_owned())?;
                             let previous_exhaustions = pool.exhaustion_count();
+                            let crop_to_16_9 = self.state.crop_to_16_9.load(Ordering::Acquire);
+                            let display_aspect_ratio = self
+                                .state
+                                .native_display_aspect_ratio
+                                .lock()
+                                .ok()
+                                .and_then(|ratio| *ratio);
+                            let use_aspect_fill =
+                                should_aspect_fill(crop_to_16_9, display_aspect_ratio);
                             let pixels = pool
                                 .write_with_fallback(|destination| {
-                                    aspect_fit_bgra_into(
-                                        &tight,
-                                        size,
-                                        size.width * 4,
-                                        destination,
-                                        PIPELINE_SIZE,
-                                    )
+                                    if use_aspect_fill {
+                                        aspect_fill_bgra_into(
+                                            &tight,
+                                            size,
+                                            size.width * 4,
+                                            display_aspect_ratio
+                                                .expect("aspect fill requires a known ratio"),
+                                            destination,
+                                            PIPELINE_SIZE,
+                                        )
+                                    } else {
+                                        aspect_fit_bgra_into(
+                                            &tight,
+                                            size,
+                                            size.width * 4,
+                                            destination,
+                                            PIPELINE_SIZE,
+                                        )
+                                    }
                                 })
                                 .map_err(|error| {
                                     format!("could not normalize webcam frame: {error:?}")
@@ -843,7 +910,7 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
                             PIPELINE_SIZE.width * 4,
                             sequence,
                             timestamp,
-                            Instant::now(),
+                            now,
                         )
                         .map_err(|error| format!("invalid webcam frame: {error:?}"))?;
                         if self.state.is_current(self.expected_generation) {
@@ -1023,6 +1090,11 @@ impl VideoInput for MediaFoundationVideoInput {
             .lock()
             .map_err(|_| "webcam format state is poisoned")? = format.size;
         self.state.stride.store(format.stride, Ordering::Release);
+        *self
+            .state
+            .pacer
+            .lock()
+            .map_err(|_| "webcam pacing state is poisoned")? = None;
         self.state.device_tag.store(device_tag, Ordering::Release);
         self.state.clear_failure();
         *self
@@ -1054,6 +1126,9 @@ impl VideoInput for MediaFoundationVideoInput {
         if let Ok(mut format) = self.state.format.lock() {
             *format = Size::default();
         }
+        if let Ok(mut pacer) = self.state.pacer.lock() {
+            *pacer = None;
+        }
         if let Ok(mut latest) = self.state.latest.lock() {
             *latest = None;
         }
@@ -1070,6 +1145,10 @@ impl VideoInput for MediaFoundationVideoInput {
 }
 
 impl MediaFoundationVideoInput {
+    pub fn set_crop_to_16_9(&self, enabled: bool) {
+        self.state.crop_to_16_9.store(enabled, Ordering::Release);
+    }
+
     pub fn native_display_aspect_ratio(&self) -> Option<f64> {
         self.state
             .native_display_aspect_ratio
@@ -1195,6 +1274,75 @@ mod format_tests {
         }
         assert!(!state.running.load(Ordering::Acquire));
         assert!(state.latest.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn contract_rational_frame_rate_ranking_prefers_2997_over_29() {
+        let mut formats = [
+            WebcamFormatCandidate {
+                size: Size::new(1920, 1080),
+                frame_rate_numerator: 29,
+                frame_rate_denominator: 1,
+                subtype: "RGB32",
+                subtype_rank: 0,
+            },
+            WebcamFormatCandidate {
+                size: Size::new(1920, 1080),
+                frame_rate_numerator: 30_000,
+                frame_rate_denominator: 1_001,
+                subtype: "RGB32",
+                subtype_rank: 0,
+            },
+        ];
+        sort_webcam_formats(&mut formats);
+        assert_eq!(formats[0].frame_rate_numerator, 30_000);
+        assert_eq!(formats[0].frame_rate_denominator, 1_001);
+    }
+
+    #[test]
+    fn contract_webcam_pacing_admits_common_rates_at_the_expected_ceiling() {
+        let expected = [
+            ((30_u64, 1_u64), 300),
+            ((60, 1), 150),
+            ((60_000, 1_001), 150),
+            ((120, 1), 75),
+        ];
+        for ((numerator, denominator), expected_count) in expected {
+            let state = CaptureState::default();
+            let start = Instant::now();
+            let input_interval = Duration::from_nanos(1_000_000_000_u64 * denominator / numerator);
+            let admitted = (0..300)
+                .filter(|index| state.admit_frame(start + input_interval * *index))
+                .count();
+            assert_eq!(admitted, expected_count, "rate {numerator}/{denominator}");
+        }
+    }
+
+    #[test]
+    fn contract_intentional_webcam_decimation_does_not_change_failure_counters() {
+        let state = CaptureState::default();
+        state.sequence.store(9, Ordering::Release);
+        state.dropped_frames.store(4, Ordering::Release);
+        state.consecutive_failures.store(2, Ordering::Release);
+        let start = Instant::now();
+        let input_interval = Duration::from_nanos(1_000_000_000 / 120);
+        assert!((0..120).any(|index| !state.admit_frame(start + input_interval * index)));
+        assert_eq!(state.sequence.load(Ordering::Acquire), 9);
+        assert_eq!(state.dropped_frames.load(Ordering::Acquire), 4);
+        assert_eq!(state.consecutive_failures.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn contract_webcam_crop_decision_handles_toggle_tolerance_and_unknown_aspect() {
+        assert!(should_aspect_fill(true, Some(4.0 / 3.0)));
+        assert!(should_aspect_fill(true, Some(21.0 / 9.0)));
+        assert!(!should_aspect_fill(false, Some(4.0 / 3.0)));
+        assert!(!should_aspect_fill(true, None));
+        assert!(!should_aspect_fill(true, Some(16.0 / 9.0)));
+        assert!(!should_aspect_fill(
+            true,
+            Some(TARGET_WEBCAM_ASPECT_RATIO * 1.005)
+        ));
     }
 }
 

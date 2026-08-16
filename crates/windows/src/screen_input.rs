@@ -133,12 +133,27 @@ struct CaptureFlags {
     expected_generation: u64,
 }
 
+#[derive(Default)]
+struct ProcessingFailureStreak(u8);
+
+impl ProcessingFailureStreak {
+    fn failed(&mut self) -> bool {
+        self.0 = self.0.saturating_add(1);
+        self.0 >= 3
+    }
+
+    fn succeeded(&mut self) {
+        self.0 = 0;
+    }
+}
+
 struct CaptureHandler {
     shared: Arc<Shared>,
     expected_generation: u64,
     scratch: Vec<u8>,
     pool: FrameBufferPool,
     pacer: Option<FramePacer>,
+    processing_failures: ProcessingFailureStreak,
 }
 
 impl GraphicsCaptureApiHandler for CaptureHandler {
@@ -155,6 +170,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 CAPTURE_FRAME_POOL_CAPACITY,
             ),
             pacer: None,
+            processing_failures: ProcessingFailureStreak::default(),
         })
     }
 
@@ -215,11 +231,15 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 if let Ok(mut failure) = self.shared.failure.lock() {
                     *failure = None;
                 }
+                self.processing_failures.succeeded();
             }
             Ok(())
         })();
         if let Err(error) = &result {
             self.shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
+            if !self.processing_failures.failed() {
+                return Ok(());
+            }
             self.shared
                 .record_failure(self.expected_generation, error.clone());
         }
@@ -437,18 +457,50 @@ mod tests {
     }
 
     #[test]
-    fn native_processing_failure_clears_the_session_frame() {
+    fn native_transient_processing_failures_retain_the_session_frame() {
+        let shared = Shared::default();
+        shared.generation.store(3, Ordering::Release);
+        let frame = test_frame();
+        *shared.latest.lock().unwrap() = Some(Arc::clone(&frame));
+
+        let mut streak = ProcessingFailureStreak::default();
+        for _ in 0..2 {
+            assert!(!streak.failed());
+            assert!(Arc::ptr_eq(
+                shared.latest.lock().unwrap().as_ref().unwrap(),
+                &frame
+            ));
+            assert!(shared.failure.lock().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn native_third_consecutive_processing_failure_is_terminal() {
         let shared = Shared::default();
         shared.generation.store(3, Ordering::Release);
         *shared.latest.lock().unwrap() = Some(test_frame());
 
-        shared.record_failure(3, "normalization failed");
-
+        let mut streak = ProcessingFailureStreak::default();
+        assert!(!streak.failed());
+        assert!(!streak.failed());
+        assert!(streak.failed());
+        shared.record_failure(3, "normalization failed three times");
         assert!(shared.latest.lock().unwrap().is_none());
         assert_eq!(
             shared.failure.lock().unwrap().as_deref(),
-            Some("normalization failed")
+            Some("normalization failed three times")
         );
+    }
+
+    #[test]
+    fn native_success_resets_the_processing_failure_streak() {
+        let mut streak = ProcessingFailureStreak::default();
+        assert!(!streak.failed());
+        assert!(!streak.failed());
+        streak.succeeded();
+        assert!(!streak.failed());
+        assert!(!streak.failed());
+        assert!(streak.failed());
     }
 
     #[test]

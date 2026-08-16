@@ -242,7 +242,7 @@ mod interactive_windows_tests {
     fn native_virtual_camera_delivers_three_hundred_frames_at_thirty_fps() {
         let pipe_name = frame_pipe_name().unwrap();
         let publisher = FramePublisher::start(&pipe_name).unwrap();
-        let _camera = VirtualCameraController::start(pipe_name).unwrap();
+        let _camera = VirtualCameraController::start(pipe_name.clone()).unwrap();
         let mut input = MediaFoundationVideoInput::default();
         let deadline = Instant::now() + Duration::from_secs(5);
         let device = loop {
@@ -283,7 +283,6 @@ mod interactive_windows_tests {
         let samples = collect_video_sequences(&input, 300);
         stop.store(true, Ordering::Release);
         publisher_worker.join().unwrap();
-        input.stop();
 
         assert_eq!(
             samples.len(),
@@ -306,5 +305,39 @@ mod interactive_windows_tests {
             maximum_gap <= Duration::from_millis(100),
             "virtual camera stalled for {maximum_gap:?}"
         );
+
+        let sequence_before_restart = input.latest_frame().unwrap().sequence;
+        let restarted_publisher = FramePublisher::start(&pipe_name).unwrap();
+        let restart_stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&restart_stop);
+        let restarted_worker = thread::spawn(move || {
+            let interval = Duration::from_nanos(1_000_000_000 / u64::from(PIPELINE_FPS));
+            let mut pacer = FramePacer::new(Instant::now(), interval);
+            let frame = Frame::placeholder(PIPELINE_SIZE, 0xff60_4020, 1, 0, Instant::now());
+            while !worker_stop.load(Ordering::Acquire) {
+                let wait = pacer.wait_duration(Instant::now());
+                if !wait.is_zero() {
+                    thread::sleep(wait);
+                }
+                let now = Instant::now();
+                pacer.advance(now);
+                if restarted_publisher.publish(&frame).is_err() {
+                    break;
+                }
+            }
+        });
+        let resumed = collect_video_sequences(&input, 30);
+        restart_stop.store(true, Ordering::Release);
+        restarted_worker.join().unwrap();
+        assert_eq!(
+            resumed.len(),
+            30,
+            "video did not resume after publisher restart"
+        );
+        assert!(
+            input.latest_frame().unwrap().sequence > sequence_before_restart,
+            "consumer did not advance after the publisher sequence restarted"
+        );
+        input.stop();
     }
 }
